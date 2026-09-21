@@ -11,7 +11,7 @@ v64 is a fork of [v86](https://github.com/copy/v86) and keeps its hardware suppo
 
 Emulated hardware:
 
-- An x86-compatible CPU (Pentium 4 level, including SSE3)
+- An x86-64 CPU (long mode) with SSE2/SSE3
 - An x87 FPU, using Berkeley SoftFloat for precise 80-bit floats
 - A VGA/SVGA card with Bochs VBE extensions
 - An IDE disk controller and a built-in ISO 9660 CD-ROM
@@ -21,9 +21,9 @@ Emulated hardware:
 - virtio filesystem, network and balloon devices
 - A SoundBlaster 16 sound card and a Hayes-compatible modem
 
-v64 boots real operating systems, including Linux (32-bit), FreeDOS/MS-DOS, Windows 1.x through 2000, ReactOS, KolibriOS, Haiku and many hobby systems. The full compatibility list is in [`UPSTREAM_README.md`](./UPSTREAM_README.md).
+v64 targets 64-bit Linux. The 32-bit support inherited from v86 is still in the tree but has not been re-verified here, so many images listed in [`UPSTREAM_README.md`](./UPSTREAM_README.md) may not work.
 
-> **64-bit guests are not supported yet.** That is the purpose of this fork; the plan is tracked in [`ROADMAP.md`](./ROADMAP.md).
+> **Alpine is the only image verified so far.**
 
 ## Requirements
 

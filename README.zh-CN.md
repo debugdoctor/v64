@@ -11,7 +11,7 @@ v64 是 [v86](https://github.com/copy/v86) 的分支，保留了它的硬件支�
 
 模拟的硬件：
 
-- x86 兼容 CPU（Pentium 4 级别，含 SSE3）
+- x86-64 CPU（长模式），支持 SSE2/SSE3
 - x87 FPU，使用 Berkeley SoftFloat 精确模拟 80 位浮点
 - VGA/SVGA 显卡，支持 Bochs VBE 扩展
 - IDE 磁盘控制器，内置 ISO 9660 CD-ROM
@@ -21,9 +21,9 @@ v64 是 [v86](https://github.com/copy/v86) 的分支，保留了它的硬件支�
 - virtio 文件系统 / 网络 / balloon
 - SoundBlaster 16 声卡，Hayes 兼容调制解调器
 
-v64 能真正启动操作系统，包括 Linux（32 位）、FreeDOS/MS-DOS、Windows 1.x 到 2000、ReactOS、KolibriOS、Haiku 以及大量 hobby 系统。完整兼容列表见 [`UPSTREAM_README.md`](./UPSTREAM_README.md)。
+v64 的目标是 64 位 Linux。继承自 v86 的 32 位支持仍在代码里，但尚未在本分支重新验证，[`UPSTREAM_README.md`](./UPSTREAM_README.md) 里列出的镜像未必都能运行。
 
-> **暂不支持 64 位 guest。** 这正是本分支要做的事，计划见 [`ROADMAP.md`](./ROADMAP.md)。
+> **目前仅验证了 Alpine。**
 
 ## 环境要求
 
