@@ -6,13 +6,13 @@ import fs from "fs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 process.on("unhandledRejection", exn => { throw exn; });
 
 var test_executable = new Uint8Array(fs.readFileSync(__dirname + "/test-i386"));
 
-var emulator = new V86({
+var emulator = new v64({
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../../images/linux4.iso" },

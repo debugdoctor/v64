@@ -3,7 +3,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import url from "node:url";
-import { V86 } from "../build/libv86.mjs";
+import { v64 } from "../build/libv64.mjs";
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
@@ -13,7 +13,7 @@ process.stdin.setEncoding("utf8");
 
 console.log("Now booting, please stand by ...");
 
-var emulator = new V86({
+var emulator = new v64({
     bios: { url: __dirname + "/../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../images/linux4.iso" },

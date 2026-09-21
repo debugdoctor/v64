@@ -52,7 +52,7 @@ jobs:
         run: make all
 
       - name: Build fallback
-        run: make build/v86-fallback.wasm
+        run: make build/v64-fallback.wasm
 
       - name: rustfmt check
         run: make rustfmt
@@ -133,9 +133,9 @@ jobs:
             package.json
             LICENSE
             Readme.md
-            v86.d.ts
-            build/libv86*.js
-            build/libv86*.js.map
+            v64.d.ts
+            build/libv64*.js
+            build/libv64*.js.map
             build/v86*.wasm
             build/*.mjs
 
@@ -177,7 +177,7 @@ jobs:
           tag: latest
           commit: master
           body: ${{ github.event.head_commit.message }}
-          artifacts: "build/libv86*.js,build/libv86*.js.map,build/*.mjs,build/v86*.wasm"
+          artifacts: "build/libv64*.js,build/libv64*.js.map,build/*.mjs,build/v86*.wasm"
           prerelease: true
 
       - name: Release to NPM

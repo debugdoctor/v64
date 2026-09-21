@@ -30,7 +30,7 @@ type V86AsyncFileImage =
          *
          * If true, v86 expects the image to be split in files of `fixed_chunk_size`
          * bytes. You can use [split-image.py](https://github.com/copy/v86/blob/master/tools/split-image.py)
-         * to split an image. V86 appends `-<start-byte>-<end-byte>` to the url.
+         * to split an image. v64 appends `-<start-byte>-<end-byte>` to the url.
          */
         use_parts?: boolean;
 
@@ -350,7 +350,7 @@ export interface V86Options {
 
     /**
      * Path to v86 wasm artifact
-     * @default "build/v86.wasm" or "build/v86-debug.wasm" when debug mode enabled
+     * @default "build/v64.wasm" or "build/v64-debug.wasm" when debug mode enabled
      */
     wasm_path?: string;
 
@@ -454,7 +454,7 @@ export interface V86Options {
 
     /**
      * An initial state to load
-     * @see {@link V86.prototype.save_state}
+     * @see {@link v64.prototype.save_state}
      */
     initial_state?: V86Image;
 
@@ -625,7 +625,7 @@ export interface V86Options {
     parallel1?: boolean;
 }
 
-export class V86 {
+export class v64 {
     constructor(options: V86Options);
 
     /**
@@ -670,7 +670,7 @@ export class V86 {
 
     /**
      * Restore the emulator state from the given state, which must be an
-     * ArrayBuffer returned by {@link V86.prototype.save_state}.
+     * ArrayBuffer returned by {@link v64.prototype.save_state}.
      *
      * Note that the state can only be restored correctly if this constructor has
      * been created with the same options as the original instance (e.g., same disk
@@ -897,7 +897,7 @@ export class V86 {
      *
      * @param steps
      * @deprecated
-     * @see {@link V86.prototype.wait_until_vga_screen_contains}
+     * @see {@link v64.prototype.wait_until_vga_screen_contains}
      */
     automatically(steps: Array<{ sleep?: number, vga_text?: string, keyboard_send?: string | number[], call?: Function }>): void;
 

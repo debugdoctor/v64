@@ -4,7 +4,7 @@ import path from "node:path";
 import fs from "node:fs";
 import url from "node:url";
 import child_process from "node:child_process";
-import { V86 } from "../../../build/libv86.mjs";
+import { v64 } from "../../../build/libv64.mjs";
 
 console.log("Don't forget to run `make all` before running this script");
 
@@ -13,7 +13,7 @@ const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 const V86_ROOT = path.join(__dirname, "../../..");
 const OUTPUT_FILE = path.join(V86_ROOT, "images/alpine-state.bin");
 
-var emulator = new V86({
+var emulator = new v64({
     bios: { url: path.join(V86_ROOT, "bios/seabios.bin") },
     vga_bios: { url: path.join(V86_ROOT, "bios/vgabios.bin") },
     autostart: true,

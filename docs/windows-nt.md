@@ -75,10 +75,10 @@ qemu-system-i386 -m 64 -drive file=hdd.img,format=raw -cdrom InstallCD.iso -cpu 
 
 ### 3.2 Running in v86
 
-Due to a problem with CPUID, you need to add `cpuid_level: 2` and `acpi: false` to the V86 constructor (not supported in the UI):
+Due to a problem with CPUID, you need to add `cpuid_level: 2` and `acpi: false` to the v64 constructor (not supported in the UI):
 
 ```js
-var emulator = new V86({
+var emulator = new v64({
     ...
     cpuid_level: 2,
     acpi: false

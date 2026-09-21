@@ -10,7 +10,7 @@ import wabt from "../../build/libwabt.cjs";
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 const libwabt = wabt();
 
@@ -71,7 +71,7 @@ function normalise_wast(wast)
 
 function run_test({ name, executable_file, expect_file, actual_file, actual_wasm, asm_file }, onfinished)
 {
-    const emulator = new V86({
+    const emulator = new v64({
         autostart: false,
         memory_size: 2 * 1024 * 1024,
         log_level: LOG_LEVEL,

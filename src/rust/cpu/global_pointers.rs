@@ -8,6 +8,20 @@ pub const reg8: *mut u8 = 64 as *mut u8;
 pub const reg16: *mut u16 = 64 as *mut u16;
 pub const reg32: *mut i32 = 64 as *mut i32;
 
+pub const reg_high: *mut u32 = 128 as *mut u32; // r0-r7 high 32 bits
+
+pub const reg64_ext: *mut u64 = 160 as *mut u64; // r8-r15
+
+pub const rex: *mut u8 = 224 as *mut u8; // current REX prefix, 0 if none
+
+pub const long_mode: *mut bool = 225 as *mut bool; // EFER.LMA
+
+// long mode instruction pointer; virtual, may be above 4 GiB
+pub const rip: *mut u64 = 232 as *mut u64;
+pub const previous_rip: *mut u64 = 240 as *mut u64;
+
+pub const exception_in_progress: *mut bool = 248 as *mut bool; // avoid recursing during delivery
+
 pub const last_op_size: *mut i32 = 96 as *mut i32;
 pub const flags_changed: *mut i32 = 100 as *mut i32;
 pub const last_op1: *mut i32 = 104 as *mut i32;
@@ -68,6 +82,9 @@ pub const fpu_ip: *mut i32 = 1048 as *mut i32;
 pub const fpu_ip_selector: *mut i32 = 1052 as *mut i32;
 pub const fpu_dp: *mut i32 = 1056 as *mut i32;
 pub const fpu_dp_selector: *mut i32 = 1060 as *mut i32;
+
+pub const cr2: *mut u64 = 1064 as *mut u64; // full CR2; cr[2] is the low 32 bits
+
 pub const tss_size_32: *mut bool = 1128 as *mut bool;
 
 pub const sse_scratch_register: *mut reg128 = 1136 as *mut reg128;
@@ -75,8 +92,13 @@ pub const sse_scratch_register: *mut reg128 = 1136 as *mut reg128;
 pub const fpu_st: *mut F80 = 1152 as *mut F80;
 
 pub fn get_reg32_offset(r: u32) -> u32 {
-    dbg_assert!(r < 8);
-    (unsafe { reg32.offset(r as isize) }) as u32
+    dbg_assert!(r < 16);
+    if r < 8 {
+        (unsafe { reg32.offset(r as isize) }) as u32
+    }
+    else {
+        (unsafe { reg64_ext.offset((r - 8) as isize) }) as u32
+    }
 }
 
 pub fn get_reg_mmx_offset(r: u32) -> u32 {

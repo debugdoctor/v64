@@ -37,13 +37,13 @@ Network setup in the v86 web interface at **https://copy.sh/v86/** is straightfo
 
 ### Embedded v86 setup
 
-JavaScript applications that do not use the v86 web interface (but instead embed V86 into their architecture) setup their network by using the common `config` object that they pass to the V86 constructor. Network settings are members of the object **`config.net_device`**, all settings are optional except for `relay_url`, see [v86.d.ts](../v86.d.ts).
+JavaScript applications that do not use the v86 web interface (but instead embed v64 into their architecture) setup their network by using the common `config` object that they pass to the v64 constructor. Network settings are members of the object **`config.net_device`**, all settings are optional except for `relay_url`, see [v64.d.ts](../v64.d.ts).
 
 #### Example `net_device` settings
 
 * **Example 1:** Provide an emulated NE2000 NIC to the guest OS and use the `wsproxy` backend with a secure wsproxy server at public host `relay.widgetry.org` listening at default TLS port 443:
    ```javascript
-   let example_1 = new V86({
+   let example_1 = new v64({
        net_device: {
            relay_url: "wss://relay.widgetry.org/"
        },
@@ -53,7 +53,7 @@ JavaScript applications that do not use the v86 web interface (but instead embed
 
 * **Example 2:** Provide a VirtIO NIC to the guest OS and use the `fetch` backend with a CORS proxy server at the local machine listening at port number 23456:
    ```javascript
-   let example_2 = new V86({
+   let example_2 = new v64({
        net_device: {
            type: "virtio",
            relay_url: "fetch",
@@ -166,9 +166,9 @@ When restoring a state image, v86 randomises the restored guest's MAC address to
   /sys/bus/pci/drivers/ne2k-pci/unbind` and loading (after the state has been
   loaded) using `modprobe ne2k-pci` or `echo 0000:00:05.0 >
   /sys/bus/pci/drivers/ne2k-pci/bind`
-- Pass `preserve_mac_from_state_image: true` to the V86 constructor. This
+- Pass `preserve_mac_from_state_image: true` to the v64 constructor. This
   causes MAC addresses to be shared between all VMs with the same state image.
-- Pass `mac_address_translation: true` to the V86 constructor. This causes v86
+- Pass `mac_address_translation: true` to the v64 constructor. This causes v86
   to present the old MAC address to the guest OS, but translate it to a
   randomised MAC address in outgoing packets (and vice-versa for incoming
   packets). This mechanism currently only supports the ethernet, ipv4, dhcp and

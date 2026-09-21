@@ -7,7 +7,7 @@ const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 process.on("unhandledRejection", exn => { throw exn; });
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 const config_async_cdrom = {
     bios: { url: __dirname + "/../../bios/seabios.bin" },
@@ -60,7 +60,7 @@ async function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)
 
 async function run_test(name, config, done)
 {
-    const emulator = new V86(config);
+    const emulator = new v64(config);
 
     await sleep(2000);
 

@@ -385,7 +385,7 @@ Generated artifacts are now available for serving from `output`.
 
 Now that we have everything we need to host a server that serves an Arch Linux environment over the network.
 
-Create a checkout of v86 and run `make build/libv86.js`.
+Create a checkout of v86 and run `make build/libv64.js`.
 We can then edit `examples/arch.html`, we have two options:
 
 1. Boot Arch Linux from the 9p filesystem (generated .bin artifacts at `/output/images/arch`):
@@ -431,7 +431,7 @@ wget https://raw.githubusercontent.com/smgoller/rangehttpserver/master/RangeHTTP
 python2 RangeHTTPServer.py
 ```
 
-Now that the webserver is running, point your browser to `http://localhost:8000/examples/arch.html`. Wait for the Linux to boot. When the system is up, click 'Save state to file'. Your browser will download a `v86state.bin` file. Copy that file to `/your/v86/dir/images`. You can then edit `examples/arch.html` again and add a 'state' key to the `V86` array.
+Now that the webserver is running, point your browser to `http://localhost:8000/examples/arch.html`. Wait for the Linux to boot. When the system is up, click 'Save state to file'. Your browser will download a `v86state.bin` file. Copy that file to `/your/v86/dir/images`. You can then edit `examples/arch.html` again and add a 'state' key to the `v64` array.
 
 ```sh
 initial_state: {
@@ -443,7 +443,7 @@ If you refresh `http://localhost:8000/examples/arch.html` you will see that the 
 
 ### Networking
 
-The emulator can emulate a network card. For more information [look at the networking documentation](https://github.com/copy/v86/blob/master/docs/networking.md). To set up networking in the VM, add the following item to the `V86` array in the `examples/arch.html` file:
+The emulator can emulate a network card. For more information [look at the networking documentation](https://github.com/copy/v86/blob/master/docs/networking.md). To set up networking in the VM, add the following item to the `v64` array in the `examples/arch.html` file:
 ```sh
 network_relay_url: "ws://localhost:8080/",
 ```

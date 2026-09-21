@@ -8,7 +8,7 @@ process.on("unhandledRejection", exn => { throw exn; });
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 const testfsjson = JSON.parse(fs.readFileSync(__dirname + "/testfs.json", "utf-8"));
 const SHOW_LOGS = false;
@@ -1118,7 +1118,7 @@ function test_fail()
     }
 }
 
-const emulator = new V86({
+const emulator = new v64({
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     cdrom: { url: __dirname + "/../../images/linux4.iso" },

@@ -1,14 +1,14 @@
 <!doctype html>
 <title>Serial example</title>
 
-<script src="../build/libv86.js"></script>
+<script src="../build/libv64.js"></script>
 <script>
 "use strict";
 
 window.onload = function()
 {
-    var emulator = new V86({
-        wasm_path: "../build/v86.wasm",
+    var emulator = new v64({
+        wasm_path: "../build/v64.wasm",
 
         // Uncomment to see what's going on
         //screen_container: document.getElementById("screen_container"),

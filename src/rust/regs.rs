@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 pub const ES: u32 = 0;
 pub const CS: u32 = 1;
 pub const SS: u32 = 2;
@@ -31,6 +33,18 @@ pub const AH: u32 = 4;
 pub const CH: u32 = 5;
 pub const DH: u32 = 6;
 pub const BH: u32 = 7;
+
+// x86-64 registers r8-r15. Indexed like the legacy registers and selected through
+// the REX prefix (see src/rust/prefix.rs). Not all are referenced yet, as the
+// 64-bit instruction tables are still being ported.
+pub const R8: u32 = 8;
+pub const R9: u32 = 9;
+pub const R10: u32 = 10;
+pub const R11: u32 = 11;
+pub const R12: u32 = 12;
+pub const R13: u32 = 13;
+pub const R14: u32 = 14;
+pub const R15: u32 = 15;
 
 pub const CR0_EM: u32 = 1 << 2;
 pub const CR0_TS: u32 = 1 << 3;

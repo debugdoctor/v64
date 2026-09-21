@@ -8,7 +8,7 @@ import os from "node:os";
 import cluster from "node:cluster";
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
@@ -304,7 +304,7 @@ else {
     let recorded_exceptions = [];
     let test_timeout;
 
-    let emulator = new V86({
+    let emulator = new v64({
         autostart: false,
         memory_size: 2 * 1024 * 1024,
         disable_jit: +process.env.DISABLE_JIT,

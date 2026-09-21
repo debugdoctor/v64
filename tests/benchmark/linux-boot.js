@@ -7,7 +7,7 @@ import url from "node:url";
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 const BENCH_COLLECT_STATS = +process.env.BENCH_COLLECT_STATS;
-const { V86 } = await import(BENCH_COLLECT_STATS ? "../../src/main.js" : "../../build/libv86.mjs");
+const { v64 } = await import(BENCH_COLLECT_STATS ? "../../src/main.js" : "../../build/libv64.mjs");
 
 const V86_ROOT = path.join(__dirname, "../..");
 
@@ -15,7 +15,7 @@ const LOG_SERIAL = true;
 
 if(true)
 {
-    var emulator = new V86({
+    var emulator = new v64({
         bios: { url: __dirname + "/../../bios/seabios.bin" },
         vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
         cdrom: { url: __dirname + "/../../images/linux3.iso" },
@@ -27,7 +27,7 @@ if(true)
 }
 else
 {
-    var emulator = new V86({
+    var emulator = new v64({
         bios: { url: path.join(V86_ROOT, "/bios/seabios.bin") },
         vga_bios: { url: path.join(V86_ROOT, "/bios/vgabios.bin") },
         autostart: true,

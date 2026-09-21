@@ -1,5 +1,5 @@
 {
-  "name": "v86",
+  "name": "v64",
   "version": "0.5",
   "license": "BSD-2-Clause",
   "description": "x86 PC emulator and x86-to-wasm JIT, running in the browser",
@@ -7,14 +7,14 @@
   "files": [
     "Readme.md",
     "LICENSE",
-    "v86.d.ts",
-    "build/libv86*.js",
-    "build/libv86*.js.map",
+    "v64.d.ts",
+    "build/libv64*.js",
+    "build/libv64*.js.map",
     "build/*.mjs",
-    "build/v86*.wasm"
+    "build/v64*.wasm"
   ],
-  "main": "build/libv86.mjs",
-  "types": "v86.d.ts",
+  "main": "build/libv64.mjs",
+  "types": "v64.d.ts",
   "repository": "github:copy/v86",
   "type": "module"
 }

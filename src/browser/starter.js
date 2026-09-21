@@ -27,7 +27,7 @@ import { FS } from "../../lib/filesystem.js";
 /**
  * Constructor for emulator instances.
  *
- * For API usage, see v86.d.ts in the root of this repository.
+ * For API usage, see v64.d.ts in the root of this repository.
  *
  * @param {{
       disable_mouse: (boolean|undefined),
@@ -39,7 +39,7 @@ import { FS } from "../../lib/filesystem.js";
     }} options
  * @constructor
  */
-export function V86(options)
+export function v64(options)
 {
     if(typeof options.log_level === "number")
     {
@@ -62,6 +62,8 @@ export function V86(options)
 
     const wasm_table = new WebAssembly.Table({ element: "anyfunc", initial: WASM_TABLE_SIZE + WASM_TABLE_OFFSET });
 
+    // Compiled long-mode JIT blocks, keyed by guest RIP
+    const jit64_functions = new Map();
     const wasm_shared_funcs = {
         "cpu_exception_hook": n => this.cpu_exception_hook(n),
         "run_hardware_timers": function(a, t) { return cpu.run_hardware_timers(a, t); },
@@ -107,6 +109,46 @@ export function V86(options)
         "jit_clear_all_funcs": () => cpu.jit_clear_all_funcs(),
 
         "__indirect_function_table": wasm_table,
+
+        // wasm64 has no table64 support yet, so indirect calls go through the
+        // 32-bit JavaScript table
+        "call_indirect1": (f, x) => wasm_table.get(f)(x),
+
+        // jit64: instantiate a compiled block and cache it by guest RIP
+        "jit64_compile": (rip, ptr, len) => {
+            const bytes = new Uint8Array(wasm_memory.buffer, Number(ptr), Number(len)).slice();
+            const module = new WebAssembly.Module(bytes);
+            const instance = new WebAssembly.Instance(module, { e: {
+                m: wasm_memory,
+                jit64_translate: (address, for_writing) =>
+                    cpu.wm.exports.jit64_translate(address, for_writing),
+                jit64_mem_read: (address, width) =>
+                    cpu.wm.exports.jit64_mem_read(address, width),
+                jit64_mem_probe: (address, access) =>
+                    cpu.wm.exports.jit64_mem_probe(address, access),
+                jit64_mem_write: (address, value, width) =>
+                    cpu.wm.exports.jit64_mem_write(address, value, width),
+                jit64_memory_faulted: () => cpu.wm.exports.jit64_memory_faulted(),
+                jit64_imul: (lhs, rhs, width) =>
+                    cpu.wm.exports.jit64_imul(lhs, rhs, width),
+                jit64_bswap: (value, width) =>
+                    cpu.wm.exports.jit64_bswap(value, width),
+                jit64_shift: (value, count, encoded) =>
+                    cpu.wm.exports.jit64_shift(value, count, encoded),
+                jit64_adc_sbb: (dst, src, encoded) =>
+                    cpu.wm.exports.jit64_adc_sbb(dst, src, encoded),
+            } });
+            jit64_functions.set(rip, instance.exports.f);
+        },
+        "jit64_run": rip => {
+            const f = jit64_functions.get(rip);
+            if(f)
+            {
+                f(0);
+                cpu.wm.exports.jit64_finish_fault();
+            }
+        },
+        "jit64_clear": () => jit64_functions.clear(),
     };
 
     let wasm_fn = options.wasm_fn;
@@ -118,13 +160,13 @@ export function V86(options)
             /* global __dirname */
 
             return new Promise(resolve => {
-                let v86_bin = DEBUG ? "v86-debug.wasm" : "v86.wasm";
-                let v86_bin_fallback = "v86-fallback.wasm";
+                let v86_bin = DEBUG ? "v64-debug.wasm" : "v64.wasm";
+                let v86_bin_fallback = "v64-fallback.wasm";
 
                 if(options.wasm_path)
                 {
                     v86_bin = options.wasm_path;
-                    v86_bin_fallback = v86_bin.replace("v86.wasm", "v86-fallback.wasm");
+                    v86_bin_fallback = v86_bin.replace("v64.wasm", "v64-fallback.wasm");
                 }
                 else if(typeof window === "undefined" && typeof __dirname === "string")
                 {
@@ -179,6 +221,10 @@ export function V86(options)
             wasm_memory = exports.memory;
             exports["rust_init"]();
 
+            // 64-bit pointers (WebAssembly memory64) require BigInt at the
+            // JS/wasm boundary
+            this.wasm64 = exports["ptr_width"]() === 8;
+
             const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
             cpu = emulator.cpu;
 
@@ -189,7 +235,7 @@ export function V86(options)
     this.zstd_worker_request_id = 0;
 }
 
-V86.prototype.continue_init = async function(emulator, options)
+v64.prototype.continue_init = async function(emulator, options)
 {
     this.bus.register("emulator-stopped", function()
     {
@@ -674,20 +720,24 @@ V86.prototype.continue_init = async function(emulator, options)
  * @param {Uint8Array} src
  * @return {ArrayBuffer}
  */
-V86.prototype.zstd_decompress = function(decompressed_size, src)
+v64.prototype.zstd_decompress = function(decompressed_size, src)
 {
     const cpu = this.v86.cpu;
 
+    // On wasm64, pointers cross the JS/wasm boundary as BigInt
+    const to_ptr = value => this.wasm64 ? BigInt(value) : value;
+    const from_ptr = value => this.wasm64 ? Number(value) : value;
+
     dbg_assert(!this.zstd_context);
-    this.zstd_context = cpu.zstd_create_ctx(src.length);
+    this.zstd_context = from_ptr(cpu.zstd_create_ctx(src.length));
 
-    new Uint8Array(cpu.wasm_memory.buffer).set(src, cpu.zstd_get_src_ptr(this.zstd_context));
+    new Uint8Array(cpu.wasm_memory.buffer).set(src, from_ptr(cpu.zstd_get_src_ptr(to_ptr(this.zstd_context))));
 
-    const ptr = cpu.zstd_read(this.zstd_context, decompressed_size);
+    const ptr = from_ptr(cpu.zstd_read(to_ptr(this.zstd_context), decompressed_size));
     const result = cpu.wasm_memory.buffer.slice(ptr, ptr + decompressed_size);
-    cpu.zstd_read_free(ptr, decompressed_size);
+    cpu.zstd_read_free(to_ptr(ptr), decompressed_size);
 
-    cpu.zstd_free_ctx(this.zstd_context);
+    cpu.zstd_free_ctx(to_ptr(this.zstd_context));
     this.zstd_context = null;
 
     return result;
@@ -698,7 +748,7 @@ V86.prototype.zstd_decompress = function(decompressed_size, src)
  * @param {Uint8Array} src
  * @return {Promise<ArrayBuffer>}
  */
-V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
+v64.prototype.zstd_decompress_worker = async function(decompressed_size, src)
 {
     if(!this.zstd_worker)
     {
@@ -735,14 +785,18 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
                 const { src, decompressed_size, id } = e.data;
                 const exports = wasm.exports;
 
-                const zstd_context = exports["zstd_create_ctx"](src.length);
-                new Uint8Array(exports.memory.buffer).set(src, exports["zstd_get_src_ptr"](zstd_context));
+                const wasm64 = exports["ptr_width"]() === 8;
+                const to_ptr = value => wasm64 ? BigInt(value) : value;
+                const from_ptr = value => wasm64 ? Number(value) : value;
 
-                const ptr = exports["zstd_read"](zstd_context, decompressed_size);
+                const zstd_context = from_ptr(exports["zstd_create_ctx"](src.length));
+                new Uint8Array(exports.memory.buffer).set(src, from_ptr(exports["zstd_get_src_ptr"](to_ptr(zstd_context))));
+
+                const ptr = from_ptr(exports["zstd_read"](to_ptr(zstd_context), decompressed_size));
                 const result = exports.memory.buffer.slice(ptr, ptr + decompressed_size);
-                exports["zstd_read_free"](ptr, decompressed_size);
+                exports["zstd_read_free"](to_ptr(ptr), decompressed_size);
 
-                exports["zstd_free_ctx"](zstd_context);
+                exports["zstd_free_ctx"](to_ptr(zstd_context));
 
                 postMessage({ result, id }, [result]);
             };
@@ -770,7 +824,7 @@ V86.prototype.zstd_decompress_worker = async function(decompressed_size, src)
     });
 };
 
-V86.prototype.get_bzimage_initrd_from_filesystem = function(filesystem)
+v64.prototype.get_bzimage_initrd_from_filesystem = function(filesystem)
 {
     const root = (filesystem.read_dir("/") || []).map(x => "/" + x);
     const boot = (filesystem.read_dir("/boot/") || []).map(x => "/boot/" + x);
@@ -808,7 +862,7 @@ V86.prototype.get_bzimage_initrd_from_filesystem = function(filesystem)
 /**
  * Start emulation. Do nothing if emulator is running already. Can be asynchronous.
  */
-V86.prototype.run = async function()
+v64.prototype.run = async function()
 {
     this.v86.run();
 };
@@ -816,7 +870,7 @@ V86.prototype.run = async function()
 /**
  * Stop emulation. Do nothing if emulator is not running. Can be asynchronous.
  */
-V86.prototype.stop = async function()
+v64.prototype.stop = async function()
 {
     if(!this.cpu_is_running)
     {
@@ -836,7 +890,7 @@ V86.prototype.stop = async function()
 /**
  * Free resources associated with this instance
  */
-V86.prototype.destroy = async function()
+v64.prototype.destroy = async function()
 {
     await this.stop();
 
@@ -854,7 +908,7 @@ V86.prototype.destroy = async function()
 /**
  * Restart (force a reboot).
  */
-V86.prototype.restart = function()
+v64.prototype.restart = function()
 {
     this.v86.restart();
 };
@@ -867,7 +921,7 @@ V86.prototype.restart = function()
  * @param {string} event Name of the event.
  * @param {function(?)} listener The callback function.
  */
-V86.prototype.add_listener = function(event, listener)
+v64.prototype.add_listener = function(event, listener)
 {
     this.bus.register(event, listener, this);
 };
@@ -878,7 +932,7 @@ V86.prototype.add_listener = function(event, listener)
  * @param {string} event
  * @param {function(*)} listener
  */
-V86.prototype.remove_listener = function(event, listener)
+v64.prototype.remove_listener = function(event, listener)
 {
     this.bus.unregister(event, listener);
 };
@@ -897,7 +951,7 @@ V86.prototype.remove_listener = function(event, listener)
  *
  * @param {ArrayBuffer} state
  */
-V86.prototype.restore_state = async function(state)
+v64.prototype.restore_state = async function(state)
 {
     dbg_assert(arguments.length === 1);
     this.v86.restore_state(state);
@@ -908,7 +962,7 @@ V86.prototype.restore_state = async function(state)
  *
  * @return {Promise<ArrayBuffer>}
  */
-V86.prototype.save_state = async function()
+v64.prototype.save_state = async function()
 {
     dbg_assert(arguments.length === 0);
     return this.v86.save_state();
@@ -918,7 +972,7 @@ V86.prototype.save_state = async function()
  * @return {number}
  * @ignore
  */
-V86.prototype.get_instruction_counter = function()
+v64.prototype.get_instruction_counter = function()
 {
     if(this.v86)
     {
@@ -934,7 +988,7 @@ V86.prototype.get_instruction_counter = function()
 /**
  * @return {boolean}
  */
-V86.prototype.is_running = function()
+v64.prototype.is_running = function()
 {
     return this.cpu_is_running;
 };
@@ -943,7 +997,7 @@ V86.prototype.is_running = function()
  * Set the image inserted in the floppy drive. Can be changed at runtime, as
  * when physically changing the floppy disk.
  */
-V86.prototype.set_fda = async function(file)
+v64.prototype.set_fda = async function(file)
 {
     const fda = this.v86.cpu.devices.fdc.drives[0];
     if(file.url && !file.async)
@@ -972,7 +1026,7 @@ V86.prototype.set_fda = async function(file)
 /**
  * Set the image inserted in the second floppy drive, also at runtime.
  */
-V86.prototype.set_fdb = async function(file)
+v64.prototype.set_fdb = async function(file)
 {
     const fdb = this.v86.cpu.devices.fdc.drives[1];
     if(file.url && !file.async)
@@ -1001,7 +1055,7 @@ V86.prototype.set_fdb = async function(file)
 /**
  * Eject floppy drive fda.
  */
-V86.prototype.eject_fda = function()
+v64.prototype.eject_fda = function()
 {
     this.v86.cpu.devices.fdc.drives[0].eject_disk();
 };
@@ -1009,7 +1063,7 @@ V86.prototype.eject_fda = function()
 /**
  * Eject second floppy drive fdb.
  */
-V86.prototype.eject_fdb = function()
+v64.prototype.eject_fdb = function()
 {
     this.v86.cpu.devices.fdc.drives[1].eject_disk();
 };
@@ -1018,7 +1072,7 @@ V86.prototype.eject_fdb = function()
  * Return buffer object of floppy disk of drive fda or null if the drive is empty.
  * @return {Uint8Array|null}
  */
-V86.prototype.get_disk_fda = function()
+v64.prototype.get_disk_fda = function()
 {
     return this.v86.cpu.devices.fdc.drives[0].get_buffer();
 };
@@ -1027,7 +1081,7 @@ V86.prototype.get_disk_fda = function()
  * Return buffer object of second floppy disk of drive fdb or null if the drive is empty.
  * @return {Uint8Array|null}
  */
-V86.prototype.get_disk_fdb = function()
+v64.prototype.get_disk_fdb = function()
 {
     return this.v86.cpu.devices.fdc.drives[1].get_buffer();
 };
@@ -1036,7 +1090,7 @@ V86.prototype.get_disk_fdb = function()
  * Set the image inserted in the CD-ROM drive. Can be changed at runtime, as
  * when physically changing the CD-ROM.
  */
-V86.prototype.set_cdrom = async function(file)
+v64.prototype.set_cdrom = async function(file)
 {
     if(file.url && !file.async)
     {
@@ -1061,7 +1115,7 @@ V86.prototype.set_cdrom = async function(file)
 /**
  * Eject the CD-ROM.
  */
-V86.prototype.eject_cdrom = function()
+v64.prototype.eject_cdrom = function()
 {
     this.v86.cpu.devices.cdrom.eject();
 };
@@ -1074,7 +1128,7 @@ V86.prototype.eject_cdrom = function()
  * @param {Array.<number>} codes
  * @param {number=} delay
  */
-V86.prototype.keyboard_send_scancodes = async function(codes, delay)
+v64.prototype.keyboard_send_scancodes = async function(codes, delay)
 {
     for(var i = 0; i < codes.length; i++)
     {
@@ -1088,7 +1142,7 @@ V86.prototype.keyboard_send_scancodes = async function(codes, delay)
  * @param {Array.<number>} codes
  * @param {number=} delay
  */
-V86.prototype.keyboard_send_keys = async function(codes, delay)
+v64.prototype.keyboard_send_keys = async function(codes, delay)
 {
     for(var i = 0; i < codes.length; i++)
     {
@@ -1102,7 +1156,7 @@ V86.prototype.keyboard_send_keys = async function(codes, delay)
  * @param {string} string
  * @param {number=} delay
  */
-V86.prototype.keyboard_send_text = async function(string, delay)
+v64.prototype.keyboard_send_text = async function(string, delay)
 {
     for(var i = 0; i < string.length; i++)
     {
@@ -1114,7 +1168,7 @@ V86.prototype.keyboard_send_text = async function(string, delay)
 /**
  * Download a screenshot (returns an <img> element, only works in browsers)
  */
-V86.prototype.screen_make_screenshot = function()
+v64.prototype.screen_make_screenshot = function()
 {
     if(this.screen_adapter)
     {
@@ -1129,7 +1183,7 @@ V86.prototype.screen_make_screenshot = function()
  * @param {number} sx
  * @param {number} sy
  */
-V86.prototype.screen_set_scale = function(sx, sy)
+v64.prototype.screen_set_scale = function(sx, sy)
 {
     if(this.screen_adapter)
     {
@@ -1140,7 +1194,7 @@ V86.prototype.screen_set_scale = function(sx, sy)
 /**
  * Go fullscreen (only browsers)
  */
-V86.prototype.screen_go_fullscreen = function()
+v64.prototype.screen_go_fullscreen = function()
 {
     if(!this.screen_adapter)
     {
@@ -1181,7 +1235,7 @@ V86.prototype.screen_go_fullscreen = function()
  * Lock the mouse cursor: It becomes invisble and is not moved out of the
  * browser window.
  */
-V86.prototype.lock_mouse = async function()
+v64.prototype.lock_mouse = async function()
 {
     const elem = document.body;
 
@@ -1203,7 +1257,7 @@ V86.prototype.lock_mouse = async function()
  *
  * @param {boolean} enabled
  */
-V86.prototype.mouse_set_enabled = function(enabled)
+v64.prototype.mouse_set_enabled = function(enabled)
 {
     if(this.mouse_adapter)
     {
@@ -1211,28 +1265,28 @@ V86.prototype.mouse_set_enabled = function(enabled)
         this.mouse_adapter.update_cursor();
     }
 };
-V86.prototype.mouse_set_status = V86.prototype.mouse_set_enabled;
+v64.prototype.mouse_set_status = v64.prototype.mouse_set_enabled;
 
 /**
  * Enable or disable sending keyboard events to the emulated PS2 controller.
  *
  * @param {boolean} enabled
  */
-V86.prototype.keyboard_set_enabled = function(enabled)
+v64.prototype.keyboard_set_enabled = function(enabled)
 {
     if(this.keyboard_adapter)
     {
         this.keyboard_adapter.emu_enabled = enabled;
     }
 };
-V86.prototype.keyboard_set_status = V86.prototype.keyboard_set_enabled;
+v64.prototype.keyboard_set_status = v64.prototype.keyboard_set_enabled;
 
 /**
  * Send a string to the first emulated serial terminal.
  *
  * @param {string} data
  */
-V86.prototype.serial0_send = function(data)
+v64.prototype.serial0_send = function(data)
 {
     for(var i = 0; i < data.length; i++)
     {
@@ -1245,7 +1299,7 @@ V86.prototype.serial0_send = function(data)
  *
  * @param {Uint8Array} data
  */
-V86.prototype.serial_send_bytes = function(serial, data)
+v64.prototype.serial_send_bytes = function(serial, data)
 {
     for(var i = 0; i < data.length; i++)
     {
@@ -1259,7 +1313,7 @@ V86.prototype.serial_send_bytes = function(serial, data)
  * @param {number} serial
  * @param {boolean} status
  */
-V86.prototype.serial_set_carrier_detect = function(serial, status)
+v64.prototype.serial_set_carrier_detect = function(serial, status)
 {
     this.bus.send("serial" + serial + "-carrier-detect-input", status);
 };
@@ -1270,7 +1324,7 @@ V86.prototype.serial_set_carrier_detect = function(serial, status)
  * @param {number} serial
  * @param {boolean} status
  */
-V86.prototype.serial_set_ring_indicator = function(serial, status)
+v64.prototype.serial_set_ring_indicator = function(serial, status)
 {
     this.bus.send("serial" + serial + "-ring-indicator-input", status);
 };
@@ -1281,7 +1335,7 @@ V86.prototype.serial_set_ring_indicator = function(serial, status)
  * @param {number} serial
  * @param {boolean} status
  */
-V86.prototype.serial_set_data_set_ready = function(serial, status)
+v64.prototype.serial_set_data_set_ready = function(serial, status)
 {
     this.bus.send("serial" + serial + "-data-set-ready-input", status);
 };
@@ -1292,7 +1346,7 @@ V86.prototype.serial_set_data_set_ready = function(serial, status)
  * @param {number} serial
  * @param {boolean} status
  */
-V86.prototype.serial_set_clear_to_send = function(serial, status)
+v64.prototype.serial_set_clear_to_send = function(serial, status)
 {
     this.bus.send("serial" + serial + "-clear-to-send-input", status);
 };
@@ -1304,7 +1358,7 @@ V86.prototype.serial_set_clear_to_send = function(serial, status)
  * @param {string} file
  * @param {Uint8Array} data
  */
-V86.prototype.create_file = async function(file, data)
+v64.prototype.create_file = async function(file, data)
 {
     dbg_assert(arguments.length === 2);
     var fs = this.fs9p;
@@ -1337,7 +1391,7 @@ V86.prototype.create_file = async function(file, data)
  *
  * @param {string} file
  */
-V86.prototype.read_file = async function(file)
+v64.prototype.read_file = async function(file)
 {
     dbg_assert(arguments.length === 1);
     var fs = this.fs9p;
@@ -1363,7 +1417,7 @@ V86.prototype.read_file = async function(file)
  * @deprecated
  * Use wait_until_vga_screen_contains etc.
  */
-V86.prototype.automatically = function(steps)
+v64.prototype.automatically = function(steps)
 {
     const run = (steps) =>
     {
@@ -1450,7 +1504,7 @@ V86.prototype.automatically = function(steps)
  * @param {string|RegExp|Array<string|RegExp>} expected
  * @param {{timeout_msec:(number|undefined)}=} options
  */
-V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
+v64.prototype.wait_until_vga_screen_contains = async function(expected, options)
 {
     const match_multi = Array.isArray(expected);
     const timeout_msec = options?.timeout_msec || 0;
@@ -1530,7 +1584,7 @@ V86.prototype.wait_until_vga_screen_contains = async function(expected, options)
  * @param {number} length
  * @returns
  */
-V86.prototype.read_memory = function(offset, length)
+v64.prototype.read_memory = function(offset, length)
 {
     return this.v86.cpu.read_blob(offset, length);
 };
@@ -1541,7 +1595,7 @@ V86.prototype.read_memory = function(offset, length)
  * @param {Array.<number>|Uint8Array} blob
  * @param {number} offset
  */
-V86.prototype.write_memory = function(blob, offset)
+v64.prototype.write_memory = function(blob, offset)
 {
     this.v86.cpu.write_blob(blob, offset);
 };
@@ -1550,7 +1604,7 @@ V86.prototype.write_memory = function(blob, offset)
  * @param {HTMLElement} element
  * @param {Function} [xterm_lib]
  */
-V86.prototype.set_serial_container_xtermjs = function(element, xterm_lib = window["Terminal"])
+v64.prototype.set_serial_container_xtermjs = function(element, xterm_lib = window["Terminal"])
 {
     this.serial_adapter && this.serial_adapter.destroy && this.serial_adapter.destroy();
     this.serial_adapter = new SerialAdapterXtermJS(element, this.bus, xterm_lib);
@@ -1561,14 +1615,14 @@ V86.prototype.set_serial_container_xtermjs = function(element, xterm_lib = windo
  * @param {HTMLElement} element
  * @param {Function} [xterm_lib]
  */
-V86.prototype.set_virtio_console_container_xtermjs = function(element, xterm_lib = window["Terminal"])
+v64.prototype.set_virtio_console_container_xtermjs = function(element, xterm_lib = window["Terminal"])
 {
     this.virtio_console_adapter && this.virtio_console_adapter.destroy && this.virtio_console_adapter.destroy();
     this.virtio_console_adapter = new VirtioConsoleAdapterXtermJS(element, this.bus, xterm_lib);
     this.virtio_console_adapter.show();
 };
 
-V86.prototype.get_instruction_stats = function()
+v64.prototype.get_instruction_stats = function()
 {
     return print_stats.stats_to_string(this.v86.cpu);
 };
@@ -1601,14 +1655,14 @@ FileNotFoundError.prototype = Error.prototype;
 
 if(typeof module !== "undefined" && typeof module.exports !== "undefined")
 {
-    module.exports["V86"] = V86;
+    module.exports["v64"] = v64;
 }
 else if(typeof window !== "undefined")
 {
-    window["V86"] = V86;
+    window["v64"] = v64;
 }
 else if(typeof importScripts === "function")
 {
     // web worker
-    self["V86"] = V86;
+    self["v64"] = v64;
 }

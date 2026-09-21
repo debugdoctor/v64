@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>debian example</title>
-  <script src="../build/libv86.js"></script>
+  <script src="../build/libv64.js"></script>
 </head>
 
 <body>
@@ -21,8 +21,8 @@ window.onload = function () {
         screen.focus();
     });
 
-    const emulator = new V86({
-        wasm_path: "../build/v86.wasm",
+    const emulator = new v64({
+        wasm_path: "../build/v64.wasm",
         memory_size: 1636 * 1024 * 1024,
         vga_memory_size: 8 * 1024 * 1024,
         screen_container: screen,

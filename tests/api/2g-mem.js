@@ -6,7 +6,7 @@ import fs from "node:fs";
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 process.on("unhandledRejection", exn => { throw exn; });
 
@@ -22,7 +22,7 @@ const config = {
     disable_jit: +process.env.DISABLE_JIT,
 };
 
-const emulator = new V86(config);
+const emulator = new v64(config);
 
 emulator.bus.register("emulator-started", function()
 {

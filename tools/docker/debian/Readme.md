@@ -13,7 +13,7 @@ For using 9p filesystem:
 
 For setting up website:
 
-1. Either build v86 or downloading the release and place `v86.wasm` and `libv86.js` in `build` directory
+1. Either build v86 or downloading the release and place `v64.wasm` and `libv64.js` in `build` directory
 2. Launch a server at the root of this repository, e.g. `python3 -m http.server 8000`
 3. Open `http://localhost:8000/examples/debian-raw-disk.html` (raw disk) or `http://localhost:8000/examples/debian-9p.html` (9p filesystem)
 

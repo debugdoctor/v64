@@ -32,7 +32,7 @@ const options = {
     },
     // ...
 };
-const emulator = new V86(options);
+const emulator = new v64(options);
 ```
 
 The `modem` field defines an Object with the supported Modem settings:
@@ -47,7 +47,7 @@ The `modem` field defines an Object with the supported Modem settings:
 Install Modem on UART1 and map dial address `123` to WebSocket address `wss://example.com:5678`:
 
 ```javascript
-const emulator = new V86({
+const emulator = new v64({
    // ...
    modem: {
        uart: 1,

@@ -1,4 +1,4 @@
-import { V86 } from "./starter.js";
+import { v64 } from "./starter.js";
 import { LOG_NAMES } from "../const.js";
 import { SyncBuffer, SyncFileBuffer } from "../buffer.js";
 import { h, pad0, pads, hex_dump, dump_file, download, round_up_to_next_power_of_2 } from "../lib.js";
@@ -1711,7 +1711,7 @@ function onload()
     {
         const link = document.createElement("link");
         link.rel = "prefetch";
-        link.href = "build/v86.wasm" + query_append();
+        link.href = "build/v64.wasm" + query_append();
         document.head.appendChild(link);
     }
 
@@ -2393,8 +2393,8 @@ function start_emulation(profile, query_args)
         push_state(new_query_args);
     }
 
-    const emulator = new V86({
-        wasm_path: "build/" + (DEBUG ? "v86-debug.wasm" : "v86.wasm") + query_append(),
+    const emulator = new v64({
+        wasm_path: "build/" + (DEBUG ? "v64-debug.wasm" : "v64.wasm") + query_append(),
         screen: {
             container: $("screen_container"),
             use_graphical_text: false,
@@ -2518,7 +2518,7 @@ function start_emulation(profile, query_args)
 
 /**
  * @param {Object} settings
- * @param {V86} emulator
+ * @param {v64} emulator
  */
 function init_ui(profile, settings, emulator)
 {

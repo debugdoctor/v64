@@ -78,7 +78,7 @@ docker run -it -p 8000:8000 v64:alpine
 JavaScript API 与 v86 一致：
 
 ```javascript
-var emulator = new V86({
+var emulator = new v64({
     screen_container: document.getElementById("screen_container"),
     bios: { url: "./bios/seabios.bin" },
     vga_bios: { url: "./bios/vgabios.bin" },
@@ -87,7 +87,7 @@ var emulator = new V86({
 });
 ```
 
-更多示例见 [`examples/`](./examples)（basic、串口终端、save/restore、网络等）。类型定义见 [`v86.d.ts`](./v86.d.ts)。Bundler（Vite/React/Next/Webpack）场景可用官方 npm 包 `v86`。
+更多示例见 [`examples/`](./examples)（basic、串口终端、save/restore、网络等）。类型定义见 [`v64.d.ts`](./v64.d.ts)。Bundler（Vite/React/Next/Webpack）场景可用官方 npm 包 `v86`。
 
 ## 测试
 

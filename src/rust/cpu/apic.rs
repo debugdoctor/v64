@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 const APIC_LOG_VERBOSE: bool = false;
 
 // should probably be kept in sync with TSC_RATE in cpu.rs
-const APIC_TIMER_FREQ: f64 = 1.0 * 1000.0 * 1000.0;
+const APIC_TIMER_FREQ: f64 = 1_500_000.0;
 
 const APIC_TIMER_MODE_MASK: u32 = 3 << 17;
 

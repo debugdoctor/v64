@@ -78,7 +78,7 @@ Open the repository in a Dev Container–capable IDE (VS Code, Codespaces, Intel
 The JavaScript API is the same as v86:
 
 ```javascript
-var emulator = new V86({
+var emulator = new v64({
     screen_container: document.getElementById("screen_container"),
     bios: { url: "./bios/seabios.bin" },
     vga_bios: { url: "./bios/vgabios.bin" },
@@ -87,7 +87,7 @@ var emulator = new V86({
 });
 ```
 
-More examples are in [`examples/`](./examples) (basic, serial terminal, save/restore, networking, …). TypeScript definitions are in [`v86.d.ts`](./v86.d.ts). For bundler setups (Vite/React/Next/Webpack) there is an official npm package, `v86`.
+More examples are in [`examples/`](./examples) (basic, serial terminal, save/restore, networking, …). TypeScript definitions are in [`v64.d.ts`](./v64.d.ts). For bundler setups (Vite/React/Next/Webpack) there is an official npm package, `v86`.
 
 ## Tests
 

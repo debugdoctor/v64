@@ -7,7 +7,7 @@ const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 process.on("unhandledRejection", exn => { throw exn; });
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 const SHOW_LOGS = false;
 
@@ -109,7 +109,7 @@ const tests =
 ];
 
 
-const emulator = new V86({
+const emulator = new v64({
     bios: { url: __dirname + "/../../bios/seabios.bin" },
     vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
     bzimage: { url: __dirname + "/../../images/buildroot-bzimage68.bin" },

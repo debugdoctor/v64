@@ -1,9 +1,9 @@
-importScripts("../build/libv86.js");
+importScripts("../build/libv64.js");
 
-/* global V86 */
+/* global v64 */
 
-var emulator = new V86({
-    wasm_path: "../build/v86.wasm",
+var emulator = new v64({
+    wasm_path: "../build/v64.wasm",
     memory_size: 32 * 1024 * 1024,
     vga_memory_size: 2 * 1024 * 1024,
     bios: {

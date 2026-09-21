@@ -55,7 +55,7 @@ enum Rep {
 }
 
 // We implement all string instructions here and rely on the inliner on doing its job of optimising
-// away anything known at compile time (check with `wasm-dis build/v86.wasm`)
+// away anything known at compile time (check with `wasm-dis build/v64.wasm`)
 #[inline(always)]
 unsafe fn string_instruction(
     is_asize_32: bool,

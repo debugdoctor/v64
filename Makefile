@@ -19,10 +19,10 @@ endif
 
 WASM_OPT ?= false
 
-default: build/v86-debug.wasm
-all: build/v86_all.js build/libv86.js build/libv86.mjs build/v86.wasm
-all-debug: build/libv86-debug.js build/libv86-debug.mjs build/v86-debug.wasm
-browser: build/v86_all.js
+default: build/v64-debug.wasm
+all: build/v64_all.js build/libv64.js build/libv64.mjs build/v64.wasm
+all-debug: build/libv64-debug.js build/libv64-debug.mjs build/v64-debug.wasm
+browser: build/v64_all.js
 
 # Used for nodejs builds and in order to profile code.
 # `debug` gives identifiers a readable name, make sure it doesn't have any side effects.
@@ -71,12 +71,32 @@ CARGO_FLAGS_SAFE=\
 		--target wasm32-unknown-unknown \
 		-- \
 		-C linker=tools/rust-lld-wrapper \
-		-C link-args="--import-table --global-base=4096 $(STRIP_DEBUG_FLAG)" \
+		-C link-args="--global-base=4096 $(STRIP_DEBUG_FLAG)" \
 		-C link-args="build/softfloat.o" \
 		-C link-args="build/zstddeclib.o" \
 		--verbose
 
 CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
+
+# --- wasm64 (WebAssembly memory64) build ---
+# Requires a nightly toolchain with the wasm64-unknown-unknown target and
+# rust-src (for -Z build-std), and a clang that supports --target=wasm64.
+# The nightly toolchain must be on PATH, e.g.:
+#   export PATH="$HOME/.rustup/toolchains/nightly-aarch64-apple-darwin/bin:$PATH"
+#   make wasm64 WASM64_CLANG=/opt/homebrew/opt/llvm/bin/clang
+# The function table is not imported (--import-table), so the JIT is not
+# available in the wasm64 build yet.
+WASM64_CLANG ?= clang
+WASM64_CARGO_FLAGS=\
+		--target wasm64-unknown-unknown \
+		-Z build-std=std,panic_abort \
+		-- \
+		-C linker=tools/rust-lld-wrapper \
+		-C link-args="--global-base=4096 " \
+		-C link-args="build/softfloat64.o" \
+		-C link-args="build/zstddeclib64.o" \
+		-C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
+
 
 CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
@@ -99,11 +119,11 @@ CORE_FILES:=$(addprefix src/,$(CORE_FILES))
 LIB_FILES:=$(addprefix lib/,$(LIB_FILES))
 BROWSER_FILES:=$(addprefix src/browser/,$(BROWSER_FILES))
 
-build/v86_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+build/v64_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 	mkdir -p build
-	-ls -lh build/v86_all.js
+	-ls -lh build/v64_all.js
 	java -jar $(CLOSURE) \
-		--js_output_file build/v86_all.js\
+		--js_output_file build/v64_all.js\
 		--define=DEBUG=false\
 		$(CLOSURE_SOURCE_MAP)\
 		$(CLOSURE_FLAGS)\
@@ -112,12 +132,12 @@ build/v86_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 		--js $(LIB_FILES)\
 		--js $(BROWSER_FILES)\
 		--js src/browser/main.js
-	ls -lh build/v86_all.js
+	ls -lh build/v64_all.js
 
-build/v86_all_debug.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+build/v64_all_debug.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
-		--js_output_file build/v86_all_debug.js\
+		--js_output_file build/v64_all_debug.js\
 		--define=DEBUG=true\
 		$(CLOSURE_SOURCE_MAP)\
 		$(CLOSURE_FLAGS)\
@@ -127,11 +147,11 @@ build/v86_all_debug.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 		--js $(BROWSER_FILES)\
 		--js src/browser/main.js
 
-build/libv86.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv64.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 	mkdir -p build
-	-ls -lh build/libv86.js
+	-ls -lh build/libv64.js
 	java -jar $(CLOSURE) \
-		--js_output_file build/libv86.js\
+		--js_output_file build/libv64.js\
 		--define=DEBUG=false\
 		$(CLOSURE_FLAGS)\
 		--compilation_level SIMPLE\
@@ -140,29 +160,29 @@ build/libv86.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--js $(CORE_FILES)\
 		--js $(BROWSER_FILES)\
 		--js $(LIB_FILES)
-	ls -lh build/libv86.js
+	ls -lh build/libv64.js
 
-build/libv86.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv64.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 	mkdir -p build
-	-ls -lh build/libv86.js
+	-ls -lh build/libv64.js
 	java -jar $(CLOSURE) \
-		--js_output_file build/libv86.mjs\
+		--js_output_file build/libv64.mjs\
 		--define=DEBUG=false\
 		$(CLOSURE_FLAGS)\
 		--compilation_level SIMPLE\
 		--jscomp_off=missingProperties\
-		--output_wrapper ';let module = {exports:{}}; %output%; export default module.exports.V86; export let {V86, CPU} = module.exports;'\
+		--output_wrapper ';let module = {exports:{}}; %output%; export default module.exports.v64; export let {v64, CPU} = module.exports;'\
 		--js $(CORE_FILES)\
 		--js $(BROWSER_FILES)\
 		--js $(LIB_FILES)\
 		--chunk_output_type=ES_MODULES\
 		--emit_use_strict=false
-	ls -lh build/libv86.mjs
+	ls -lh build/libv64.mjs
 
-build/libv86-debug.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv64-debug.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
-		--js_output_file build/libv86-debug.js\
+		--js_output_file build/libv64-debug.js\
 		--define=DEBUG=true\
 		$(CLOSURE_FLAGS)\
 		$(CLOSURE_READABLE)\
@@ -172,24 +192,24 @@ build/libv86-debug.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--js $(CORE_FILES)\
 		--js $(BROWSER_FILES)\
 		--js $(LIB_FILES)
-	ls -lh build/libv86-debug.js
+	ls -lh build/libv64-debug.js
 
-build/libv86-debug.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv64-debug.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 	mkdir -p build
 	java -jar $(CLOSURE) \
-		--js_output_file build/libv86-debug.mjs\
+		--js_output_file build/libv64-debug.mjs\
 		--define=DEBUG=true\
 		$(CLOSURE_FLAGS)\
 		$(CLOSURE_READABLE)\
 		--compilation_level SIMPLE\
 		--jscomp_off=missingProperties\
-		--output_wrapper ';let module = {exports:{}}; %output%; export default module.exports.V86; export let {V86, CPU} = module.exports;'\
+		--output_wrapper ';let module = {exports:{}}; %output%; export default module.exports.v64; export let {v64, CPU} = module.exports;'\
 		--js $(CORE_FILES)\
 		--js $(BROWSER_FILES)\
 		--js $(LIB_FILES)\
 		--chunk_output_type=ES_MODULES\
 		--emit_use_strict=false
-	ls -lh build/libv86-debug.mjs
+	ls -lh build/libv64-debug.mjs
 
 src/rust/gen/jit.rs: $(JIT_DEPENDENCIES)
 	./gen/generate_jit.js --output-dir build/ --table jit
@@ -206,38 +226,38 @@ src/rust/gen/analyzer.rs: $(ANALYZER_DEPENDENCIES)
 src/rust/gen/analyzer0f.rs: $(ANALYZER_DEPENDENCIES)
 	./gen/generate_analyzer.js --output-dir build/ --table analyzer0f
 
-build/v86.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+build/v64.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
-	-BLOCK_SIZE=K ls -l build/v86.wasm
+	-BLOCK_SIZE=K ls -l build/v64.wasm
 	cargo rustc --release $(CARGO_FLAGS)
-	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86.wasm
-	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v86.wasm -o build/v86.wasm
-	BLOCK_SIZE=K ls -l build/v86.wasm
+	cp build/wasm32-unknown-unknown/release/v64.wasm build/v64.wasm
+	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v64.wasm -o build/v64.wasm
+	BLOCK_SIZE=K ls -l build/v64.wasm
 
-build/v86-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+build/v64-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
-	-BLOCK_SIZE=K ls -l build/v86-debug.wasm
+	-BLOCK_SIZE=K ls -l build/v64-debug.wasm
 	cargo rustc $(CARGO_FLAGS)
-	cp build/wasm32-unknown-unknown/debug/v86.wasm build/v86-debug.wasm
-	BLOCK_SIZE=K ls -l build/v86-debug.wasm
+	cp build/wasm32-unknown-unknown/debug/v64.wasm build/v64-debug.wasm
+	BLOCK_SIZE=K ls -l build/v64-debug.wasm
 
-build/v86-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+build/v64-fallback.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
 	cargo rustc --release $(CARGO_FLAGS_SAFE)
-	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86-fallback.wasm || true
+	cp build/wasm32-unknown-unknown/release/v64.wasm build/v64-fallback.wasm || true
 
 debug-with-profiler: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
 	cargo rustc --features profiler $(CARGO_FLAGS)
-	cp build/wasm32-unknown-unknown/debug/v86.wasm build/v86-debug.wasm || true
+	cp build/wasm32-unknown-unknown/debug/v64.wasm build/v64-debug.wasm || true
 
 with-profiler: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
 	cargo rustc --release --features profiler $(CARGO_FLAGS)
-	cp build/wasm32-unknown-unknown/release/v86.wasm build/v86.wasm || true
+	cp build/wasm32-unknown-unknown/release/v64.wasm build/v64.wasm || true
 
 watch:
-	cargo watch -x 'rustc $(CARGO_FLAGS)' -s 'cp build/wasm32-unknown-unknown/debug/v86.wasm build/v86-debug.wasm'
+	cargo watch -x 'rustc $(CARGO_FLAGS)' -s 'cp build/wasm32-unknown-unknown/debug/v64.wasm build/v64-debug.wasm'
 
 build/softfloat.o: lib/softfloat/softfloat.c
 	mkdir -p build
@@ -255,14 +275,39 @@ build/zstddeclib.o: lib/zstd/zstddeclib.c
 	    -o build/zstddeclib.o \
 	    lib/zstd/zstddeclib.c
 
+build/softfloat64.o: lib/softfloat/softfloat.c
+	mkdir -p build
+	$(WASM64_CLANG) -c -Wall \
+	    --target=wasm64 -O3 -flto -nostdlib -fvisibility=hidden -ffunction-sections -fdata-sections \
+	    -DSOFTFLOAT_FAST_INT64 -DINLINE_LEVEL=5 -DSOFTFLOAT_FAST_DIV32TO16 -DSOFTFLOAT_FAST_DIV64TO32 \
+	    -o build/softfloat64.o \
+	    lib/softfloat/softfloat.c
+
+build/zstddeclib64.o: lib/zstd/zstddeclib.c
+	mkdir -p build
+	$(WASM64_CLANG) -c -Wall \
+	    --target=wasm64 -O3 -flto -nostdlib -fvisibility=hidden -ffunction-sections -fdata-sections \
+	    -DZSTDLIB_VISIBILITY="" \
+	    -o build/zstddeclib64.o \
+	    lib/zstd/zstddeclib.c
+
+build/v64-debug64.wasm: $(RUST_FILES) build/softfloat64.o build/zstddeclib64.o Cargo.toml
+	mkdir -p build/
+	cargo rustc $(WASM64_CARGO_FLAGS)
+	cp build/wasm64-unknown-unknown/debug/v64.wasm build/v64-debug64.wasm
+	BLOCK_SIZE=K ls -l build/v64-debug64.wasm
+
+.PHONY: wasm64
+wasm64: build/v64-debug64.wasm
+
 clean:
-	-rm build/libv86.js
-	-rm build/libv86.mjs
-	-rm build/libv86-debug.js
-	-rm build/libv86-debug.mjs
-	-rm build/v86_all.js
-	-rm build/v86.wasm
-	-rm build/v86-debug.wasm
+	-rm build/libv64.js
+	-rm build/libv64.mjs
+	-rm build/libv64-debug.js
+	-rm build/libv64-debug.mjs
+	-rm build/v64_all.js
+	-rm build/v64.wasm
+	-rm build/v64-debug.wasm
 	-rm $(INSTRUCTION_TABLES)
 	-rm build/*.map
 	-rm build/*.wast
@@ -279,8 +324,8 @@ update_version:
 	SEARCH='<code>Version: <a id="version" href="https://github.com/copy/v86/commits/[a-f0-9]\+">[a-f0-9]\+</a> ([^(]\+)</code>' ;\
 	REPLACE='<code>Version: <a id="version" href="https://github.com/copy/v86/commits/'$$COMMIT'">'$$COMMIT'</a> ('$$DATE')</code>' ;\
 	sed -i "s@$$SEARCH@$$REPLACE@g" index.html ;\
-	SEARCH='<script src="build/v86_all.js?[a-f0-9]\+"></script>' ;\
-	REPLACE='<script src="build/v86_all.js?'$$COMMIT'"></script>' ;\
+	SEARCH='<script src="build/v64_all.js?[a-f0-9]\+"></script>' ;\
+	REPLACE='<script src="build/v64_all.js?'$$COMMIT'"></script>' ;\
 	sed -i "s@$$SEARCH@$$REPLACE@g" index.html ;\
 	grep $$COMMIT index.html
 
@@ -299,56 +344,56 @@ build/integration-test-fs/fs.json: images/buildroot-bzimage68.bin
 	./tools/copy-to-sha256.py build/integration-test-fs/fs.tar build/integration-test-fs/flat
 	rm build/integration-test-fs/fs.tar build/integration-test-fs/bzImage build/integration-test-fs/initrd
 
-tests: build/v86-debug.wasm build/integration-test-fs/fs.json
+tests: build/v64-debug.wasm build/integration-test-fs/fs.json
 	LOG_LEVEL=3 ./tests/full/run.js
 
-tests-release: build/libv86.js build/v86.wasm build/integration-test-fs/fs.json
+tests-release: build/libv64.js build/v64.wasm build/integration-test-fs/fs.json
 	TEST_RELEASE_BUILD=1 ./tests/full/run.js
 
-nasmtests: build/v86-debug.wasm
+nasmtests: build/v64-debug.wasm
 	$(NASM_TEST_DIR)/create_tests.js
 	$(NASM_TEST_DIR)/gen_fixtures.js
 	$(NASM_TEST_DIR)/run.js
 
-nasmtests-force-jit: build/v86-debug.wasm
+nasmtests-force-jit: build/v64-debug.wasm
 	$(NASM_TEST_DIR)/create_tests.js
 	$(NASM_TEST_DIR)/gen_fixtures.js
 	$(NASM_TEST_DIR)/run.js --force-jit
 
-jitpagingtests: build/v86-debug.wasm
+jitpagingtests: build/v64-debug.wasm
 	$(MAKE) -C tests/jit-paging test-jit test-jit-smc
 	./tests/jit-paging/run.js
 	./tests/jit-paging/run-smc.js
 
-qemutests: build/v86-debug.wasm
+qemutests: build/v64-debug.wasm
 	$(MAKE) -C tests/qemu test-i386
 	LOG_LEVEL=3 ./tests/qemu/run.js build/qemu-test-result
 	./tests/qemu/run-qemu.js > build/qemu-test-reference
 	diff build/qemu-test-result build/qemu-test-reference
 
-qemutests-release: build/libv86.mjs build/v86.wasm
+qemutests-release: build/libv64.mjs build/v64.wasm
 	$(MAKE) -C tests/qemu test-i386
 	TEST_RELEASE_BUILD=1 time ./tests/qemu/run.js build/qemu-test-result
 	./tests/qemu/run-qemu.js > build/qemu-test-reference
 	diff build/qemu-test-result build/qemu-test-reference
 
-kvm-unit-test: build/v86-debug.wasm
+kvm-unit-test: build/v64-debug.wasm
 	tests/kvm-unit-tests/build.sh
 	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
 	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
 	tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
 
-kvm-unit-test-release: build/libv86.mjs build/v86.wasm
+kvm-unit-test-release: build/libv64.mjs build/v64.wasm
 	tests/kvm-unit-tests/build.sh
 	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
 	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat
 	TEST_RELEASE_BUILD=1 tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/realmode.flat
 
-expect-tests: build/v86-debug.wasm build/libwabt.cjs
+expect-tests: build/v64-debug.wasm build/libwabt.cjs
 	make -C tests/expect/tests
 	./tests/expect/run.js
 
-devices-test: build/v86-debug.wasm
+devices-test: build/v64-debug.wasm
 	./tests/devices/virtio_9p.js
 	./tests/devices/virtio_console.js
 	./tests/devices/fetch_network.js
@@ -364,7 +409,7 @@ rust-test: $(RUST_FILES)
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
 
-api-tests: build/v86-debug.wasm
+api-tests: build/v64-debug.wasm
 	./tests/api/clean-shutdown.js
 	./tests/api/state.js
 	./tests/api/reset.js
@@ -411,9 +456,9 @@ update-package-json-version:
 doc:
 	set -e ;\
 	COMMIT=`git log --format="%h" -n 1` ;\
-	npx typedoc --readme none --customFooterHtml "Commit: <a href='https://github.com/copy/v86/commits/$$COMMIT'><code>$$COMMIT</code></a>" --out ./docs/api ./v86.d.ts
+	npx typedoc --readme none --customFooterHtml "Commit: <a href='https://github.com/copy/v86/commits/$$COMMIT'><code>$$COMMIT</code></a>" --out ./docs/api ./v64.d.ts
 
 denodoc:
-	deno doc --html --name="v86 API" --output=./docs/api ./v86.d.ts
+	deno doc --html --name="v86 API" --output=./docs/api ./v64.d.ts
 
 .PHONY: tests

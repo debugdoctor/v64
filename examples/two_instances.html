@@ -1,7 +1,7 @@
 <!doctype html>
 <title>Two emulators</title>
 
-<script src="../build/libv86.js"></script>
+<script src="../build/libv64.js"></script>
 <script>
 "use strict";
 
@@ -10,8 +10,8 @@ window.onload = function()
     var container1 = document.getElementById("screen_container1");
     var container2 = document.getElementById("screen_container2");
 
-    var emulator1 = new V86({
-        wasm_path: "../build/v86.wasm",
+    var emulator1 = new v64({
+        wasm_path: "../build/v64.wasm",
         screen_container: container1,
         bios: {
             url: "../bios/seabios.bin",
@@ -25,8 +25,8 @@ window.onload = function()
         autostart: true,
     });
 
-    var emulator2 = new V86({
-        wasm_path: "../build/v86.wasm",
+    var emulator2 = new v64({
+        wasm_path: "../build/v64.wasm",
         screen_container: container2,
         bios: {
             url: "../bios/seabios.bin",

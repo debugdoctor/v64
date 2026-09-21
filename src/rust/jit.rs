@@ -99,8 +99,16 @@ impl DerefMut for JitStateRef {
 }
 
 #[no_mangle]
+pub fn ptr_width() -> u32 { std::mem::size_of::<usize>() as u32 }
+
+#[no_mangle]
 pub fn rust_init() {
-    dbg_assert!(std::mem::size_of::<[Option<NonNull<cpu::Code>>; 0x100000]>() == 0x100000 * 4);
+    // The JIT table layout assumes the target pointer width; check it matches
+    // (wasm32: 4 bytes, wasm64: 8 bytes)
+    dbg_assert!(
+        std::mem::size_of::<[Option<NonNull<cpu::Code>>; 0x100000]>()
+            == 0x100000 * std::mem::size_of::<usize>()
+    );
 
     let _ = JIT_STATE
         .try_lock()
@@ -2358,7 +2366,10 @@ pub fn jit_dirty_cache(start_addr: u32, end_addr: u32) {
 }
 
 #[no_mangle]
-pub fn jit_dirty_page(page: Page) { jit_dirty_page_ctx(&mut get_jit_state(), page) }
+pub fn jit_dirty_page(page: Page) {
+    jit_dirty_page_ctx(&mut get_jit_state(), page);
+    unsafe { crate::jit64::invalidate_physical_page(page.to_u32()); }
+}
 
 /// dirty pages in the range of start_addr and end_addr, which must span at most two pages
 pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
@@ -2375,6 +2386,12 @@ pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
     if start_page != end_page {
         dbg_assert!(start_page.to_u32() + 1 == end_page.to_u32());
         jit_dirty_page_ctx(&mut ctx, end_page);
+    }
+    unsafe {
+        crate::jit64::invalidate_physical_page(start_page.to_u32());
+        if start_page != end_page {
+            crate::jit64::invalidate_physical_page(end_page.to_u32());
+        }
     }
 }
 

@@ -7,7 +7,7 @@ import fs from "node:fs";
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 process.on("unhandledRejection", exn => { throw exn; });
 
@@ -15,7 +15,7 @@ async function exec_test(test_name, v86_config, timeout_sec, test_function)
 {
     console.log("Starting: " + test_name);
     const tm_start = performance.now();
-    const emulator = new V86(v86_config);
+    const emulator = new v64(v86_config);
     const timeout = setTimeout(async () => {
         console.warn(emulator.screen_adapter.get_text_screen());
         await emulator.destroy();
@@ -54,7 +54,7 @@ async function exec_test(test_name, v86_config, timeout_sec, test_function)
  * Throws an Error if the given timeout elapsed before the expected response
  * could be detected.
  *
- * @param {V86} emulator
+ * @param {v64} emulator
  * @param {string} command
  * @param {Array<string|RegExp>} expected
  * @param {number} timeout_msec
@@ -131,7 +131,7 @@ await exec_test("floppy-insert-fdb", CONFIG_MSDOS622_HD, 60, async emulator =>
     await expect(emulator, "dir /B B:X86TEST.ASM\n", ["X86TEST.ASM", "", "C:\\>"], 3000);
 
     console.log("Formatting B:");
-    await expect(emulator, "format /V:V86 /U B:\n", ["Insert new diskette for drive B:", "and press ENTER when ready..."], 3000);
+    await expect(emulator, "format /V:v64 /U B:\n", ["Insert new diskette for drive B:", "and press ENTER when ready..."], 3000);
     await expect(emulator, "\n", [/Volume Serial Number is [0-9A-F-]+/, "", "Format another (Y/N)?"], 3000);
     await expect(emulator, "N\n", ["", "", "C:\\>"], 3000);
 });

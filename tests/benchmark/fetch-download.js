@@ -10,13 +10,13 @@ const __filename = url.fileURLToPath(import.meta.url);
 const USE_VIRTIO = !!process.env.USE_VIRTIO;
 const BENCHFILE_SIZE = (parseInt(process.env.BENCHFILE_SIZE_MB, 10) || 32) * 1024 * 1024;
 
-const { V86 } = await import("../../build/libv86.mjs");
+const { v64 } = await import("../../build/libv64.mjs");
 
 const LOG_SERIAL = true;
 
 if(isMainThread)
 {
-    const emulator = new V86({
+    const emulator = new v64({
         bios: { url: __dirname + "/../../bios/seabios.bin" },
         vga_bios: { url: __dirname + "/../../bios/vgabios.bin" },
         bzimage: { url: __dirname + "/../../images/buildroot-bzimage68.bin" },

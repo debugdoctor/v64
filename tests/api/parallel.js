@@ -7,7 +7,7 @@ import url from "node:url";
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
 const TEST_RELEASE_BUILD = +process.env.TEST_RELEASE_BUILD;
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 process.on("unhandledRejection", exn => { throw exn; });
 
@@ -69,7 +69,7 @@ function dump_screen(emulator)
 
 async function test_parallel_port(lpt, enable_lpt2)
 {
-    const emulator = new V86({
+    const emulator = new v64({
         ...base_config,
         parallel1: enable_lpt2,
     });

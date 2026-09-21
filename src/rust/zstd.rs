@@ -1,45 +1,50 @@
 use std::alloc;
+use std::ffi::c_void;
 
 extern "C" {
-    fn ZSTD_createDStream() -> u32;
-    fn ZSTD_freeDStream(ctx: u32) -> i32;
+    fn ZSTD_createDStream() -> *mut c_void;
+    fn ZSTD_freeDStream(ctx: *mut c_void) -> usize;
     fn ZSTD_decompressStream_simpleArgs(
-        ctx: u32,
+        ctx: *mut c_void,
         dst: *mut u8,
-        dstCapacity: u32,
-        dstPos: *mut u32,
+        dst_capacity: usize,
+        dst_pos: *mut usize,
         src: *const u8,
-        srcSize: u32,
-        srcPos: *mut u32,
-    ) -> i32;
+        src_size: usize,
+        src_pos: *mut usize,
+    ) -> usize;
 
-    fn ZSTD_isError(err: i32) -> bool;
+    fn ZSTD_isError(err: usize) -> u32;
 }
 
 const MALLOC_ALIGN: usize = 16;
 
-// malloc and free are needed by the zstd library
+// malloc and free are needed by the zstd library. `usize` is 4 bytes on wasm32
+// and 8 bytes on wasm64, matching the C `size_t`.
 #[no_mangle]
-pub unsafe fn v86_malloc(size: u32) -> u32 {
-    let layout = alloc::Layout::from_size_align(size as usize + 4, MALLOC_ALIGN).unwrap();
+pub unsafe fn v86_malloc(size: usize) -> *mut u8 {
+    let layout = alloc::Layout::from_size_align(size + 4, MALLOC_ALIGN).unwrap();
     let addr = alloc::alloc(layout);
     *(addr as *mut u32) = size as u32;
-    addr as u32 + 4
+    addr.add(4)
 }
 #[no_mangle]
-pub unsafe fn v86_free(addr: u32) {
-    let size = *((addr - 4) as *mut u32);
+pub unsafe fn v86_free(addr: *mut u8) {
+    let size = *((addr.sub(4)) as *mut u32);
     let layout = alloc::Layout::from_size_align(size as usize + 4, MALLOC_ALIGN).unwrap();
-    alloc::dealloc((addr - 4) as *mut u8, layout)
+    alloc::dealloc(addr.sub(4), layout)
 }
 
 pub struct ZstdContext {
-    ctx: u32,
+    ctx: *mut c_void,
     src: *mut u8,
     src_size: u32,
-    src_pos: u32,
+    src_pos: usize,
 }
 
+// The zstd entry points are called from JavaScript. Sizes stay `u32` (guest
+// memory is below 4 GiB), but pointers are real pointers so that they are 32-bit
+// on wasm32 and 64-bit on wasm64.
 #[no_mangle]
 pub unsafe fn zstd_create_ctx(src_size: u32) -> *mut ZstdContext {
     let src = alloc::alloc(alloc::Layout::from_size_align(src_size as usize, 1).unwrap());
@@ -74,13 +79,13 @@ pub unsafe fn zstd_read(ctx: *mut ZstdContext, length: u32) -> *mut u8 {
     let result = ZSTD_decompressStream_simpleArgs(
         (*ctx).ctx,
         dst,
-        length,
+        length as usize,
         &mut dst_pos,
         (*ctx).src,
-        (*ctx).src_size,
+        (*ctx).src_size as usize,
         &mut (*ctx).src_pos,
     );
-    if ZSTD_isError(result) {
+    if ZSTD_isError(result) != 0 {
         dbg_log!(
             "ZSTD_decompressStream_simpleArgs returned error: {}",
             result
@@ -89,7 +94,7 @@ pub unsafe fn zstd_read(ctx: *mut ZstdContext, length: u32) -> *mut u8 {
         zstd_read_free(dst, length);
         return std::ptr::null_mut::<u8>();
     }
-    if dst_pos != length {
+    if dst_pos != length as usize {
         dbg_assert!(false, "ZSTD: Partial read");
         zstd_read_free(dst, length);
         return std::ptr::null_mut::<u8>();

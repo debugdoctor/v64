@@ -16,7 +16,7 @@ const LOG_LEVEL = +process.env.LOG_LEVEL || 0;
 const DISABLE_JIT = +process.env.DISABLE_JIT;
 const TEST_ACPI = +process.env.TEST_ACPI;
 
-const { V86 } = await import(TEST_RELEASE_BUILD ? "../../build/libv86.mjs" : "../../src/main.js");
+const { v64 } = await import(TEST_RELEASE_BUILD ? "../../build/libv64.mjs" : "../../src/main.js");
 
 const __dirname = url.fileURLToPath(new URL(".", import.meta.url));
 
@@ -1436,7 +1436,7 @@ function run_test(test, done)
         test.expected_serial_text = [];
     }
 
-    var emulator = new V86(settings);
+    var emulator = new v64(settings);
     var screen = new Uint8Array(SCREEN_WIDTH * 25);
 
     function check_text_test_done()

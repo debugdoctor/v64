@@ -795,7 +795,8 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
         },
         2 => {
             dbg_log!("cr2 <- {:x}", data);
-            *cr.offset(2) = data
+            *cr.offset(2) = data;
+            *cr2 = data as u32 as u64;
         },
         3 => set_cr3(data),
         4 => {
@@ -3225,6 +3226,7 @@ pub unsafe fn instr_0FA2() {
 
     // http://lxr.linux.no/linux+%2a/arch/x86/include/asm/cpufeature.h
     // http://www.sandpile.org/x86/cpuid.htm
+    // https://gitlab.com/x86-cpuid.org/x86-cpuid-db
     let mut eax = 0;
     let mut ecx = 0;
     let mut edx = 0;
@@ -3243,7 +3245,7 @@ pub unsafe fn instr_0FA2() {
         },
 
         1 => {
-            eax = 3 | 7 << 4 | 6 << 8; // pentium3
+            eax = 9 | 14 << 4 | 6 << 8 | 8 << 16; // i7-8500Y (family 6, model 142)
             ebx = 1 << 16 | 8 << 8; // cpu count, clflush size
             ecx = 1 << 0 | 1 << 23 | 1 << 30; // sse3, popcnt, rdrand
             let vme = 0 << 1;
@@ -3313,9 +3315,21 @@ pub unsafe fn instr_0FA2() {
         },
 
         0x80000000 => {
-            // maximum supported extended level
-            eax = 5;
-            // other registers are reserved
+            eax = 0x80000004u32 as i32; // brand string in 0x80000002-4
+        },
+
+        0x80000001 => {
+            eax = 9 | 14 << 4 | 6 << 8 | 8 << 16;
+            edx = 1 << 29; // LM (NX, SYSCALL and RDTSCP are not implemented)
+        },
+
+        0x80000002 | 0x80000003 | 0x80000004 => {
+            let brand = b"Intel(R) Core(TM) i7-8500Y CPU @ 1.50GHz        ";
+            let off = (level - 0x80000002) as usize * 16;
+            eax = i32::from_le_bytes(brand[off..off + 4].try_into().unwrap());
+            ebx = i32::from_le_bytes(brand[off + 4..off + 8].try_into().unwrap());
+            ecx = i32::from_le_bytes(brand[off + 8..off + 12].try_into().unwrap());
+            edx = i32::from_le_bytes(brand[off + 12..off + 16].try_into().unwrap());
         },
 
         0x40000000 => {
@@ -3338,8 +3352,8 @@ pub unsafe fn instr_0FA2() {
 
         0x16 => {
             eax = (TSC_RATE / 1000.0).floor() as u32 as i32; // core base frequency in MHz
-            ebx = (TSC_RATE / 1000.0).floor() as u32 as i32; // core maximum frequency in MHz
-            ecx = 10; // bus (reference) frequency in MHz
+            ebx = 4200; // core maximum frequency in MHz
+            ecx = 100; // bus (reference) frequency in MHz
 
             // 16-bit values
             dbg_assert!(eax < 0x10000);

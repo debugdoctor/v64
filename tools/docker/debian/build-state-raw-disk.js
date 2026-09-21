@@ -4,7 +4,7 @@ import path from "node:path";
 import fs from "node:fs";
 import url from "node:url";
 import { execFileSync } from "node:child_process";
-import { V86 } from "../../../build/libv86.mjs";
+import { v64 } from "../../../build/libv64.mjs";
 
 // TODO:
 // - Timeout
@@ -21,8 +21,8 @@ process.stdin.resume();
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", handle_key);
 
-var emulator = new V86({
-    wasm_path: path.join(V86_ROOT, "build/v86.wasm"),
+var emulator = new v64({
+    wasm_path: path.join(V86_ROOT, "build/v64.wasm"),
     bios: { url: path.join(V86_ROOT, "/bios/seabios.bin") },
     vga_bios: { url: path.join(V86_ROOT, "/bios/vgabios.bin") },
     autostart: true,

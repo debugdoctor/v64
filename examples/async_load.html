@@ -1,7 +1,7 @@
 <!doctype html>
 <title>Asynchronous loading of disk images</title>
 
-<script src="../build/libv86.js"></script>
+<script src="../build/libv64.js"></script>
 <script>
 "use strict";
 
@@ -13,8 +13,8 @@ window.onload = function()
     // Support of the "Range: bytes=..." header is required on the server, CORS
     // is required if the server is on a different host
 
-    var emulator = new V86({
-        wasm_path: "../build/v86.wasm",
+    var emulator = new v64({
+        wasm_path: "../build/v64.wasm",
         memory_size: 64 * 1024 * 1024,
         vga_memory_size: 2 * 1024 * 1024,
         screen_container: document.getElementById("screen_container"),

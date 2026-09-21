@@ -18,8 +18,8 @@ following list is roughtly sorted from most interesting/useful to least.
 
 The following environmental variables are respected by most tests if applicable:
 
-- `TEST_RELEASE_BUILD=1`: Test the release build (libv86.js, v86.wasm) instead of the
-  debug build (source files with v86-debug.wasm)
+- `TEST_RELEASE_BUILD=1`: Test the release build (libv64.js, v64.wasm) instead of the
+  debug build (source files with v64-debug.wasm)
 - `MAX_PARALLEL_TESTS=n`: Maximum number of tests to run in parallel. Defaults
   to the number of cores in your system or less.
 - `TEST_NAME="…"`: Run only the specified test (only expect, full, nasm)
