@@ -1,4 +1,4 @@
-# V64 Roadmap: from v86 to x86-64
+# v64 Roadmap: from v86 to x86-64
 
 This document describes the staged plan for extending v86 with x86-64 (long mode) support, with the goal of booting 64-bit Linux in the browser.
 

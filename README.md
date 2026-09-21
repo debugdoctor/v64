@@ -1,8 +1,8 @@
-# V64
+# v64
 
-V64 runs a full x86 PC in the browser. It emulates an x86 CPU, RAM and the common PC hardware, and translates guest machine code to WebAssembly at runtime for speed.
+v64 runs a full x86 PC in the browser. It emulates an x86 CPU, RAM and the common PC hardware, and translates guest machine code to WebAssembly at runtime for speed.
 
-V64 is a fork of [v86](https://github.com/copy/v86) and keeps its hardware support, its JavaScript API and its license. Upstream documentation lives in [`UPSTREAM_README.md`](./UPSTREAM_README.md).
+v64 is a fork of [v86](https://github.com/copy/v86) and keeps its hardware support, its JavaScript API and its license. Upstream documentation lives in [`UPSTREAM_README.md`](./UPSTREAM_README.md).
 
 - License: [BSD-2-Clause](./LICENSE)
 - 中文说明: [`README.zh-CN.md`](./README.zh-CN.md)
@@ -21,7 +21,7 @@ Emulated hardware:
 - virtio filesystem, network and balloon devices
 - A SoundBlaster 16 sound card and a Hayes-compatible modem
 
-V64 boots real operating systems, including Linux (32-bit), FreeDOS/MS-DOS, Windows 1.x through 2000, ReactOS, KolibriOS, Haiku and many hobby systems. The full compatibility list is in [`UPSTREAM_README.md`](./UPSTREAM_README.md).
+v64 boots real operating systems, including Linux (32-bit), FreeDOS/MS-DOS, Windows 1.x through 2000, ReactOS, KolibriOS, Haiku and many hobby systems. The full compatibility list is in [`UPSTREAM_README.md`](./UPSTREAM_README.md).
 
 > **64-bit guests are not supported yet.** That is the purpose of this fork; the plan is tracked in [`ROADMAP.md`](./ROADMAP.md).
 

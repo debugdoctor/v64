@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-V64 is a fork of [v86](https://github.com/copy/v86) and ships the third-party components bundled in the v86 repository. Their origins and licenses are listed below.
+v64 is a fork of [v86](https://github.com/copy/v86) and ships the third-party components bundled in the v86 repository. Their origins and licenses are listed below.
 
 ## v86
 
@@ -9,7 +9,7 @@ V64 is a fork of [v86](https://github.com/copy/v86) and ships the third-party co
 - Copyright: `Copyright (c) 2012, The v86 contributors`
 - Full license text: [`LICENSE`](./LICENSE)
 
-Modifications and additions made in this fork are copyright of the V64 contributors.
+Modifications and additions made in this fork are copyright of the v64 contributors.
 
 ## Third-party components bundled in v86
 

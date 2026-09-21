@@ -1,8 +1,8 @@
-# V64
+# v64
 
-V64 让你在浏览器里运行一台完整的 x86 PC。它模拟 x86 CPU、内存和常见的 PC 硬件，并在运行时把 guest 机器码翻译成 WebAssembly 以保证性能。
+v64 让你在浏览器里运行一台完整的 x86 PC。它模拟 x86 CPU、内存和常见的 PC 硬件，并在运行时把 guest 机器码翻译成 WebAssembly 以保证性能。
 
-V64 是 [v86](https://github.com/copy/v86) 的分支，保留了它的硬件支持、JavaScript API 和许可证。上游文档见 [`UPSTREAM_README.md`](./UPSTREAM_README.md)。
+v64 是 [v86](https://github.com/copy/v86) 的分支，保留了它的硬件支持、JavaScript API 和许可证。上游文档见 [`UPSTREAM_README.md`](./UPSTREAM_README.md)。
 
 - 许可证：[BSD-2-Clause](./LICENSE)
 - English: [`README.md`](./README.md)
@@ -21,7 +21,7 @@ V64 是 [v86](https://github.com/copy/v86) 的分支，保留了它的硬件支�
 - virtio 文件系统 / 网络 / balloon
 - SoundBlaster 16 声卡，Hayes 兼容调制解调器
 
-V64 能真正启动操作系统，包括 Linux（32 位）、FreeDOS/MS-DOS、Windows 1.x 到 2000、ReactOS、KolibriOS、Haiku 以及大量 hobby 系统。完整兼容列表见 [`UPSTREAM_README.md`](./UPSTREAM_README.md)。
+v64 能真正启动操作系统，包括 Linux（32 位）、FreeDOS/MS-DOS、Windows 1.x 到 2000、ReactOS、KolibriOS、Haiku 以及大量 hobby 系统。完整兼容列表见 [`UPSTREAM_README.md`](./UPSTREAM_README.md)。
 
 > **暂不支持 64 位 guest。** 这正是本分支要做的事，计划见 [`ROADMAP.md`](./ROADMAP.md)。
 
