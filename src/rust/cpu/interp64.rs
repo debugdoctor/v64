@@ -6,7 +6,8 @@
 #![allow(dead_code)]
 
 use crate::cpu::cpu::{
-    read_reg64, translate_address_64, write_reg64, FLAG_CARRY, FLAG_INTERRUPT,
+    read_reg64, read_tsc, translate_address_64, write_reg64, CR4_TSD, CS, FLAG_CARRY,
+    FLAG_INTERRUPT, SS,
 };
 use crate::cpu::global_pointers::*;
 use crate::cpu::memory;
@@ -22,6 +23,20 @@ const RSP: u8 = 4;
 const RBP: u8 = 5;
 const RSI: u8 = 6;
 const RDI: u8 = 7;
+const R11: u8 = 11;
+
+// long mode MSRs
+const MSR_EFER: i32 = 0xC0000080u32 as i32;
+const MSR_STAR: i32 = 0xC0000081u32 as i32;
+const MSR_LSTAR: i32 = 0xC0000082u32 as i32;
+const MSR_SFMASK: i32 = 0xC0000084u32 as i32;
+const MSR_FS_BASE: i32 = 0xC0000100u32 as i32;
+const MSR_GS_BASE: i32 = 0xC0000101u32 as i32;
+const MSR_KERNEL_GS_BASE: i32 = 0xC0000102u32 as i32;
+
+const EFER_SCE: u64 = 1;
+const EFER_LME: u64 = 1 << 8;
+const EFER_LMA: u64 = 1 << 10;
 
 // RFLAGS bits
 const FLAG_CF: u32 = 1;
@@ -204,12 +219,52 @@ unsafe fn modrm_effective_address(modrm: &Modrm, pfx: &Prefixes) -> OrPageFault<
         _ => unreachable!(),
     }
 
-    if pfx.segment != 0 {
-        address =
-            address.wrapping_add(*segment_offsets.offset(pfx.segment as isize) as u32 as u64);
+    if pfx.segment == 4 {
+        address = address.wrapping_add(*fs_base);
+    }
+    else if pfx.segment == 5 {
+        address = address.wrapping_add(*gs_base);
     }
 
     Ok(address)
+}
+
+unsafe fn set_cpl_segments(cs: u16, new_cpl: u8) {
+    // long mode: code/data bases are 0, SS = CS + 8
+    *sreg.offset(CS as isize) = cs;
+    *sreg.offset(SS as isize) = cs.wrapping_add(8);
+    *segment_offsets.offset(CS as isize) = 0;
+    *segment_offsets.offset(SS as isize) = 0;
+    *segment_is_null.offset(CS as isize) = false;
+    *segment_is_null.offset(SS as isize) = false;
+    *cpl = new_cpl;
+}
+
+unsafe fn msr_read(index: i32) -> Option<u64> {
+    match index {
+        MSR_EFER => Some(*efer),
+        MSR_STAR => Some(*star),
+        MSR_LSTAR => Some(*lstar),
+        MSR_SFMASK => Some(*sfmask),
+        MSR_FS_BASE => Some(*fs_base),
+        MSR_GS_BASE => Some(*gs_base),
+        MSR_KERNEL_GS_BASE => Some(*kernel_gs_base),
+        _ => None,
+    }
+}
+
+unsafe fn msr_write(index: i32, value: u64) -> bool {
+    match index {
+        MSR_EFER => *efer = value | EFER_LMA,
+        MSR_STAR => *star = value,
+        MSR_LSTAR => *lstar = value,
+        MSR_SFMASK => *sfmask = value,
+        MSR_FS_BASE => *fs_base = value,
+        MSR_GS_BASE => *gs_base = value,
+        MSR_KERNEL_GS_BASE => *kernel_gs_base = value,
+        _ => return false,
+    }
+    true
 }
 
 unsafe fn read_reg8(r: u8, has_rex: bool) -> u64 {
@@ -729,8 +784,22 @@ pub unsafe fn enter_long_mode(cr3: u32) {
     *cr.offset(4) |= crate::cpu::cpu::CR4_PAE; // CR4.PAE
     *cr.offset(4) |= crate::cpu::cpu::CR4_PSE; // CR4.PSE (2 MiB pages)
     *long_mode = true;
+    *efer |= EFER_LME | EFER_LMA;
     *cr |= crate::cpu::cpu::CR0_PG; // CR0.PG
     crate::cpu::cpu::full_clear_tlb();
+}
+
+/// Enter long mode at a kernel entry point, as a 64-bit boot loader would:
+/// identity-mapped lower memory, CS = 0x10, SS = 0x18, RSI = boot_params.
+#[no_mangle]
+pub unsafe fn boot64(cr3: u32, entry: u64, boot_params: u64) {
+    enter_long_mode(cr3);
+    *rip = entry;
+    *previous_rip = entry;
+    *instruction_pointer = entry as u32 as i32;
+    write_reg64(RSI as i32, boot_params);
+    write_reg64(RSP as i32, 0x9F000);
+    set_cpl_segments(0x10, 0);
 }
 
 unsafe fn run_one_inner() -> OrPageFault<()> {
@@ -1199,6 +1268,87 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                 pfx.has_rex(),
                 if size == OpSize::S64 { value.swap_bytes() } else { (value as u32).swap_bytes() as u64 },
             );
+        },
+
+        // SWAPGS (0F 01 F8)
+        0x01 => {
+            if fetch8()? == 0xF8 {
+                let tmp = *gs_base;
+                *gs_base = *kernel_gs_base;
+                *kernel_gs_base = tmp;
+            }
+            else {
+                crate::cpu::cpu::trigger_ud();
+            }
+        },
+
+        // SYSCALL (0F 05)
+        0x05 => {
+            if *efer & EFER_SCE == 0 {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(());
+            }
+            write_reg64(RCX as i32, *rip);
+            write_reg64(R11 as i32, *flags as u32 as u64);
+            *flags &= !(*sfmask as u32) as i32;
+            *rip = *lstar;
+            let cs = (*star >> 32 & 0xFFFF) as u16;
+            set_cpl_segments(cs, 0);
+        },
+
+        // SYSRET (0F 07)
+        0x07 => {
+            if *efer & EFER_SCE == 0 {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(());
+            }
+            let target = read_reg64(RCX as i32);
+            *flags = read_reg64(R11 as i32) as u32 as i32;
+            let cs = (*star >> 48 & 0xFFFF) as u16 | 3;
+            set_cpl_segments(cs, 3);
+            *rip = target;
+        },
+
+        // WRMSR (0F 30)
+        0x30 => {
+            if *cpl != 0 {
+                crate::cpu::cpu::trigger_gp(0);
+                return Ok(());
+            }
+            let index = read_reg64(RCX as i32) as i32;
+            let value = read_reg64(RAX as i32) as u32 as u64
+                | (read_reg64(RDX as i32) as u32 as u64) << 32;
+            if !msr_write(index, value) {
+                crate::cpu::instructions_0f::instr_0F30();
+            }
+        },
+
+        // RDTSC (0F 31)
+        0x31 => {
+            if *cpl == 0 || *cr.offset(4) & CR4_TSD == 0 {
+                let tsc = read_tsc();
+                write_reg(RAX, OpSize::S32, false, tsc & 0xFFFF_FFFF);
+                write_reg(RDX, OpSize::S32, false, tsc >> 32);
+            }
+            else {
+                crate::cpu::cpu::trigger_gp(0);
+            }
+        },
+
+        // RDMSR (0F 32)
+        0x32 => {
+            if *cpl != 0 {
+                crate::cpu::cpu::trigger_gp(0);
+                return Ok(());
+            }
+            let index = read_reg64(RCX as i32) as i32;
+            match msr_read(index) {
+                Some(value) => {
+                    write_reg(RAX, OpSize::S32, false, value & 0xFFFF_FFFF);
+                    write_reg(RDX, OpSize::S32, false, value >> 32);
+                },
+                None => crate::cpu::instructions_0f::instr_0F32(),
+            }
         },
 
         _ => {

@@ -72,31 +72,12 @@ CARGO_FLAGS_SAFE=\
 		-- \
 		-C linker=tools/rust-lld-wrapper \
 		-C link-args="--global-base=4096 $(STRIP_DEBUG_FLAG)" \
+		-C link-args="--import-table" \
 		-C link-args="build/softfloat.o" \
 		-C link-args="build/zstddeclib.o" \
 		--verbose
 
 CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
-
-# --- wasm64 (WebAssembly memory64) build ---
-# Requires a nightly toolchain with the wasm64-unknown-unknown target and
-# rust-src (for -Z build-std), and a clang that supports --target=wasm64.
-# The nightly toolchain must be on PATH, e.g.:
-#   export PATH="$HOME/.rustup/toolchains/nightly-aarch64-apple-darwin/bin:$PATH"
-#   make wasm64 WASM64_CLANG=/opt/homebrew/opt/llvm/bin/clang
-# The function table is not imported (--import-table), so the JIT is not
-# available in the wasm64 build yet.
-WASM64_CLANG ?= clang
-WASM64_CARGO_FLAGS=\
-		--target wasm64-unknown-unknown \
-		-Z build-std=std,panic_abort \
-		-- \
-		-C linker=tools/rust-lld-wrapper \
-		-C link-args="--global-base=4096 " \
-		-C link-args="build/softfloat64.o" \
-		-C link-args="build/zstddeclib64.o" \
-		-C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
-
 
 CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
@@ -274,31 +255,6 @@ build/zstddeclib.o: lib/zstd/zstddeclib.c
 	    -DZSTDLIB_VISIBILITY="" \
 	    -o build/zstddeclib.o \
 	    lib/zstd/zstddeclib.c
-
-build/softfloat64.o: lib/softfloat/softfloat.c
-	mkdir -p build
-	$(WASM64_CLANG) -c -Wall \
-	    --target=wasm64 -O3 -flto -nostdlib -fvisibility=hidden -ffunction-sections -fdata-sections \
-	    -DSOFTFLOAT_FAST_INT64 -DINLINE_LEVEL=5 -DSOFTFLOAT_FAST_DIV32TO16 -DSOFTFLOAT_FAST_DIV64TO32 \
-	    -o build/softfloat64.o \
-	    lib/softfloat/softfloat.c
-
-build/zstddeclib64.o: lib/zstd/zstddeclib.c
-	mkdir -p build
-	$(WASM64_CLANG) -c -Wall \
-	    --target=wasm64 -O3 -flto -nostdlib -fvisibility=hidden -ffunction-sections -fdata-sections \
-	    -DZSTDLIB_VISIBILITY="" \
-	    -o build/zstddeclib64.o \
-	    lib/zstd/zstddeclib.c
-
-build/v64-debug64.wasm: $(RUST_FILES) build/softfloat64.o build/zstddeclib64.o Cargo.toml
-	mkdir -p build/
-	cargo rustc $(WASM64_CARGO_FLAGS)
-	cp build/wasm64-unknown-unknown/debug/v64.wasm build/v64-debug64.wasm
-	BLOCK_SIZE=K ls -l build/v64-debug64.wasm
-
-.PHONY: wasm64
-wasm64: build/v64-debug64.wasm
 
 clean:
 	-rm build/libv64.js

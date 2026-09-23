@@ -85,6 +85,15 @@ pub const fpu_dp_selector: *mut i32 = 1060 as *mut i32;
 
 pub const cr2: *mut u64 = 1064 as *mut u64; // full CR2; cr[2] is the low 32 bits
 
+// long mode MSRs
+pub const efer: *mut u64 = 1072 as *mut u64;
+pub const star: *mut u64 = 1080 as *mut u64;
+pub const lstar: *mut u64 = 1088 as *mut u64;
+pub const sfmask: *mut u64 = 1096 as *mut u64;
+pub const fs_base: *mut u64 = 1104 as *mut u64;
+pub const gs_base: *mut u64 = 1112 as *mut u64;
+pub const kernel_gs_base: *mut u64 = 1120 as *mut u64;
+
 pub const tss_size_32: *mut bool = 1128 as *mut bool;
 
 pub const sse_scratch_register: *mut reg128 = 1136 as *mut reg128;

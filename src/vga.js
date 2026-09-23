@@ -1,4 +1,4 @@
-import { LOG_VGA, FLAG_VM } from "./const.js";
+import { LOG_VGA, FLAG_VM, MAX_VGA_MEMORY_SIZE } from "./const.js";
 import { h } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
 
@@ -30,7 +30,7 @@ const VGA_MIN_MEMORY_SIZE = 4 * VGA_BANK_SIZE;
 /**
  * Avoid wrapping past VGA_LFB_ADDRESS
  */
-const VGA_MAX_MEMORY_SIZE = 256 * 1024 * 1024;
+const VGA_MAX_MEMORY_SIZE = MAX_VGA_MEMORY_SIZE;
 
 /**
  * @see {@link http://www.osdever.net/FreeVGA/vga/graphreg.htm#06}

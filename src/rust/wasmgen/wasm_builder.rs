@@ -6,9 +6,6 @@ use crate::leb::{
 };
 use crate::wasmgen::wasm_opcodes as op;
 
-// memory64: the imported memory and every memory access address are 64-bit
-pub const MEMORY_IS_64: bool = cfg!(target_arch = "wasm64");
-
 pub trait SafeToU8 {
     fn safe_to_u8(self) -> u8;
 }
@@ -510,8 +507,7 @@ impl WasmBuilder {
 
         self.output.push(op::EXT_MEMORY);
 
-        // memory flag: bit 2 marks a 64-bit (memory64) memory
-        self.output.push(if MEMORY_IS_64 { 4 } else { 0 });
+        self.output.push(0); // memory flags
         write_leb_u32(&mut self.output, 1); // minimum: 1 page (the provided memory is larger)
 
         let new_import_count = self.import_count + 1;
@@ -686,15 +682,6 @@ impl WasmBuilder {
         write_leb_i64(&mut self.instruction_body, v);
     }
 
-    /// On memory64, memory instructions take an i64 address. The JIT computes
-    /// 32-bit guest addresses, so zero-extend the address on the stack.
-    #[inline]
-    fn memory_address(&mut self) {
-        if MEMORY_IS_64 {
-            self.instruction_body.push(op::OP_I64EXTENDUI32);
-        }
-    }
-
     pub fn load_fixed_u8(&mut self, addr: u32) {
         self.const_i32(addr as i32);
         self.load_u8(0);
@@ -704,7 +691,6 @@ impl WasmBuilder {
         dbg_assert!((addr & 1) == 0);
 
         self.const_i32(addr as i32);
-        self.memory_address();
         self.instruction_body.push(op::OP_I32LOAD16U);
         self.instruction_body.push(op::MEM_ALIGN16);
         self.instruction_body.push(0); // immediate offset
@@ -725,112 +711,96 @@ impl WasmBuilder {
     }
 
     pub fn load_u8(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32LOAD8U);
         self.instruction_body.push(op::MEM_NO_ALIGN);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn load_unaligned_i64(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I64LOAD);
         self.instruction_body.push(op::MEM_NO_ALIGN);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn load_unaligned_i32(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32LOAD);
         self.instruction_body.push(op::MEM_NO_ALIGN);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn load_unaligned_u16(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32LOAD16U);
         self.instruction_body.push(op::MEM_NO_ALIGN);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn load_aligned_f64(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_F64LOAD);
         self.instruction_body.push(op::MEM_ALIGN64);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn load_aligned_i64(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I64LOAD);
         self.instruction_body.push(op::MEM_ALIGN64);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn load_aligned_f32(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_F32LOAD);
         self.instruction_body.push(op::MEM_ALIGN32);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn load_aligned_i32(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32LOAD);
         self.instruction_body.push(op::MEM_ALIGN32);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn load_aligned_u16(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32LOAD16U);
         self.instruction_body.push(op::MEM_ALIGN16);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn store_u8(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32STORE8);
         self.instruction_body.push(op::MEM_NO_ALIGN);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn store_aligned_u16(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32STORE16);
         self.instruction_body.push(op::MEM_ALIGN16);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn store_aligned_i32(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32STORE);
         self.instruction_body.push(op::MEM_ALIGN32);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn store_aligned_i64(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I64STORE);
         self.instruction_body.push(op::MEM_ALIGN64);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn store_unaligned_u16(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32STORE16);
         self.instruction_body.push(op::MEM_NO_ALIGN);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn store_unaligned_i32(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I32STORE);
         self.instruction_body.push(op::MEM_NO_ALIGN);
         write_leb_u32(&mut self.instruction_body, byte_offset);
     }
 
     pub fn store_unaligned_i64(&mut self, byte_offset: u32) {
-        self.memory_address();
         self.instruction_body.push(op::OP_I64STORE);
         self.instruction_body.push(op::MEM_NO_ALIGN);
         write_leb_u32(&mut self.instruction_body, byte_offset);

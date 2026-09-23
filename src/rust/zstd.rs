@@ -19,8 +19,7 @@ extern "C" {
 
 const MALLOC_ALIGN: usize = 16;
 
-// malloc and free are needed by the zstd library. `usize` is 4 bytes on wasm32
-// and 8 bytes on wasm64, matching the C `size_t`.
+// malloc and free are needed by the zstd library. `usize` matches the C `size_t`.
 #[no_mangle]
 pub unsafe fn v86_malloc(size: usize) -> *mut u8 {
     let layout = alloc::Layout::from_size_align(size + 4, MALLOC_ALIGN).unwrap();
@@ -43,8 +42,7 @@ pub struct ZstdContext {
 }
 
 // The zstd entry points are called from JavaScript. Sizes stay `u32` (guest
-// memory is below 4 GiB), but pointers are real pointers so that they are 32-bit
-// on wasm32 and 64-bit on wasm64.
+// memory is below 4 GiB); pointers are real wasm32 pointers.
 #[no_mangle]
 pub unsafe fn zstd_create_ctx(src_size: u32) -> *mut ZstdContext {
     let src = alloc::alloc(alloc::Layout::from_size_align(src_size as usize, 1).unwrap());

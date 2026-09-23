@@ -519,7 +519,69 @@ emulator.add_listener("emulator-loaded", () => {
         ], 2);
         assert.equal(reg64(2) & (1n << 29n), 1n << 29n, "LM");
         assert.equal(reg64(2) & (1n << 20n), 0n, "NX not claimed");
-        assert.equal(reg64(2) & (1n << 11n), 0n, "SYSCALL not claimed");
+        assert.equal(reg64(2) & (1n << 11n), 1n << 11n, "SYSCALL");
+    }
+
+    // Test 18: long mode MSRs, SWAPGS, SYSCALL/SYSRET.
+    {
+        const dv = new DataView(buffer);
+        const MSR_EFER = 1072, MSR_STAR = 1080, MSR_LSTAR = 1088;
+        const MSR_SFMASK = 1096, MSR_GS_BASE = 1112, MSR_KERNEL_GS_BASE = 1120;
+
+        cpu.cr[0] = 0;
+        cpu.in_hlt[0] = 0;
+        cpu.cpl[0] = 0;
+
+        // wrmsr/rdmsr round trip for EFER (kernel does this at boot)
+        load([
+            0xB9, 0x80, 0x00, 0x00, 0xC0,       // mov ecx, 0xC0000080
+            0xB8, 0x01, 0x00, 0x00, 0x00,       // mov eax, 1 (SCE)
+            0x31, 0xD2,                         // xor edx, edx
+            0x0F, 0x30,                         // wrmsr
+            0x0F, 0x32,                         // rdmsr
+            0xF4,
+        ], 5);
+        assert.equal(dv.getBigUint64(MSR_EFER, true) & 1n, 1n, "wrmsr EFER.SCE");
+        assert.equal(reg64(0) & 1n, 1n, "rdmsr EFER.SCE");
+
+        // SWAPGS
+        dv.setBigUint64(MSR_GS_BASE, 0xAAAA_0000n, true);
+        dv.setBigUint64(MSR_KERNEL_GS_BASE, 0xBBBB_0000n, true);
+        load([0x0F, 0x01, 0xF8, 0xF4], 1);
+        assert.equal(dv.getBigUint64(MSR_GS_BASE, true), 0xBBBB_0000n, "SWAPGS gs_base");
+        assert.equal(dv.getBigUint64(MSR_KERNEL_GS_BASE, true), 0xAAAA_0000n, "SWAPGS kernel_gs_base");
+
+        // SYSCALL into a handler at LSTAR, then check RCX/R11/RIP/CPL/CS.
+        dv.setBigUint64(MSR_EFER, 1n | 1n << 10n, true);      // SCE | LMA
+        dv.setBigUint64(MSR_STAR, (0x10n << 48n) | (0x08n << 32n), true);
+        dv.setBigUint64(MSR_LSTAR, BigInt(0x3000), true);
+        dv.setBigUint64(MSR_SFMASK, 0x200n, true);            // clear IF
+
+        ex.write8(0x3000, 0xF4); // hlt
+
+        cpu.instruction_pointer[0] = BASE;
+        cpu.cpl[0] = 3;
+        cpu.flags[0] |= 1 << 9; // IF set (no IDT here, but SYSCALL is direct)
+        const flags_before = cpu.flags[0] >>> 0;
+
+        ex.write8(BASE, 0x0F);
+        ex.write8(BASE + 1, 0x05);   // syscall
+        ex.write8(BASE + 2, 0xF4);   // hlt (unreachable)
+        ex.interp64_run_one();
+
+        assert.equal(reg64(1) & 0xFFFF_FFFFn, BigInt(BASE + 2), "SYSCALL saves RIP in RCX");
+        assert.equal(reg64(11), BigInt(flags_before), "SYSCALL saves RFLAGS in R11");
+        assert.equal(cpu.instruction_pointer[0], 0x3000, "SYSCALL jumps to LSTAR");
+        assert.equal(cpu.cpl[0], 0, "SYSCALL enters ring 0");
+        assert.equal(cpu.flags[0] & (1 << 9), 0, "SFMASK clears IF");
+
+        // SYSRET back
+        ex.write8(0x3000, 0x0F);
+        ex.write8(0x3001, 0x07); // sysret
+        ex.interp64_run_one();
+        assert.equal(cpu.instruction_pointer[0], BASE + 2, "SYSRET returns to RCX");
+        assert.equal(cpu.cpl[0], 3, "SYSRET returns to ring 3");
+        assert.equal(cpu.flags[0] >>> 0, flags_before, "SYSRET restores RFLAGS");
     }
 
     console.log("interp64: all tests passed");

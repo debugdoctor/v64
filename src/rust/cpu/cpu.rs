@@ -28,8 +28,6 @@ use std::ptr;
 
 mod wasm {
     extern "C" {
-        // wasm64 has no table64 yet, so indirect calls go through JavaScript
-        #[cfg(not(target_arch = "wasm64"))]
         pub fn call_indirect1(f: i32, x: u16);
     }
 }
@@ -52,10 +50,6 @@ pub mod js {
         pub fn io_port_write32(port: i32, value: i32);
 
         pub fn get_rand_int() -> i32;
-
-        // wasm64: indirect calls are dispatched in JavaScript (no wasm table)
-        #[cfg(target_arch = "wasm64")]
-        pub fn call_indirect1(f: i32, x: u16);
     }
 }
 
@@ -3244,10 +3238,7 @@ pub unsafe fn cycle_internal() {
             in_jit = true;
         }
         let indirect_index = wasm_table_index as i32 + WASM_TABLE_OFFSET as i32;
-        #[cfg(not(target_arch = "wasm64"))]
         wasm::call_indirect1(indirect_index, initial_state);
-        #[cfg(target_arch = "wasm64")]
-        js::call_indirect1(indirect_index, initial_state);
         #[cfg(debug_assertions)]
         {
             in_jit = false;
@@ -4931,6 +4922,13 @@ pub unsafe fn reset_cpu() {
     *cr = 1 << 30 | 1 << 29 | 1 << 4;
     *cr.offset(2) = 0;
     *cr2 = 0;
+    *efer = 0;
+    *star = 0;
+    *lstar = 0;
+    *sfmask = 0;
+    *fs_base = 0;
+    *gs_base = 0;
+    *kernel_gs_base = 0;
     *cr.offset(3) = 0;
     *cr.offset(4) = 0;
     *dreg.offset(6) = 0xFFFF0FF0u32 as i32;

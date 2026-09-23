@@ -27,6 +27,7 @@ use crate::wasmgen::wasm_builder::{Label, WasmBuilder, WasmLocal};
 pub struct WasmTableIndex(u16);
 impl WasmTableIndex {
     pub fn to_u16(self) -> u16 { self.0 }
+    pub fn from_u16(x: u16) -> Self { Self(x) }
 }
 
 mod unsafe_jit {
@@ -99,17 +100,7 @@ impl DerefMut for JitStateRef {
 }
 
 #[no_mangle]
-pub fn ptr_width() -> u32 { std::mem::size_of::<usize>() as u32 }
-
-#[no_mangle]
 pub fn rust_init() {
-    // The JIT table layout assumes the target pointer width; check it matches
-    // (wasm32: 4 bytes, wasm64: 8 bytes)
-    dbg_assert!(
-        std::mem::size_of::<[Option<NonNull<cpu::Code>>; 0x100000]>()
-            == 0x100000 * std::mem::size_of::<usize>()
-    );
-
     let _ = JIT_STATE
         .try_lock()
         .unwrap()
@@ -145,6 +136,9 @@ struct JitState {
     pages: HashMap<Page, PageInfo>,
     wasm_table_index_free_list: Vec<WasmTableIndex>,
     compiling: Option<(WasmTableIndex, CompilingPageState)>,
+    // table indices held by the long-mode JIT (jit64); it uses the same table
+    // but its blocks are not part of the 32-bit page cache
+    jit64_table_indices: HashSet<WasmTableIndex>,
     #[cfg(debug_assertions)]
     wasm_table_index_to_page: HashMap<WasmTableIndex, HashSet<Page>>,
 }
@@ -167,7 +161,12 @@ fn check_jit_state_invariants(ctx: &mut JitState) {
     let compiling = HashSet::from_iter(ctx.compiling.as_ref().map(|&(index, _)| index));
     dbg_assert!(free.intersection(&used).next().is_none());
     dbg_assert!(used.intersection(&compiling).next().is_none());
-    dbg_assert!(free.len() + used.len() + compiling.len() == (WASM_TABLE_SIZE - 1) as usize);
+    dbg_assert!(
+        free.len() + used.len() + compiling.len() + ctx.jit64_table_indices.len()
+            == (WASM_TABLE_SIZE - 1) as usize
+    );
+    dbg_assert!(free.intersection(&ctx.jit64_table_indices).next().is_none());
+    dbg_assert!(used.intersection(&ctx.jit64_table_indices).next().is_none());
 
     let hidden: HashSet<WasmTableIndex> = ctx
         .pages
@@ -232,6 +231,7 @@ impl JitState {
 
             wasm_table_index_free_list: Vec::from_iter(wasm_table_indices),
             compiling: None,
+            jit64_table_indices: HashSet::new(),
 
             #[cfg(debug_assertions)]
             wasm_table_index_to_page: HashMap::new(),
@@ -2200,6 +2200,26 @@ pub fn jit_increase_hotness_and_maybe_compile(
     }
 }
 
+// The long-mode JIT takes table indices from the same free list, but keeps them
+// out of the 32-bit page cache.
+pub fn jit64_allocate_table_index() -> Option<u16> {
+    let mut ctx = get_jit_state();
+    let index = ctx.wasm_table_index_free_list.pop()?;
+    ctx.jit64_table_indices.insert(index);
+    check_jit_state_invariants(&mut ctx);
+    Some(index.to_u16())
+}
+
+pub fn jit64_free_table_index(index: u16) {
+    let index = WasmTableIndex::from_u16(index);
+    let mut ctx = get_jit_state();
+    if ctx.jit64_table_indices.remove(&index) {
+        ctx.wasm_table_index_free_list.push(index);
+        jit_clear_func(index);
+    }
+    check_jit_state_invariants(&mut ctx);
+}
+
 fn free_wasm_table_index(ctx: &mut JitState, wasm_table_index: WasmTableIndex) {
     if CHECK_JIT_STATE_INVARIANTS {
         dbg_assert!(!ctx.wasm_table_index_free_list.contains(&wasm_table_index));
@@ -2387,6 +2407,8 @@ pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
         dbg_assert!(start_page.to_u32() + 1 == end_page.to_u32());
         jit_dirty_page_ctx(&mut ctx, end_page);
     }
+    // release the jit state lock: jit64 invalidation takes it again
+    drop(ctx);
     unsafe {
         crate::jit64::invalidate_physical_page(start_page.to_u32());
         if start_page != end_page {

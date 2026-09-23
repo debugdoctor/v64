@@ -63,7 +63,6 @@ export function v64(options)
     const wasm_table = new WebAssembly.Table({ element: "anyfunc", initial: WASM_TABLE_SIZE + WASM_TABLE_OFFSET });
 
     // Compiled long-mode JIT blocks, keyed by guest RIP
-    const jit64_functions = new Map();
     const wasm_shared_funcs = {
         "cpu_exception_hook": n => this.cpu_exception_hook(n),
         "run_hardware_timers": function(a, t) { return cpu.run_hardware_timers(a, t); },
@@ -110,12 +109,8 @@ export function v64(options)
 
         "__indirect_function_table": wasm_table,
 
-        // wasm64 has no table64 support yet, so indirect calls go through the
-        // 32-bit JavaScript table
-        "call_indirect1": (f, x) => wasm_table.get(f)(x),
-
-        // jit64: instantiate a compiled block and cache it by guest RIP
-        "jit64_compile": (rip, ptr, len) => {
+        // jit64: instantiate a compiled block and put it in the shared table
+        "jit64_compile": (index, ptr, len) => {
             const bytes = new Uint8Array(wasm_memory.buffer, Number(ptr), Number(len)).slice();
             const module = new WebAssembly.Module(bytes);
             const instance = new WebAssembly.Instance(module, { e: {
@@ -138,17 +133,8 @@ export function v64(options)
                 jit64_adc_sbb: (dst, src, encoded) =>
                     cpu.wm.exports.jit64_adc_sbb(dst, src, encoded),
             } });
-            jit64_functions.set(rip, instance.exports.f);
+            wasm_table.set(index + WASM_TABLE_OFFSET, instance.exports.f);
         },
-        "jit64_run": rip => {
-            const f = jit64_functions.get(rip);
-            if(f)
-            {
-                f(0);
-                cpu.wm.exports.jit64_finish_fault();
-            }
-        },
-        "jit64_clear": () => jit64_functions.clear(),
     };
 
     let wasm_fn = options.wasm_fn;
@@ -220,10 +206,6 @@ export function v64(options)
         .then((exports) => {
             wasm_memory = exports.memory;
             exports["rust_init"]();
-
-            // 64-bit pointers (WebAssembly memory64) require BigInt at the
-            // JS/wasm boundary
-            this.wasm64 = exports["ptr_width"]() === 8;
 
             const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
             cpu = emulator.cpu;
@@ -724,18 +706,14 @@ v64.prototype.zstd_decompress = function(decompressed_size, src)
 {
     const cpu = this.v86.cpu;
 
-    // On wasm64, pointers cross the JS/wasm boundary as BigInt
-    const to_ptr = value => this.wasm64 ? BigInt(value) : value;
-    const from_ptr = value => this.wasm64 ? Number(value) : value;
-
     dbg_assert(!this.zstd_context);
-    this.zstd_context = from_ptr(cpu.zstd_create_ctx(src.length));
+    this.zstd_context = cpu.zstd_create_ctx(src.length);
 
-    new Uint8Array(cpu.wasm_memory.buffer).set(src, from_ptr(cpu.zstd_get_src_ptr(to_ptr(this.zstd_context))));
+    new Uint8Array(cpu.wasm_memory.buffer).set(src, cpu.zstd_get_src_ptr(this.zstd_context));
 
-    const ptr = from_ptr(cpu.zstd_read(to_ptr(this.zstd_context), decompressed_size));
+    const ptr = cpu.zstd_read(this.zstd_context, decompressed_size);
     const result = cpu.wasm_memory.buffer.slice(ptr, ptr + decompressed_size);
-    cpu.zstd_read_free(to_ptr(ptr), decompressed_size);
+    cpu.zstd_read_free(ptr, decompressed_size);
 
     cpu.zstd_free_ctx(to_ptr(this.zstd_context));
     this.zstd_context = null;
@@ -785,18 +763,14 @@ v64.prototype.zstd_decompress_worker = async function(decompressed_size, src)
                 const { src, decompressed_size, id } = e.data;
                 const exports = wasm.exports;
 
-                const wasm64 = exports["ptr_width"]() === 8;
-                const to_ptr = value => wasm64 ? BigInt(value) : value;
-                const from_ptr = value => wasm64 ? Number(value) : value;
+                const zstd_context = exports["zstd_create_ctx"](src.length);
+                new Uint8Array(exports.memory.buffer).set(src, exports["zstd_get_src_ptr"](zstd_context));
 
-                const zstd_context = from_ptr(exports["zstd_create_ctx"](src.length));
-                new Uint8Array(exports.memory.buffer).set(src, from_ptr(exports["zstd_get_src_ptr"](to_ptr(zstd_context))));
-
-                const ptr = from_ptr(exports["zstd_read"](to_ptr(zstd_context), decompressed_size));
+                const ptr = exports["zstd_read"](zstd_context, decompressed_size);
                 const result = exports.memory.buffer.slice(ptr, ptr + decompressed_size);
-                exports["zstd_read_free"](to_ptr(ptr), decompressed_size);
+                exports["zstd_read_free"](ptr, decompressed_size);
 
-                exports["zstd_free_ctx"](to_ptr(zstd_context));
+                exports["zstd_free_ctx"](zstd_context);
 
                 postMessage({ result, id }, [result]);
             };

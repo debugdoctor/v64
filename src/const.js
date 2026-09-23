@@ -108,6 +108,18 @@ export const
     MMAP_BLOCK_SIZE = 1 << MMAP_BLOCK_BITS,
     MMAP_MAX = 0x100000000;
 
+// Video memory stays well below VGA_LFB_ADDRESS
+export const MAX_VGA_MEMORY_SIZE = 128 * 1024 * 1024;
+
+// wasm32 linear memory is capped at 4 GiB. Keep a headroom for the engine and a
+// reserve for the CPU state, TLB (8 MiB), JIT buffers and heap, so guest RAM
+// plus VGA memory never reaches the ceiling.
+export const LINEAR_MEMORY_LIMIT = 4 * 1024 * 1024 * 1024;
+export const LINEAR_MEMORY_HEADROOM = 512 * 1024 * 1024;
+export const RUNTIME_RESERVE = 48 * 1024 * 1024;
+export const MAX_MEMORY_SIZE =
+    LINEAR_MEMORY_LIMIT - LINEAR_MEMORY_HEADROOM - RUNTIME_RESERVE - MAX_VGA_MEMORY_SIZE;
+
 export const CR0_PG = 1 << 31;
 export const CR4_PAE = 1 << 5;
 

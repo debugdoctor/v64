@@ -152,7 +152,6 @@ emulator.add_listener("emulator-loaded", () => {
     cpu.in_hlt[0] = 0;
 
     ex.enter_long_mode(PML4);
-
     let guard = 0;
     while(!cpu.in_hlt[0] && guard++ < 100000)
     {
@@ -228,6 +227,64 @@ emulator.add_listener("emulator-loaded", () => {
         ex.main_loop();
     }
     assert.equal(u32[166] - before, 1202, "compiled block counts each instruction");
+
+    // Self-modifying code: a guest store to the physical code page must drop the
+    // blocks compiled from that page, without clearing the whole cache.
+    const compiledBeforeSmc = ex.jit64_compiled_count();
+    const storeBase = 0x3000; // page 3, distinct from the loop at page 2
+    const store = [
+        0xC6, 0x04, 0x25, 0x00, 0x21, 0x00, 0x00, 0x01, // mov byte [0x2100], 1
+        0xF4,                                           // hlt
+    ];
+    for(let i = 0; i < store.length; i++)
+    {
+        ex.write8(storeBase + i, store[i]);
+    }
+    cpu.in_hlt[0] = 0;
+    new DataView(buffer).setBigUint64(232, BigInt(storeBase), true);
+    let smcGuard = 0;
+    while(!cpu.in_hlt[0] && smcGuard++ < 1000)
+    {
+        ex.main_loop();
+    }
+    assert.equal(ex.read8(0x2100), 1, "store landed in the code page");
+    assert.ok(
+        ex.jit64_compiled_count() < compiledBeforeSmc,
+        "self-modifying code dropped the block(s) from that page",
+    );
+
+    // cmov/setcc with memory operands, compiled as a hot block.
+    {
+        const cmovBase = 0x4000;
+        ex.write8(0x60000, 0x34);
+        ex.write8(0x60001, 0x12);
+        ex.write8(0x60002, 0x00);
+        ex.write8(0x60003, 0x00);
+        ex.write8(0x60008, 0xAA);
+        const cmovProgram = [
+            0xB9, 0x58, 0x02, 0x00, 0x00,                   // mov ecx, 600
+            0x39, 0xC9,                                     // cmp ecx, ecx (ZF=1)
+            0xB8, 0x00, 0x00, 0x00, 0x00,                   // mov eax, 0
+            0x0F, 0x44, 0x04, 0x25, 0x00, 0x00, 0x06, 0x00, // cmove eax, [0x60000]
+            0x0F, 0x94, 0x04, 0x25, 0x08, 0x00, 0x06, 0x00, // sete byte [0x60008]
+            0xFF, 0xC9,                                     // dec ecx
+            0x75, 0xE5,                                     // jnz cmove (not the mov ecx,600)
+            0xF4,                                           // hlt
+        ];
+        for(let i = 0; i < cmovProgram.length; i++)
+        {
+            ex.write8(cmovBase + i, cmovProgram[i]);
+        }
+        cpu.in_hlt[0] = 0;
+        new DataView(buffer).setBigUint64(232, BigInt(cmovBase), true);
+        let g = 0;
+        while(!cpu.in_hlt[0] && g++ < 100000)
+        {
+            ex.main_loop();
+        }
+        assert.equal(u32[16] >>> 0, 0x1234, "cmove memory source");
+        assert.equal(ex.read8(0x60008), 1, "setcc memory destination");
+    }
 
     console.log("jit64 longmode: test passed (" + compiled + " compiled block(s))");
     process.exit(0);

@@ -1,6 +1,6 @@
 //! Long mode JIT targeting wasm32: guest registers are i64 locals, physical
-//! addresses stay 32-bit (below 4 GiB), so no memory64/table64. See
-//! `docs/x86-64-plan.md` (Phase 2). http://www.sandpile.org/x86/opra.htm
+//! addresses stay 32-bit (below 4 GiB).
+//! http://www.sandpile.org/x86/opra.htm
 
 #![allow(dead_code)]
 
@@ -49,7 +49,9 @@ pub enum Instr {
     IncDecReg { r: u8, width: u8, decrement: bool },
     IncDecMem { mem: Mem, width: u8, decrement: bool },
     CmovRegReg { code: u8, dst: u8, src: u8, width: u8 },
+    CmovRegMem { code: u8, dst: u8, mem: Mem, width: u8 },
     SetccReg { code: u8, dst: u8, high8: bool },
+    SetccMem { code: u8, mem: Mem },
     ShiftReg { kind: ShiftKind, r: u8, width: u8, count: u8 },
     ShiftRegCl { kind: ShiftKind, r: u8, width: u8 },
     ImulRegReg { dst: u8, lhs: u8, rhs: u8, width: u8 },
@@ -764,15 +766,25 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                 else if (0x40..=0x4F).contains(&second) {
                     let modrm = *bytes.get(i).ok_or("truncated cmov modrm")?;
                     i += 1;
-                    if modrm >> 6 != 3 {
-                        return Err("cmov memory form not supported yet".into());
+                    let dst = (modrm >> 3 & 7) | rex_r << 3;
+                    let width = if rex_w { 64 } else { 32 };
+                    if modrm >> 6 == 3 {
+                        out.push(Instr::CmovRegReg {
+                            code: second - 0x40,
+                            dst,
+                            src: (modrm & 7) | rex_b << 3,
+                            width,
+                        });
                     }
-                    out.push(Instr::CmovRegReg {
-                        code: second - 0x40,
-                        dst: (modrm >> 3 & 7) | rex_r << 3,
-                        src: (modrm & 7) | rex_b << 3,
-                        width: if rex_w { 64 } else { 32 },
-                    });
+                    else {
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, 0)?;
+                        out.push(Instr::CmovRegMem {
+                            code: second - 0x40,
+                            dst,
+                            mem,
+                            width,
+                        });
+                    }
                 }
                 else if second == 0xAF {
                     let modrm = *bytes.get(i).ok_or("truncated imul modrm")?;
@@ -795,16 +807,22 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                 else if (0x90..=0x9F).contains(&second) {
                     let modrm = *bytes.get(i).ok_or("truncated setcc modrm")?;
                     i += 1;
-                    if modrm >> 6 != 3 {
-                        return Err("setcc memory form not supported yet".into());
+                    if modrm >> 6 == 3 {
+                        let rm = modrm & 7;
+                        let high8 = rex == 0 && rm >= 4;
+                        out.push(Instr::SetccReg {
+                            code: second - 0x90,
+                            dst: if high8 { rm - 4 } else { rm | rex_b << 3 },
+                            high8,
+                        });
                     }
-                    let rm = modrm & 7;
-                    let high8 = rex == 0 && rm >= 4;
-                    out.push(Instr::SetccReg {
-                        code: second - 0x90,
-                        dst: if high8 { rm - 4 } else { rm | rex_b << 3 },
-                        high8,
-                    });
+                    else {
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, 0)?;
+                        out.push(Instr::SetccMem {
+                            code: second - 0x90,
+                            mem,
+                        });
+                    }
                 }
                 else if (0xC8..=0xCF).contains(&second) {
                     out.push(Instr::Bswap {
@@ -1585,6 +1603,22 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.set_local_i64(&locals[di].1);
                 b.block_end();
             },
+            Instr::CmovRegMem { code, dst, mem, width } => {
+                let address = gen_memory_address_local(&mut b, &mut locals, &mem);
+                let value = gen_memory_read(&mut b, &locals, &address, width);
+                let di = load_reg(&mut b, &mut locals, dst);
+                gen_condition(&mut b, code);
+                b.if_void();
+                b.get_local_i64(&value);
+                if width == 32 {
+                    b.const_i64(0xFFFF_FFFF);
+                    b.and_i64();
+                }
+                b.set_local_i64(&locals[di].1);
+                b.block_end();
+                b.free_local_i64(address);
+                b.free_local_i64(value);
+            },
             Instr::SetccReg { code, dst, high8 } => {
                 let di = load_reg(&mut b, &mut locals, dst);
                 b.get_local_i64(&locals[di].1);
@@ -1598,6 +1632,15 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 }
                 b.or_i64();
                 b.set_local_i64(&locals[di].1);
+            },
+            Instr::SetccMem { code, mem } => {
+                let address = gen_memory_address_local(&mut b, &mut locals, &mem);
+                gen_condition(&mut b, code);
+                b.extend_unsigned_i32_to_i64();
+                let value = b.set_new_local_i64();
+                gen_memory_write(&mut b, &locals, &address, &value, 8);
+                b.free_local_i64(value);
+                b.free_local_i64(address);
             },
             Instr::ShiftReg { kind, r, width, count } => {
                 if count == 0 {
@@ -2022,9 +2065,13 @@ pub unsafe fn jit64_proto_len() -> u32 { PROTOTYPE_LEN as u32 }
 mod js {
     #[link(wasm_import_module = "env")]
     extern "C" {
-        pub fn jit64_compile(rip: u64, ptr: u32, len: u32);
-        pub fn jit64_run(rip: u64);
-        pub fn jit64_clear();
+        pub fn jit64_compile(index: u32, ptr: u32, len: u32);
+    }
+}
+
+mod wasm {
+    extern "C" {
+        pub fn call_indirect1(f: i32, x: u16);
     }
 }
 
@@ -2036,8 +2083,10 @@ const COMPILE_BUF_SIZE: usize = 65536;
 static mut COMPILE_BUF: [u8; COMPILE_BUF_SIZE] = [0; COMPILE_BUF_SIZE];
 static mut JIT64_MEMORY_FAULT: u8 = 0;
 static mut HOTNESS: *mut HashMap<u64, u32> = std::ptr::null_mut();
-static mut COMPILED: *mut HashSet<u64> = std::ptr::null_mut();
-static mut CODE_PAGES: *mut HashSet<u32> = std::ptr::null_mut();
+// guest RIP -> wasm table index of the compiled block
+static mut BLOCKS: *mut HashMap<u64, u16> = std::ptr::null_mut();
+// physical code page -> guest RIPs compiled from it
+static mut CODE_PAGES: *mut HashMap<u32, HashSet<u64>> = std::ptr::null_mut();
 
 unsafe fn user_access() -> bool { *crate::cpu::global_pointers::cpl == 3 }
 
@@ -2048,16 +2097,16 @@ unsafe fn hotness() -> &'static mut HashMap<u64, u32> {
     &mut *HOTNESS
 }
 
-unsafe fn compiled() -> &'static mut HashSet<u64> {
-    if COMPILED.is_null() {
-        COMPILED = Box::into_raw(Box::new(HashSet::new()));
+unsafe fn blocks() -> &'static mut HashMap<u64, u16> {
+    if BLOCKS.is_null() {
+        BLOCKS = Box::into_raw(Box::new(HashMap::new()));
     }
-    &mut *COMPILED
+    &mut *BLOCKS
 }
 
-unsafe fn code_pages() -> &'static mut HashSet<u32> {
+unsafe fn code_pages() -> &'static mut HashMap<u32, HashSet<u64>> {
     if CODE_PAGES.is_null() {
-        CODE_PAGES = Box::into_raw(Box::new(HashSet::new()));
+        CODE_PAGES = Box::into_raw(Box::new(HashMap::new()));
     }
     &mut *CODE_PAGES
 }
@@ -2082,6 +2131,10 @@ unsafe fn compile_and_register(rip: u64) {
     if module.len() > COMPILE_BUF_SIZE {
         return;
     }
+    let index = match crate::jit::jit64_allocate_table_index() {
+        Some(index) => index,
+        None => return,
+    };
     let len = module.len();
     std::ptr::copy_nonoverlapping(
         module.as_ptr(),
@@ -2089,28 +2142,29 @@ unsafe fn compile_and_register(rip: u64) {
         len,
     );
     js::jit64_compile(
-        rip,
+        index as u32,
         std::ptr::addr_of_mut!(COMPILE_BUF) as *mut u8 as u32,
         len as u32,
     );
-    compiled().insert(rip);
+    blocks().insert(rip, index);
     if let Ok(phys) = crate::cpu::cpu::translate_address_64(rip, false, user_access()) {
-        code_pages().insert(phys >> 12);
+        code_pages().entry(phys >> 12).or_default().insert(rip);
     }
 }
 
 pub unsafe fn try_run(rip: u64) -> bool {
-    if compiled().contains(&rip) {
-        js::jit64_run(rip);
-        true
-    }
-    else {
-        false
-    }
+    let index = match blocks().get(&rip) {
+        Some(&index) => index,
+        None => return false,
+    };
+    let indirect = index as i32 + crate::cpu::cpu::WASM_TABLE_OFFSET as i32;
+    wasm::call_indirect1(indirect, 0);
+    jit64_finish_fault();
+    true
 }
 
 pub unsafe fn note_interpreted(rip: u64) {
-    if compiled().contains(&rip) {
+    if blocks().contains_key(&rip) {
         return;
     }
     let count = hotness().entry(rip).or_insert(0);
@@ -2124,23 +2178,38 @@ pub unsafe fn clear_cache() {
     if !HOTNESS.is_null() {
         hotness().clear();
     }
-    if !COMPILED.is_null() {
-        compiled().clear();
+    if !BLOCKS.is_null() {
+        let indices: Vec<u16> = blocks().drain().map(|(_, index)| index).collect();
+        for index in indices {
+            crate::jit::jit64_free_table_index(index);
+        }
     }
     if !CODE_PAGES.is_null() {
         code_pages().clear();
     }
-    js::jit64_clear();
 }
 
+// Drop only the blocks compiled from this physical page.
 pub unsafe fn invalidate_physical_page(page: u32) {
-    if !CODE_PAGES.is_null() && code_pages().contains(&page) {
-        clear_cache();
+    if CODE_PAGES.is_null() {
+        return;
+    }
+    let rips = match code_pages().remove(&page) {
+        Some(rips) => rips,
+        None => return,
+    };
+    for rip in rips {
+        if let Some(index) = blocks().remove(&rip) {
+            crate::jit::jit64_free_table_index(index);
+        }
+        if !HOTNESS.is_null() {
+            hotness().remove(&rip);
+        }
     }
 }
 
 #[no_mangle]
-pub unsafe fn jit64_compiled_count() -> u32 { compiled().len() as u32 }
+pub unsafe fn jit64_compiled_count() -> u32 { blocks().len() as u32 }
 
 // u64::MAX means translation faulted; the block returns immediately.
 #[no_mangle]
@@ -2676,6 +2745,18 @@ mod tests {
             Instr::CmovRegReg { code: 4, dst: 8, src: 9, width: 32 },
             Instr::SetccReg { code: 5, dst: 0, high8: true },
             Instr::SetccReg { code: 4, dst: 10, high8: false },
+        ]);
+    }
+
+    #[test]
+    fn decodes_cmov_and_setcc_memory_forms() {
+        let mem = Mem { base: Some(0), index: None, scale: 0, disp: 0 };
+        assert_eq!(decode_block(0, &[
+            0x0F, 0x44, 0x00, // cmove eax, [rax]
+            0x0F, 0x94, 0x00, // sete byte [rax]
+        ]).unwrap(), vec![
+            Instr::CmovRegMem { code: 4, dst: 0, mem, width: 32 },
+            Instr::SetccMem { code: 4, mem },
         ]);
     }
 

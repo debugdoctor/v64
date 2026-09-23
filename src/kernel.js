@@ -178,6 +178,111 @@ export function load_kernel(mem8, bzimage, initrd, cmdline)
     };
 }
 
+// Direct x86-64 boot (Linux 64-bit boot protocol). Sets up boot_params, an
+// identity page table, a GDT and the kernel/initrd, then jumps to the kernel
+// entry in long mode. See Documentation/x86/boot.rst §64-bit BOOT PROTOCOL.
+export function load_kernel64(mem8, bzimage, initrd, cmdline)
+{
+    const KERNEL_ADDRESS = 0x100000;
+    const INITRD_ADDRESS = 64 << 20;
+    const ZERO_PAGE = 0x10000;
+    const PML4 = 0x1000;
+    const PDPT = 0x2000;
+    const PD = 0x3000;
+    const GDT = 0x4000;
+    const CMDLINE_ADDRESS = 0x80000;
+
+    const bzimage8 = new Uint8Array(bzimage);
+    const bzimage16 = new Uint16Array(bzimage);
+    const bzimage32 = new Uint32Array(bzimage);
+
+    const checksum1 = bzimage16[LINUX_BOOT_HDR_BOOT_FLAG >> 1];
+    dbg_assert(checksum1 === LINUX_BOOT_HDR_CHECKSUM1, "load_kernel64: bad boot flag");
+
+    const checksum2 =
+        bzimage16[LINUX_BOOT_HDR_HEADER >> 1] |
+        bzimage16[LINUX_BOOT_HDR_HEADER + 2 >> 1] << 16;
+    dbg_assert(checksum2 === LINUX_BOOT_HDR_CHECKSUM2, "load_kernel64: bad HdrS");
+
+    const protocol = bzimage16[LINUX_BOOT_HDR_VERSION >> 1];
+    dbg_assert(protocol >= 0x20C, "load_kernel64: kernel too old for 64-bit boot");
+
+    const setup_sects = bzimage8[LINUX_BOOT_HDR_SETUP_SECTS] || 4;
+    const flags = bzimage8[LINUX_BOOT_HDR_LOADFLAGS] & ~LINUX_BOOT_HDR_LOADFLAGS_KEEP_SEGMENTS
+        | LINUX_BOOT_HDR_LOADFLAGS_CAN_USE_HEAPS;
+    const cmdline_size = bzimage32[LINUX_BOOT_HDR_CMDLINE_SIZE >> 2] || 255;
+
+    const write16 = (address, value) => {
+        mem8[address] = value & 0xFF;
+        mem8[address + 1] = value >> 8 & 0xFF;
+    };
+    const write32 = (address, value) => {
+        mem8[address] = value & 0xFF;
+        mem8[address + 1] = value >> 8 & 0xFF;
+        mem8[address + 2] = value >> 16 & 0xFF;
+        mem8[address + 3] = value >> 24 & 0xFF;
+    };
+    const write64 = (address, value) => {
+        for(let i = 0; i < 8; i++) mem8[address + i] = Number(value >> BigInt(i * 8) & 0xFFn);
+    };
+
+    // Identity-map the first 1 GiB with 2 MiB pages.
+    write64(PML4, BigInt(PDPT) | 3n);
+    write64(PDPT, BigInt(PD) | 3n);
+    for(let i = 0; i < 512; i++)
+    {
+        write64(PD + i * 8, BigInt(i) * 0x200000n | 0x83n);
+    }
+
+    // GDT: null, 64-bit code (0x10, L=1), 64-bit data (0x18)
+    write64(GDT, 0n);
+    write64(GDT + 8, 0x00AF9A000000FFFFn);
+    write64(GDT + 16, 0x00CF92000000FFFFn);
+
+    // boot_params: copy the setup header, then fill the fields a boot loader owns.
+    const header_start = LINUX_BOOT_HDR_SETUP_SECTS;
+    const header_end = 0x202 + bzimage8[0x201];
+    for(let i = header_start; i < header_end; i++)
+    {
+        mem8[ZERO_PAGE + i] = bzimage8[i];
+    }
+    mem8[ZERO_PAGE + LINUX_BOOT_HDR_TYPE_OF_LOADER] = LINUX_BOOT_HDR_TYPE_OF_LOADER_NOT_ASSIGNED;
+    mem8[ZERO_PAGE + LINUX_BOOT_HDR_LOADFLAGS] = flags;
+    write16(ZERO_PAGE + LINUX_BOOT_HDR_VIDMODE, 0xFFFF); // normal
+    write32(ZERO_PAGE + LINUX_BOOT_HDR_CODE32_START, KERNEL_ADDRESS);
+
+    cmdline += "\x00";
+    dbg_assert(cmdline.length < cmdline_size, "load_kernel64: command line too long");
+    for(let i = 0; i < cmdline.length; i++)
+    {
+        mem8[CMDLINE_ADDRESS + i] = cmdline.charCodeAt(i);
+    }
+    write32(ZERO_PAGE + LINUX_BOOT_HDR_CMD_LINE_PTR, CMDLINE_ADDRESS);
+
+    let ramdisk_address = 0;
+    let ramdisk_size = 0;
+    if(initrd)
+    {
+        ramdisk_address = INITRD_ADDRESS;
+        ramdisk_size = initrd.byteLength;
+        mem8.set(new Uint8Array(initrd), ramdisk_address);
+    }
+    write32(ZERO_PAGE + LINUX_BOOT_HDR_RAMDISK_IMAGE, ramdisk_address);
+    write32(ZERO_PAGE + LINUX_BOOT_HDR_RAMDISK_SIZE, ramdisk_size);
+
+    const prot_mode_kernel_start = (setup_sects + 1) * 512;
+    const protected_mode_kernel = new Uint8Array(bzimage, prot_mode_kernel_start);
+    dbg_assert(KERNEL_ADDRESS + protected_mode_kernel.length < ramdisk_address || !initrd);
+    mem8.set(protected_mode_kernel, KERNEL_ADDRESS);
+
+    return {
+        entry: KERNEL_ADDRESS + 0x200,
+        boot_params: ZERO_PAGE,
+        pml4: PML4,
+        gdt: GDT,
+    };
+}
+
 function make_linux_boot_rom(real_mode_segment, heap_end)
 {
     // This rom will be executed by seabios after its initialisation

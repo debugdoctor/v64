@@ -5,7 +5,7 @@ import {
     FW_CFG_RAM_SIZE, FW_CFG_NB_CPUS, FW_CFG_MAX_CPUS, FW_CFG_BOOT_MENU,
     FW_CFG_NUMA, FW_CFG_FILE_DIR, FW_CFG_FILE_START,
     FW_CFG_CUSTOM_START, FLAGS_DEFAULT,
-    MMAP_BLOCK_BITS, MMAP_BLOCK_SIZE, MMAP_MAX,
+    MMAP_BLOCK_BITS, MMAP_BLOCK_SIZE, MMAP_MAX, MAX_MEMORY_SIZE,
     REG_ESP, REG_EBP, REG_ESI, REG_EAX, REG_EBX, REG_ECX, REG_EDX, REG_EDI,
     REG_CS, REG_DS, REG_ES, REG_FS, REG_GS, REG_SS, CR0_PG, CR4_PAE, REG_LDTR,
     FLAG_VM, FLAG_INTERRUPT, FLAG_CARRY, FLAG_ADJUST, FLAG_ZERO, FLAG_SIGN, FLAG_TRAP,
@@ -35,7 +35,7 @@ import { VGAScreen } from "./vga.js";
 import { VirtioBalloon } from "./virtio_balloon.js";
 import { Virtio9p, Virtio9pHandler, Virtio9pProxy } from "../lib/9p.js";
 
-import { load_kernel } from "./kernel.js";
+import { load_kernel, load_kernel64 } from "./kernel.js";
 
 import {
     RTC,
@@ -967,14 +967,19 @@ CPU.prototype.create_memory = function(size, minimum_size)
         size = minimum_size;
         dbg_log("Rounding memory size up to " + size, LOG_CPU);
     }
-    else if((size | 0) < 0)
+    else if(size > MAX_MEMORY_SIZE)
     {
-        size = Math.pow(2, 31) - MMAP_BLOCK_SIZE;
+        size = MAX_MEMORY_SIZE;
         dbg_log("Rounding memory size down to " + size, LOG_CPU);
     }
+    if(size >= 0x100000000)
+    {
+        // 4 GiB doesn't fit in the 32-bit memory_size field
+        size = 0x100000000 - MMAP_BLOCK_SIZE;
+    }
 
-    size = ((size - 1) | (MMAP_BLOCK_SIZE - 1)) + 1 | 0;
-    dbg_assert((size | 0) > 0);
+    size = (((size - 1) | (MMAP_BLOCK_SIZE - 1)) + 1) >>> 0;
+    dbg_assert(size > 0);
     dbg_assert((size & MMAP_BLOCK_SIZE - 1) === 0);
 
     console.assert(this.memory_size[0] === 0, "Expected uninitialised memory");
@@ -985,6 +990,22 @@ CPU.prototype.create_memory = function(size, minimum_size)
 
     this.mem8 = view(Uint8Array, this.wasm_memory, memory_offset, size);
     this.mem32s = view(Uint32Array, this.wasm_memory, memory_offset, size >> 2);
+};
+
+// Direct 64-bit boot: set up boot_params/initrd/page tables and enter long mode
+// at the kernel entry, without a BIOS.
+CPU.prototype.boot_kernel64 = function(bzimage, initrd, cmdline)
+{
+    const info = load_kernel64(this.mem8, bzimage, initrd, cmdline);
+
+    this.gdtr_offset[0] = info.gdt;
+    this.gdtr_size[0] = 3 * 8 - 1;
+    this.sreg[REG_CS] = 0x10;
+    this.sreg[REG_SS] = 0x18;
+    this.sreg[REG_DS] = 0x18;
+    this.sreg[REG_ES] = 0x18;
+
+    this.wm.exports.boot64(info.pml4, BigInt(info.entry), BigInt(info.boot_params));
 };
 
 /**
@@ -1018,11 +1039,18 @@ CPU.prototype.init = function(settings, device_bus)
 
     if(settings.bzimage)
     {
-        const option_rom = load_kernel(this.mem8, settings.bzimage, settings.initrd, settings.cmdline || "");
-
-        if(option_rom)
+        if(settings.direct_boot)
         {
-            this.option_roms.push(option_rom);
+            this.boot_kernel64(settings.bzimage, settings.initrd, settings.cmdline || "");
+        }
+        else
+        {
+            const option_rom = load_kernel(this.mem8, settings.bzimage, settings.initrd, settings.cmdline || "");
+
+            if(option_rom)
+            {
+                this.option_roms.push(option_rom);
+            }
         }
     }
 

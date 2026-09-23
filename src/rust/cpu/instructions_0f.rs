@@ -3320,7 +3320,7 @@ pub unsafe fn instr_0FA2() {
 
         0x80000001 => {
             eax = 9 | 14 << 4 | 6 << 8 | 8 << 16;
-            edx = 1 << 29; // LM (NX, SYSCALL and RDTSCP are not implemented)
+            edx = 1 << 29 | 1 << 11; // LM, SYSCALL (NX and RDTSCP are not implemented)
         },
 
         0x80000002 | 0x80000003 | 0x80000004 => {
