@@ -26,7 +26,7 @@ import { CPU } from "./cpu.js";
  */
 export function VirtioBlk(cpu, disk)
 {
-    /** @const @type {Uint8Array} */
+    /** @type {Uint8Array} */
     this.disk = disk instanceof Uint8Array ? disk : new Uint8Array(disk.buffer || disk);
     /** @const */
     this.capacity = Math.floor(this.disk.length / SECTOR_SIZE);
@@ -85,13 +85,13 @@ export function VirtioBlk(cpu, disk)
                 {
                     bytes: 4,
                     name: "capacity_low",
-                    read: () => this.capacity & 0xFFFF_FFFF,
+                    read: () => this.capacity & 0xFFFFFFFF,
                     write: () => { /* read only */ },
                 },
                 {
                     bytes: 4,
                     name: "capacity_high",
-                    read: () => Math.floor(this.capacity / 0x1_0000_0000),
+                    read: () => Math.floor(this.capacity / 0x100000000),
                     write: () => { /* read only */ },
                 },
                 {
@@ -134,7 +134,7 @@ VirtioBlk.prototype.HandleRequest = function(bufchain)
     bufchain.get_next_blob(header);
     const type = (header[0] | header[1] << 8 | header[2] << 16 | header[3] << 24) >>> 0;
     const sector = (header[8] | header[9] << 8 | header[10] << 16 | header[11] << 24) >>> 0
-        | (header[12] | header[13] << 8 | header[14] << 16 | header[15] << 24) * 0x1_0000_0000;
+        | (header[12] | header[13] << 8 | header[14] << 16 | header[15] << 24) * 0x100000000;
     const offset = sector * SECTOR_SIZE;
 
     let status = VIRTIO_BLK_S_OK;

@@ -722,7 +722,7 @@ v64.prototype.zstd_decompress = function(decompressed_size, src)
     const result = cpu.wasm_memory.buffer.slice(ptr, ptr + decompressed_size);
     cpu.zstd_read_free(ptr, decompressed_size);
 
-    cpu.zstd_free_ctx(to_ptr(this.zstd_context));
+    cpu.zstd_free_ctx(this.zstd_context);
     this.zstd_context = null;
 
     return result;

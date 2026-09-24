@@ -83,6 +83,7 @@ CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.j
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js iso9660.js \
 	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
+	   virtio_blk.js \
 	   bus.js log.js cpu.js \
 	   elf.js kernel.js
 LIB_FILES=9p.js filesystem.js marshall.js

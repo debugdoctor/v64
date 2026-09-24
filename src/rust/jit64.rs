@@ -6,9 +6,6 @@
 
 use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalI64};
 
-// Register file layout in linear memory (see global_pointers.rs):
-//   r0-r7  low 32 bits at 64 + 4*r, high 32 bits at 128 + 4*r
-//   r8-r15 full 64 bits at 160 + 8*(r-8)
 const REG_LOW: i32 = 64;
 const REG_HIGH: i32 = 128;
 const REG_EXT: i32 = 160;

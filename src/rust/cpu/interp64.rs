@@ -404,8 +404,6 @@ unsafe fn mem_probe_write(address: u64, size: OpSize) -> OrPageFault<()> {
     Ok(())
 }
 
-// The ModRM/SIB/displacement bytes are consumed here, so decoding has to happen
-// before any immediate is fetched.
 #[derive(Copy, Clone)]
 enum Operand {
     Reg(u8),
@@ -1360,8 +1358,6 @@ pub unsafe fn run_one() {
     *instruction_pointer = *rip as u32 as i32;
 }
 
-// Test entry point: seed rip from instruction_pointer so single-step tests work
-// without entering long mode.
 #[no_mangle]
 pub unsafe fn interp64_run_one() {
     *rip = *instruction_pointer as u32 as u64;

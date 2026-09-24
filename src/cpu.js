@@ -1009,7 +1009,7 @@ CPU.prototype.boot_kernel64 = function(bzimage, initrd, cmdline)
     this.sreg[REG_DS] = 0x18;
     this.sreg[REG_ES] = 0x18;
 
-    this.wm.exports.boot64(info.pml4, BigInt(info.entry), BigInt(info.boot_params));
+    this.wm.exports["boot64"](info.pml4, BigInt(info.entry), BigInt(info.boot_params));
 };
 
 /**

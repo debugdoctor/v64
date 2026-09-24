@@ -69,6 +69,7 @@ function build_acpi_tables(mem8)
         mem8[address + 2] = value >> 16 & 0xFF;
         mem8[address + 3] = value >> 24 & 0xFF;
     };
+    /** @param {number} address @param {bigint} value */
     const write64 = (address, value) => {
         for(let i = 0; i < 8; i++) mem8[address + i] = Number(value >> BigInt(i * 8) & 0xFFn);
     };
@@ -134,6 +135,7 @@ function build_acpi_tables(mem8)
         fadt[offset - 36 + 2] = value >> 16 & 0xFF;
         fadt[offset - 36 + 3] = value >> 24 & 0xFF;
     };
+    /** @param {number} offset @param {bigint} value */
     const set64 = (offset, value) => {
         for(let i = 0; i < 8; i++) fadt[offset - 36 + i] = Number(value >> BigInt(i * 8) & 0xFFn);
     };
@@ -153,6 +155,7 @@ function build_acpi_tables(mem8)
     table(ACPI_RSDT_ADDRESS, "RSDT", 1, rsdt);
 
     const xsdt = [];
+    /** @param {bigint} value */
     const push64 = value => { for(let i = 0; i < 8; i++) xsdt.push(Number(value >> BigInt(i * 8) & 0xFFn)); };
     for(const pointer of pointers) push64(BigInt(pointer));
     table(ACPI_XSDT_ADDRESS, "XSDT", 1, xsdt);
@@ -355,6 +358,7 @@ export function load_kernel64(mem8, bzimage, initrd, cmdline)
         mem8[address + 2] = value >> 16 & 0xFF;
         mem8[address + 3] = value >> 24 & 0xFF;
     };
+    /** @param {number} address @param {bigint} value */
     const write64 = (address, value) => {
         for(let i = 0; i < 8; i++) mem8[address + i] = Number(value >> BigInt(i * 8) & 0xFFn);
     };
