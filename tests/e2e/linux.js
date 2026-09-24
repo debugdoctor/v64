@@ -24,7 +24,7 @@ const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const TIMEOUT_MS = +process.env.LINUX64_TIMEOUT_MS || 120000;
 const CMDLINE = process.env.LINUX64_CMDLINE || "console=ttyS0 earlyprintk=serial";
 
-function firstExisting(candidates)
+function first_existing(candidates)
 {
     for(const candidate of candidates)
     {
@@ -33,14 +33,14 @@ function firstExisting(candidates)
     return null;
 }
 
-const image = firstExisting([
+const image = first_existing([
     process.env.LINUX64_IMAGE,
     path.join(ROOT, "tests/images/bzImage"),
     path.join(ROOT, "tests/images/vmlinuz-virt"),
     path.join(ROOT, "tests/images/vmlinuz"),
 ]);
 
-const initrd = firstExisting([
+const initrd = first_existing([
     process.env.LINUX64_INITRD,
     path.join(ROOT, "tests/images/initramfs-virt"),
     path.join(ROOT, "tests/images/initramfs.cpio.gz"),

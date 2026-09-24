@@ -34,12 +34,12 @@ const kernel = [
     0xF4,                                           // hlt
 ];
 
-function bzImage(body)
+function bz_image(body)
 {
-    const setupSects = 4;
-    const protStart = (setupSects + 1) * 512;
-    const image = new Uint8Array((protStart + 0x200 + body.length + 511) & ~511);
-    image[0x1F1] = setupSects;
+    const setup_sects = 4;
+    const prot_start = (setup_sects + 1) * 512;
+    const image = new Uint8Array((prot_start + 0x200 + body.length + 511) & ~511);
+    image[0x1F1] = setup_sects;
     image[0x1FE] = 0x55;
     image[0x1FF] = 0xAA;
     image[0x201] = 0x40;
@@ -47,19 +47,19 @@ function bzImage(body)
     image[0x206] = 0x0C;
     image[0x207] = 0x02;
     image[0x238] = 0xFF;
-    image.set(body, protStart + 0x200);
+    image.set(body, prot_start + 0x200);
     return image;
 }
 
-const imagePath = path.join(os.tmpdir(), "v64-e2e-hpet.img");
-fs.writeFileSync(imagePath, bzImage(kernel));
+const image_path = path.join(os.tmpdir(), "v64-e2e-hpet.img");
+fs.writeFileSync(image_path, bz_image(kernel));
 
 const emulator = new v64({
     autostart: false,
     memory_size: 8 * 1024 * 1024,
     disable_jit: 1,
     log_level: 0,
-    bzimage: { url: imagePath, async: false },
+    bzimage: { url: image_path, async: false },
     cmdline: "",
     direct_boot: true,
     wasm_path: process.env.WASM_PATH || undefined,
@@ -81,8 +81,8 @@ emulator.add_listener("emulator-loaded", () => {
 
     // Map the IO-APIC/HPET 2 MiB page.
     write64(PDPT + 3 * 8, BigInt(PD2) | 0x7n);
-    const pdIndex = (IO_APIC >> 21) & 0x1FF;
-    write64(PD2 + pdIndex * 8, BigInt(IO_APIC) | 0x87n);
+    const pd_index = (IO_APIC >> 21) & 0x1FF;
+    write64(PD2 + pd_index * 8, BigInt(IO_APIC) | 0x87n);
     if(ex.full_clear_tlb) ex.full_clear_tlb();
 
     const deadline = Date.now() + 15000;

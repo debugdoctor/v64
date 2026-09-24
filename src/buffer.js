@@ -145,7 +145,7 @@ AsyncXHRBuffer.prototype.load = async function()
 /**
  * @param {number} offset
  * @param {number} len
- * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
+ * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer|AsyncOPFSBuffer}
  */
 AsyncXHRBuffer.prototype.get_from_cache = function(offset, len)
 {
@@ -231,7 +231,7 @@ AsyncXHRBuffer.prototype.get = function(offset, len, fn, options)
 };
 
 /**
- * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
+ * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer|AsyncOPFSBuffer}
  * @param {number} offset
  * @param {number} len
  * @param {function(!Uint8Array)} fn
@@ -258,7 +258,7 @@ AsyncXHRBuffer.prototype.get_and_cache = function(offset, len, fn, options)
 /**
  * Relies on this.byteLength and this.block_cache
  *
- * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
+ * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer|AsyncOPFSBuffer}
  *
  * @param {number} start
  * @param {!Uint8Array} data
@@ -298,7 +298,7 @@ AsyncXHRBuffer.prototype.set = function(start, data, fn)
 };
 
 /**
- * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
+ * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer|AsyncOPFSBuffer}
  * @param {number} offset
  * @param {number} len
  * @param {!Uint8Array} block
@@ -333,7 +333,7 @@ AsyncXHRBuffer.prototype.get_buffer = function(fn)
 };
 
 ///**
-// * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
+// * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer|AsyncOPFSBuffer}
 // */
 //AsyncXHRBuffer.prototype.get_block_cache = function()
 //{
@@ -364,7 +364,7 @@ AsyncXHRBuffer.prototype.get_buffer = function(fn)
 //};
 
 /**
- * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
+ * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer|AsyncOPFSBuffer}
  */
 AsyncXHRBuffer.prototype.get_state = function()
 {
@@ -385,7 +385,7 @@ AsyncXHRBuffer.prototype.get_state = function()
 };
 
 /**
- * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer}
+ * @this {AsyncXHRBuffer|AsyncXHRPartfileBuffer|AsyncFileBuffer|AsyncOPFSBuffer}
  */
 AsyncXHRBuffer.prototype.set_state = function(state)
 {
@@ -737,6 +737,326 @@ AsyncFileBuffer.prototype.get_as_file = function(name)
     return file;
 };
 
+/**
+ * Persistent disk image in the Origin Private File System (OPFS). Blocks are
+ * read and written asynchronously, cached in RAM, and dirty blocks are
+ * committed in batches.
+ *
+ * @constructor
+ * @param {string} name File name in the OPFS root directory
+ * @param {number} size Size of the disk image in bytes
+ */
+export function AsyncOPFSBuffer(name, size)
+{
+    dbg_assert(typeof name === "string" && name.length > 0);
+    dbg_assert(size > 0 && size % BLOCK_SIZE === 0);
+
+    this.name = name;
+    this.byteLength = size;
+
+    this.block_cache = new Map();
+    this.block_cache_is_write = new Set();
+
+    // Read blocks are cached up to this many; dirty blocks are never evicted.
+    this.max_cached_blocks = 16 * 1024 * 1024 / BLOCK_SIZE;
+
+    /** @type {?FileSystemFileHandle} */
+    this.file = null;
+
+    this.flush_in_progress = null;
+    this.flush_again = false;
+    this.flush_timer = undefined;
+
+    this.onload = undefined;
+    this.onprogress = undefined;
+}
+
+AsyncOPFSBuffer.prototype.load = async function()
+{
+    const dir = await navigator.storage.getDirectory();
+    this.file = await dir.getFileHandle(this.name, { create: true });
+
+    const existing = await this.file.getFile();
+    if(existing.size !== this.byteLength)
+    {
+        const writable = await this.file.createWritable();
+        await writable.truncate(this.byteLength);
+        await writable.close();
+    }
+
+    request_persistent_storage();
+    this.onload && this.onload({});
+};
+
+/**
+ * @param {number} offset
+ * @param {number} len
+ * @param {function(!Uint8Array)} fn
+ * @param {{signal: AbortSignal}=} options
+ */
+AsyncOPFSBuffer.prototype.get = function(offset, len, fn, options)
+{
+    dbg_assert(offset + len <= this.byteLength);
+    dbg_assert(offset % BLOCK_SIZE === 0);
+    dbg_assert(len % BLOCK_SIZE === 0);
+    dbg_assert(len);
+
+    const block = this.get_from_cache(offset, len);
+    if(block)
+    {
+        fn(block);
+        return;
+    }
+
+    this.read_from_storage(offset, len).then(block =>
+    {
+        if(options && options.signal && options.signal.aborted)
+        {
+            return;
+        }
+        fn(block);
+    }, e => dbg_log("AsyncOPFSBuffer: read failed: " + e));
+};
+
+/**
+ * @param {number} offset
+ * @param {number} len
+ * @return {!Promise<!Uint8Array>}
+ */
+AsyncOPFSBuffer.prototype.read_from_storage = async function(offset, len)
+{
+    const file = /** @type {!FileSystemFileHandle} */ (this.file);
+    dbg_assert(file);
+
+    const blob = await file.getFile();
+    const block = new Uint8Array(await blob.slice(offset, offset + len).arrayBuffer());
+    this.handle_read(offset, len, block);
+    return block;
+};
+
+/**
+ * Apply cached writes and cache the freshly read blocks.
+ *
+ * @param {number} offset
+ * @param {number} len
+ * @param {!Uint8Array} block
+ */
+AsyncOPFSBuffer.prototype.handle_read = function(offset, len, block)
+{
+    const start_block = offset / BLOCK_SIZE;
+    const block_count = len / BLOCK_SIZE;
+
+    for(let i = 0; i < block_count; i++)
+    {
+        const index = start_block + i;
+        const cached = this.block_cache.get(index);
+
+        if(cached)
+        {
+            block.set(cached, i * BLOCK_SIZE);
+        }
+        else
+        {
+            this.block_cache.set(index, block.slice(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE));
+        }
+    }
+
+    this.evict();
+};
+
+AsyncOPFSBuffer.prototype.evict = function()
+{
+    if(this.block_cache.size <= this.max_cached_blocks)
+    {
+        return;
+    }
+
+    for(const index of this.block_cache.keys())
+    {
+        if(this.block_cache.size <= this.max_cached_blocks)
+        {
+            break;
+        }
+        if(!this.block_cache_is_write.has(index))
+        {
+            this.block_cache.delete(index);
+        }
+    }
+};
+
+/**
+ * @param {number} start
+ * @param {!Uint8Array} data
+ * @param {function()} fn
+ */
+AsyncOPFSBuffer.prototype.set = function(start, data, fn)
+{
+    const len = data.length;
+    dbg_assert(start + len <= this.byteLength);
+    dbg_assert(start % BLOCK_SIZE === 0);
+    dbg_assert(len % BLOCK_SIZE === 0);
+    dbg_assert(len);
+
+    const start_block = start / BLOCK_SIZE;
+    const block_count = len / BLOCK_SIZE;
+
+    for(let i = 0; i < block_count; i++)
+    {
+        const index = start_block + i;
+        const slice = data.slice(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE);
+        const cached = this.block_cache.get(index);
+
+        if(cached)
+        {
+            cached.set(slice);
+        }
+        else
+        {
+            this.block_cache.set(index, slice);
+        }
+
+        this.block_cache_is_write.add(index);
+    }
+
+    this.schedule_flush();
+    fn();
+};
+
+AsyncOPFSBuffer.prototype.schedule_flush = function()
+{
+    if(this.flush_timer !== undefined)
+    {
+        return;
+    }
+
+    this.flush_timer = setTimeout(() =>
+    {
+        this.flush_timer = undefined;
+        this.flush();
+    }, 50);
+};
+
+/**
+ * Commit all dirty blocks. Concurrent calls are coalesced.
+ * @return {!Promise}
+ */
+AsyncOPFSBuffer.prototype.flush = function()
+{
+    if(this.flush_in_progress)
+    {
+        this.flush_again = true;
+        return this.flush_in_progress;
+    }
+
+    this.flush_in_progress = this.do_flush().catch(e =>
+    {
+        dbg_log("AsyncOPFSBuffer: flush failed: " + e);
+    }).then(() =>
+    {
+        this.flush_in_progress = null;
+        if(this.flush_again)
+        {
+            this.flush_again = false;
+            this.flush();
+        }
+    });
+
+    return this.flush_in_progress;
+};
+
+AsyncOPFSBuffer.prototype.do_flush = async function()
+{
+    if(!this.file || this.block_cache_is_write.size === 0)
+    {
+        return;
+    }
+
+    // Snapshot the dirty blocks and clear the marks. A write that arrives while
+    // the flush is running re-marks its block; the next flush commits it.
+    const indices = Array.from(this.block_cache_is_write).sort((a, b) => a - b);
+    this.block_cache_is_write.clear();
+
+    const runs = [];
+    let first = indices[0];
+    let last = indices[0];
+
+    const push_run = () =>
+    {
+        const data = new Uint8Array((last - first + 1) * BLOCK_SIZE);
+        for(let index = first; index <= last; index++)
+        {
+            data.set(this.block_cache.get(index), (index - first) * BLOCK_SIZE);
+        }
+        runs.push({ offset: first * BLOCK_SIZE, data });
+    };
+
+    for(let i = 1; i < indices.length; i++)
+    {
+        if(indices[i] === last + 1)
+        {
+            last = indices[i];
+        }
+        else
+        {
+            push_run();
+            first = last = indices[i];
+        }
+    }
+    push_run();
+
+    const file = /** @type {!FileSystemFileHandle} */ (this.file);
+    const writable = await file.createWritable({ keepExistingData: true });
+    for(const run of runs)
+    {
+        await writable.write({ type: "write", position: run.offset, data: run.data });
+    }
+    await writable.close();
+};
+
+AsyncOPFSBuffer.prototype.get_buffer = function(fn)
+{
+    // The backing file is not materialised in memory.
+    fn();
+};
+
+AsyncOPFSBuffer.prototype.get_state = function()
+{
+    const state = [];
+    state[0] = this.name;
+    state[1] = this.byteLength;
+    state[2] = AsyncXHRBuffer.prototype.get_state.call(this);
+    return state;
+};
+
+AsyncOPFSBuffer.prototype.set_state = function(state)
+{
+    this.name = state[0];
+    this.byteLength = state[1];
+    AsyncXHRBuffer.prototype.set_state.call(this, state[2]);
+};
+
+AsyncOPFSBuffer.prototype.get_from_cache = AsyncXHRBuffer.prototype.get_from_cache;
+AsyncOPFSBuffer.prototype.get_and_cache = AsyncXHRBuffer.prototype.get_and_cache;
+
+/**
+ * Ask the browser to keep this origin's storage. Best effort; may be denied.
+ * @return {!Promise<boolean>}
+ */
+export async function request_persistent_storage()
+{
+    if(navigator.storage && navigator.storage.persist)
+    {
+        try
+        {
+            return await navigator.storage.persist();
+        }
+        catch(e)
+        {
+        }
+    }
+    return false;
+}
+
 export function buffer_from_object(obj, zstd_decompress_worker)
 {
     // TODO: accept Uint8Array, ArrayBuffer, File, url rather than { url }
@@ -771,6 +1091,12 @@ export function buffer_from_object(obj, zstd_decompress_worker)
         {
             return new SyncFileBuffer(obj.buffer);
         }
+    }
+    else if(obj.opfs)
+    {
+        // Persistent disk in the origin private file system
+        dbg_assert(obj.size, "AsyncOPFSBuffer: a size is required");
+        return new AsyncOPFSBuffer(obj.opfs, obj.size);
     }
     else if(obj.url)
     {

@@ -63,6 +63,19 @@ type V86BufferImage =
     //| { buffer: File; async?: boolean; }; // only in browsers: https://developer.mozilla.org/en-US/docs/Web/API/File
 
 /**
+ * The type for a persistent disk image in the Origin Private File System (OPFS).
+ * Reads and writes are asynchronous and the image survives a page reload.
+ */
+type V86OPFSImage =
+    {
+        /** File name in the OPFS root directory */
+        opfs: string;
+
+        /** Disk size in bytes; must be a multiple of 256 */
+        size: number;
+    };
+
+/**
  * The type of disk/bios/state images.
  *
  * Note that bios, initial state, bzimage, initrd, multiboot and floppy disk
@@ -73,7 +86,7 @@ type V86BufferImage =
  * has a performance overhead compared to HTTP compression, but will result in
  * better compression ration.
  */
-export type V86Image = V86AsyncFileImage | V86SyncFileImage | V86BufferImage;
+export type V86Image = V86AsyncFileImage | V86SyncFileImage | V86BufferImage | V86OPFSImage;
 
 /**
  * Config for virtio/serial console.

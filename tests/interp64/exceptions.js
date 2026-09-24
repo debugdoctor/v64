@@ -41,9 +41,9 @@ emulator.add_listener("emulator-loaded", () => {
     const u32 = new Uint32Array(buffer);
 
     const failures = [];
-    let activeTest = "";
+    let active_test = "";
     const fmt = value => typeof value === "bigint" ? "0x" + value.toString(16) : String(value);
-    const note = message => failures.push(activeTest + ": " + message);
+    const note = message => failures.push(active_test + ": " + message);
     const expect = (got, want, message) => {
         if(got !== want) note(message + " [want " + fmt(want) + ", got " + fmt(got) + "]");
     };
@@ -89,7 +89,7 @@ emulator.add_listener("emulator-loaded", () => {
     // Identity-map the first 1 GiB: 4 KiB pages for the first 2 MiB (so a
     // single page can be made not-present), 2 MiB pages above that. The user
     // bit lets the ring-3 case execute from these pages.
-    const buildPageTables = () => {
+    const build_page_tables = () => {
         write64(PML4, BigInt(PDPT) | 0x7n);
         write64(PDPT, BigInt(PD) | 0x7n);
         write64(PD, BigInt(PT) | 0x7n);
@@ -105,7 +105,7 @@ emulator.add_listener("emulator-loaded", () => {
 
     // Install the handler and gates for `vectors`, then run `program`.
     const boot = (program, { vectors, type = 0xE, cpl = 0, setup } = {}) => {
-        buildPageTables();
+        build_page_tables();
         if(setup) setup();
         for(let i = 0; i < program.length; i++)
         {
@@ -147,32 +147,32 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     // #BP (int3): no error code, so the frame starts with RIP.
-    activeTest = "int3 (#BP)";
+    active_test = "int3 (#BP)";
     boot([0xCC, 0xF4], { vectors: [3] });
     expect(read64(MARKER), 1n, "handler ran");
     expect(read64(SLOT[0]), BigInt(BASE + 1), "saved RIP is after int3");
 
     // #UD (ud2): a fault, so the saved RIP is the faulting instruction.
-    activeTest = "ud2 (#UD)";
+    active_test = "ud2 (#UD)";
     boot([0x0F, 0x0B, 0xF4], { vectors: [6] });
     expect(read64(MARKER), 1n, "handler ran");
     expect(read64(SLOT[0]), BigInt(BASE), "saved RIP is the faulting ud2");
 
     // Vector 0 through a software interrupt (hardware #DE needs `div`, which
     // the interpreter does not decode yet).
-    activeTest = "int 0";
+    active_test = "int 0";
     boot([0xCD, 0x00, 0xF4], { vectors: [0] });
     expect(read64(MARKER), 1n, "handler ran");
     expect(read64(SLOT[0]), BigInt(BASE + 2), "saved RIP is after int");
 
     // A software interrupt (int n) has no error code either.
-    activeTest = "int 0x80";
+    active_test = "int 0x80";
     boot([0xCD, 0x80, 0xF4], { vectors: [0x80] });
     expect(read64(MARKER), 1n, "handler ran");
     expect(read64(SLOT[0]), BigInt(BASE + 2), "saved RIP is after int");
 
     // #PF pushes an error code, so the frame starts with it and RIP is second.
-    activeTest = "#PF error code";
+    active_test = "#PF error code";
     boot(
         [0x48, 0xC7, 0xC0, 0x00, 0x40, 0x00, 0x00, 0x48, 0x8B, 0x08, 0xF4], // mov rax,0x4000; mov rcx,[rax]; hlt
         { vectors: [14], setup: () => write64(PT + 4 * 8, 0n) },
@@ -183,34 +183,34 @@ emulator.add_listener("emulator-loaded", () => {
 
     // #GP pushes an error code too. Trigger it from ring 3 with a privileged
     // instruction.
-    activeTest = "#GP from ring 3";
+    active_test = "#GP from ring 3";
     boot([0x0F, 0x20, 0xC0, 0xF4], { vectors: [13], cpl: 3 }); // mov rax, cr0
     expect(read64(MARKER), 1n, "handler ran");
     expect(read64(SLOT[0]), 0n, "error code 0");
 
     // An interrupt gate clears IF in the handler...
-    activeTest = "interrupt gate clears IF";
+    active_test = "interrupt gate clears IF";
     boot([0xCD, 0x81, 0xF4], { vectors: [0x81], type: 0xE });
     expect(read64(MARKER), 1n, "handler ran");
     expect(read64(CURRENT_FLAGS) & BigInt(F_IF), 0n, "IF cleared");
 
     // ...a trap gate does not.
-    activeTest = "trap gate keeps IF";
+    active_test = "trap gate keeps IF";
     boot([0xCD, 0x82, 0xF4], { vectors: [0x82], type: 0xF });
     expect(read64(MARKER), 1n, "handler ran");
     expect(read64(CURRENT_FLAGS) & BigInt(F_IF), BigInt(F_IF), "IF kept");
 
     // iretq returns to the instruction after `int` and restores RFLAGS.
     {
-        activeTest = "iretq";
-        const returnHandler = [
+        active_test = "iretq";
+        const return_handler = [
             0x48, 0xC7, 0x04, 0x25, 0x00, 0x60, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov qword [MARKER], 1
             0x48, 0xCF,                                                             // iretq
         ];
-        buildPageTables();
+        build_page_tables();
         const program = [0xCD, 0x80, 0x48, 0xC7, 0xC0, 0x42, 0x00, 0x00, 0x00, 0xF4]; // int 0x80; mov rax,0x42; hlt
         for(let i = 0; i < program.length; i++) ex.write8(BASE + i, program[i]);
-        for(let i = 0; i < returnHandler.length; i++) ex.write8(HANDLER + i, returnHandler[i]);
+        for(let i = 0; i < return_handler.length; i++) ex.write8(HANDLER + i, return_handler[i]);
         write64(IDT + 0x80 * 16, gate(HANDLER, 0x08, 0xE));
         write64(MARKER, 0n);
         cpu.idtr_offset[0] = IDT;
@@ -231,7 +231,7 @@ emulator.add_listener("emulator-loaded", () => {
     }
 
     // A fault whose gate is absent escalates to #DF (vector 8).
-    activeTest = "double fault";
+    active_test = "double fault";
     boot(
         [0x48, 0xC7, 0xC0, 0x00, 0x40, 0x00, 0x00, 0x48, 0x8B, 0x08, 0xF4],
         { vectors: [8], setup: () => write64(PT + 4 * 8, 0n) },

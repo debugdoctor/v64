@@ -37,9 +37,9 @@ emulator.add_listener("emulator-loaded", () => {
     const ext = new BigUint64Array(buffer, 160, 8);
 
     const failures = [];
-    let activeTest = "";
+    let active_test = "";
     const fmt = value => typeof value === "bigint" ? "0x" + value.toString(16) : String(value);
-    const note = message => failures.push(activeTest + ": " + message);
+    const note = message => failures.push(active_test + ": " + message);
     const expect = (got, want, message) => {
         if(got !== want) note(message + " [want " + fmt(want) + ", got " + fmt(got) + "]");
     };
@@ -64,7 +64,7 @@ emulator.add_listener("emulator-loaded", () => {
         0xF4,
     ];
 
-    const buildPageTables = () => {
+    const build_page_tables = () => {
         write64(PML4, BigInt(PDPT) | 0x3n);
         write64(PDPT, BigInt(PD) | 0x3n);
         for(let i = 0; i < 512; i++)
@@ -73,7 +73,7 @@ emulator.add_listener("emulator-loaded", () => {
         }
     };
 
-    const resetRegs = () => {
+    const reset_regs = () => {
         for(let i = 0; i < 16; i++)
         {
             u32[16 + i] = 0;
@@ -81,7 +81,7 @@ emulator.add_listener("emulator-loaded", () => {
             if(i < 8) ext[i] = 0n;
         }
     };
-    const setReg = (i, value) => {
+    const set_reg = (i, value) => {
         const v = BigInt(value);
         if(i < 8)
         {
@@ -99,8 +99,8 @@ emulator.add_listener("emulator-loaded", () => {
             : ext[i - 8];
 
     // Run `code` in long mode; returns true if it took #UD.
-    const runCode = code => {
-        buildPageTables();
+    const run_code = code => {
+        build_page_tables();
         for(let i = 0; i < code.length; i++) ex.write8(BASE + i, code[i]);
         ex.write8(BASE + code.length, 0xF4);
         for(let i = 0; i < handler.length; i++) ex.write8(HANDLER + i, handler[i]);
@@ -121,10 +121,10 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     const sse = (name, init, code, checks) => {
-        activeTest = name;
-        resetRegs();
-        for(const [i, value] of Object.entries(init)) setReg(+i, value);
-        expect(runCode(code), false, "not #UD");
+        active_test = name;
+        reset_regs();
+        for(const [i, value] of Object.entries(init)) set_reg(+i, value);
+        expect(run_code(code), false, "not #UD");
         checks();
     };
 
@@ -192,33 +192,33 @@ emulator.add_listener("emulator-loaded", () => {
     ], () => expect(reg64(0), 0x10n, "shifted lane"));
 
     // MXCSR round trip through memory.
-    activeTest = "ldmxcsr/stmxcsr";
+    active_test = "ldmxcsr/stmxcsr";
     ex.write32(SCRATCH, 0x1F80);
-    expect(runCode([
+    expect(run_code([
         0x0F, 0xAE, 0x14, 0x25, 0x00, 0x30, 0x00, 0x00, // ldmxcsr [0x3000]
         0x0F, 0xAE, 0x1C, 0x25, 0x04, 0x30, 0x00, 0x00, // stmxcsr [0x3004]
     ]), false, "not #UD");
     expect(read32(SCRATCH + 4), 0x1F80, "MXCSR round trip");
 
     // FXSAVE writes MXCSR at offset 24 of the 512-byte area.
-    activeTest = "fxsave";
+    active_test = "fxsave";
     ex.write32(SCRATCH, 0x1F80);
-    expect(runCode([
+    expect(run_code([
         0x0F, 0xAE, 0x14, 0x25, 0x00, 0x30, 0x00, 0x00, // ldmxcsr [0x3000]
         0x0F, 0xAE, 0x04, 0x25, 0x00, 0x31, 0x00, 0x00, // fxsave [0x3100]
     ]), false, "not #UD");
     expect(read32(0x3100 + 24), 0x1F80, "saved MXCSR");
 
-    activeTest = "fxrstor";
-    expect(runCode([
+    active_test = "fxrstor";
+    expect(run_code([
         0x0F, 0xAE, 0x0C, 0x25, 0x00, 0x31, 0x00, 0x00, // fxrstor [0x3100]
     ]), false, "not #UD");
 
     // movdqu through memory.
-    activeTest = "movdqu memory";
-    resetRegs();
-    setReg(0, 0x11223344);
-    expect(runCode([
+    active_test = "movdqu memory";
+    reset_regs();
+    set_reg(0, 0x11223344);
+    expect(run_code([
         0x66, 0x0F, 0x6E, 0xC0,                         // movd xmm0, eax
         0xF3, 0x0F, 0x7F, 0x04, 0x25, 0x00, 0x30, 0x00, 0x00, // movdqu [0x3000], xmm0
         0xF3, 0x0F, 0x6F, 0x0C, 0x25, 0x00, 0x30, 0x00, 0x00, // movdqu xmm1, [0x3000]
@@ -228,9 +228,9 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(0), 0x11223344n, "loaded lane");
 
     // CPUID promises SSE/SSE2, so the instructions above must work.
-    activeTest = "CPUID vs SSE";
-    resetRegs();
-    runCode([0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0xA2]); // mov eax,1; cpuid
+    active_test = "CPUID vs SSE";
+    reset_regs();
+    run_code([0xB8, 0x01, 0x00, 0x00, 0x00, 0x0F, 0xA2]); // mov eax,1; cpuid
     const edx = u32[16 + 2] >>> 0;
     expect(edx & (1 << 25), 1 << 25, "CPUID leaf 1 advertises SSE");
     expect(edx & (1 << 26), 1 << 26, "CPUID leaf 1 advertises SSE2");

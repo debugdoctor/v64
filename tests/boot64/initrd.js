@@ -92,16 +92,16 @@ emulator.add_listener("emulator-loaded", () => {
     expect(read64(0xE028), 0x1000n, "CR3 points at the PML4");
     expect(read64(0xE030) !== 0n, true, "RSP is set");
 
-    let initrdOk = true;
+    let initrd_ok = true;
     for(let i = 0; i < initrd.length; i++)
     {
         if(read8(INITRD_ADDRESS + i) !== initrd[i])
         {
-            initrdOk = false;
+            initrd_ok = false;
             break;
         }
     }
-    expect(initrdOk, true, "the initrd bytes are in guest memory");
+    expect(initrd_ok, true, "the initrd bytes are in guest memory");
 
     if(failures.length)
     {

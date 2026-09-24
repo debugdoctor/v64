@@ -34,8 +34,8 @@ emulator.add_listener("emulator-loaded", () => {
     const u32 = new Uint32Array(buffer);
 
     const failures = [];
-    let activeTest = "";
-    const note = message => failures.push(activeTest + ": " + message);
+    let active_test = "";
+    const note = message => failures.push(active_test + ": " + message);
     const expect = (got, want, message) => {
         if(got !== want) note(message + " [want " + want + ", got " + got + "]");
     };
@@ -56,16 +56,16 @@ emulator.add_listener("emulator-loaded", () => {
         0xF4,
     ];
 
-    const buildPageTables = () => {
+    const build_page_tables = () => {
         write64(PML4, BigInt(PDPT) | 0x3n);
         write64(PDPT, BigInt(PD) | 0x3n);
         for(let i = 0; i < 512; i++) write64(PD + i * 8, BigInt(i) * 0x200000n | 0x83n);
     };
 
-    const runCode = code => {
+    const run_code = code => {
         try
         {
-            buildPageTables();
+            build_page_tables();
             for(let i = 0; i < code.length; i++) ex.write8(BASE + i, code[i]);
             ex.write8(BASE + code.length, 0xF4);
             for(let i = 0; i < handler.length; i++) ex.write8(HANDLER + i, handler[i]);
@@ -94,8 +94,8 @@ emulator.add_listener("emulator-loaded", () => {
     const rbx = () => (BigInt(u32[32 + 3]) << 32n) | BigInt(u32[16 + 3]);
 
     // Long mode reports PAE and PSE.
-    activeTest = "CR4 PAE/PSE";
-    runCode([0x0F, 0x20, 0xE0]); // mov rax, cr4
+    active_test = "CR4 PAE/PSE";
+    run_code([0x0F, 0x20, 0xE0]); // mov rax, cr4
     const cr4 = (BigInt(u32[32]) << 32n) | BigInt(u32[16]);
     expect(cr4 & (1n << 5n), 1n << 5n, "PAE");
     expect(cr4 & (1n << 4n), 1n << 4n, "PSE");
@@ -113,9 +113,9 @@ emulator.add_listener("emulator-loaded", () => {
     ];
     for(const [name, bit] of bits)
     {
-        activeTest = "CR4 " + name;
+        active_test = "CR4 " + name;
         const original = cpu.cr[4];
-        const result = runCode([
+        const result = run_code([
             0x0F, 0x20, 0xE0,             // mov rax, cr4
             0x48, 0x0D, ...imm32(bit),    // or rax, bit
             0x0F, 0x22, 0xE0,             // mov cr4, rax
@@ -129,8 +129,8 @@ emulator.add_listener("emulator-loaded", () => {
     }
 
     // A reserved bit is a #GP.
-    activeTest = "CR4 reserved bit";
-    const reserved = runCode([
+    active_test = "CR4 reserved bit";
+    const reserved = run_code([
         0x0F, 0x20, 0xE0,                                           // mov rax, cr4
         0x48, 0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, // mov rbx, 1<<63
         0x48, 0x09, 0xD8,                                           // or rax, rbx
@@ -140,10 +140,10 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reserved.faulted, true, "#GP");
 
     // With FSGSBASE enabled, WRFSBASE/RDFSBASE round-trip.
-    activeTest = "FSGSBASE round trip";
+    active_test = "FSGSBASE round trip";
     {
         const original = cpu.cr[4];
-        const result = runCode([
+        const result = run_code([
             0x0F, 0x20, 0xE0,                         // mov rax, cr4
             0x48, 0x0D, ...imm32(1 << 16),            // or rax, FSGSBASE
             0x0F, 0x22, 0xE0,                         // mov cr4, rax

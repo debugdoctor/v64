@@ -41,10 +41,10 @@ emulator.add_listener("emulator-loaded", () => {
     const ext = new BigUint64Array(buffer, 160, 8);
 
     const failures = [];
-    let activeTest = "";
+    let active_test = "";
 
     const fmt = value => typeof value === "bigint" ? "0x" + value.toString(16) : String(value);
-    const note = message => failures.push(activeTest + ": " + message);
+    const note = message => failures.push(active_test + ": " + message);
     const expect = (got, want, message) => {
         if(got !== want) note(message + " [want " + fmt(want) + ", got " + fmt(got) + "]");
     };
@@ -54,7 +54,7 @@ emulator.add_listener("emulator-loaded", () => {
             ? (BigInt(u32[32 + i]) << 32n) | BigInt(u32[16 + i])
             : ext[i - 8];
 
-    const setReg64 = (i, raw) => {
+    const set_reg64 = (i, raw) => {
         const value = BigInt(raw);
         if(i < 8)
         {
@@ -77,10 +77,10 @@ emulator.add_listener("emulator-loaded", () => {
         BigInt(ex.read8(address + 6)) << 48n |
         BigInt(ex.read8(address + 7)) << 56n;
 
-    const flagsOf = () => cpu.flags[0] >>> 0;
+    const flags_of = () => cpu.flags[0] >>> 0;
 
     const reset = () => {
-        for(let i = 0; i < 16; i++) setReg64(i, 0n);
+        for(let i = 0; i < 16; i++) set_reg64(i, 0n);
         cpu.cr[0] = 0;
         cpu.is_32[0] = 1;
         cpu.cpl[0] = 0;
@@ -110,8 +110,8 @@ emulator.add_listener("emulator-loaded", () => {
         return cpu.in_hlt[0] === 1;
     };
 
-    const expectFlags = want => {
-        const flags = flagsOf();
+    const expect_flags = want => {
+        const flags = flags_of();
         const named = { CF: F_CF, PF: F_PF, AF: F_AF, ZF: F_ZF, SF: F_SF, OF: F_OF };
         for(const [name, mask] of Object.entries(named))
         {
@@ -122,44 +122,44 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     // stc / clc / cmc drive CF.
-    activeTest = "stc/clc/cmc";
+    active_test = "stc/clc/cmc";
     reset();
     run([0xF9, 0xF8, 0xF5]); // stc; clc; cmc
-    expectFlags({ cf: 1 });
+    expect_flags({ cf: 1 });
 
     // inc/dec touch every flag except CF, and a 32-bit write clears the top half.
-    activeTest = "inc eax";
+    active_test = "inc eax";
     reset();
-    setReg64(0, 0xFFFF_FFFF_FFFF_FFFFn);
+    set_reg64(0, 0xFFFF_FFFF_FFFF_FFFFn);
     cpu.flags[0] = 0x2 | F_CF;
     run([0xB8, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xC0]); // mov eax,0; inc eax
     expect(reg64(0), 1n, "inc eax zero-extends");
-    expectFlags({ cf: 1, zf: 0, sf: 0, of: 0, pf: 0, af: 0 });
+    expect_flags({ cf: 1, zf: 0, sf: 0, of: 0, pf: 0, af: 0 });
 
-    activeTest = "dec eax";
+    active_test = "dec eax";
     reset();
-    setReg64(0, 0xFFFF_FFFF_FFFF_FFFFn);
+    set_reg64(0, 0xFFFF_FFFF_FFFF_FFFFn);
     cpu.flags[0] = 0x2 | F_CF;
     run([0xB8, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xC8]); // mov eax,0; dec eax
     expect(reg64(0), 0xFFFF_FFFFn, "dec eax zero-extends");
-    expectFlags({ cf: 1, zf: 0, sf: 1, of: 0, af: 1 });
+    expect_flags({ cf: 1, zf: 0, sf: 1, of: 0, af: 1 });
 
     // neg and not.
-    activeTest = "neg eax";
+    active_test = "neg eax";
     reset();
     run([0xB8, 0x01, 0x00, 0x00, 0x00, 0xF7, 0xD8]); // mov eax,1; neg eax
     expect(reg64(0), 0xFFFF_FFFFn, "neg eax");
-    expectFlags({ cf: 1, of: 0, sf: 1, pf: 1, af: 1, zf: 0 });
+    expect_flags({ cf: 1, of: 0, sf: 1, pf: 1, af: 1, zf: 0 });
 
-    activeTest = "not eax";
+    active_test = "not eax";
     reset();
     cpu.flags[0] = 0x2 | F_ZF | F_CF;
     run([0xB8, 0x00, 0x00, 0x00, 0x00, 0xF7, 0xD0]); // mov eax,0; not eax
     expect(reg64(0), 0xFFFF_FFFFn, "not eax");
-    expectFlags({ cf: 1, zf: 1, of: 0, sf: 0 });
+    expect_flags({ cf: 1, zf: 1, of: 0, sf: 0 });
 
     // adc/sbb carry chain over 64 bits.
-    activeTest = "adc/sbb 64";
+    active_test = "adc/sbb 64";
     reset();
     cpu.flags[0] = 0x2 | F_CF;
     run([
@@ -168,10 +168,10 @@ emulator.add_listener("emulator-loaded", () => {
         0x48, 0x83, 0xD8, 0x00,                   // sbb rax, 0
     ]);
     expect(reg64(0), 0xFFFF_FFFF_FFFF_FFFFn, "adc then sbb");
-    expectFlags({ cf: 1, zf: 0, sf: 1, of: 0, af: 1 });
+    expect_flags({ cf: 1, zf: 0, sf: 1, of: 0, af: 1 });
 
     // 8- and 16-bit results keep the untouched upper bits.
-    activeTest = "add al, 1";
+    active_test = "add al, 1";
     reset();
     run([
         0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, -1
@@ -179,9 +179,9 @@ emulator.add_listener("emulator-loaded", () => {
         0x04, 0x01,                               // add al, 1
     ]);
     expect(reg64(0), 0xFFFF_FFFF_FFFF_FF00n, "8-bit add");
-    expectFlags({ cf: 1, zf: 1, pf: 1, af: 1, of: 0 });
+    expect_flags({ cf: 1, zf: 1, pf: 1, af: 1, of: 0 });
 
-    activeTest = "add ax, 1";
+    active_test = "add ax, 1";
     reset();
     run([
         0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, -1
@@ -190,16 +190,16 @@ emulator.add_listener("emulator-loaded", () => {
         0x66, 0x83, 0xC0, 0x01,                   // add ax, 1
     ]);
     expect(reg64(0), 0xFFFF_FFFF_FFFF_1235n, "16-bit add");
-    expectFlags({ cf: 0, zf: 0, sf: 0, of: 0 });
+    expect_flags({ cf: 0, zf: 0, sf: 0, of: 0 });
 
-    activeTest = "mov ax, imm16";
+    active_test = "mov ax, imm16";
     reset();
     run([0x66, 0xB8, 0x34, 0x12, 0x66, 0x83, 0xC0, 0x01]); // mov ax,0x1234; add ax,1
     expect(reg64(0), 0x1235n, "16-bit immediate");
-    expectFlags({ cf: 0, zf: 0, sf: 0, of: 0 });
+    expect_flags({ cf: 0, zf: 0, sf: 0, of: 0 });
 
     // Widening and narrowing multiply.
-    activeTest = "mul r64";
+    active_test = "mul r64";
     reset();
     run([
         0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, -1
@@ -208,9 +208,9 @@ emulator.add_listener("emulator-loaded", () => {
     ]);
     expect(reg64(0), 0xFFFF_FFFF_FFFF_FFFEn, "mul rax");
     expect(reg64(2), 1n, "mul rdx");
-    expectFlags({ cf: 1, of: 1 });
+    expect_flags({ cf: 1, of: 1 });
 
-    activeTest = "imul r64 (one operand)";
+    active_test = "imul r64 (one operand)";
     reset();
     run([
         0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, -1
@@ -219,9 +219,9 @@ emulator.add_listener("emulator-loaded", () => {
     ]);
     expect(reg64(0), 0xFFFF_FFFF_FFFF_FFFEn, "imul rax");
     expect(reg64(2), 0xFFFF_FFFF_FFFF_FFFFn, "imul rdx sign-extends");
-    expectFlags({ cf: 0, of: 0 });
+    expect_flags({ cf: 0, of: 0 });
 
-    activeTest = "imul two operand";
+    active_test = "imul two operand";
     reset();
     run([
         0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, // mov rax, 1<<63
@@ -229,19 +229,19 @@ emulator.add_listener("emulator-loaded", () => {
         0x48, 0x0F, 0xAF, 0xC1,                                     // imul rax, rcx
     ]);
     expect(reg64(0), 0n, "imul wraps");
-    expectFlags({ cf: 1, of: 1 });
+    expect_flags({ cf: 1, of: 1 });
 
-    activeTest = "imul three operand";
+    active_test = "imul three operand";
     reset();
     run([
         0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax, 5
         0x48, 0x6B, 0xD8, 0x03,       // imul rbx, rax, 3
     ]);
     expect(reg64(3), 15n, "imul three-operand");
-    expectFlags({ cf: 0, of: 0 });
+    expect_flags({ cf: 0, of: 0 });
 
     // div and idiv use rdx:rax; idiv truncates toward zero.
-    activeTest = "div r32";
+    active_test = "div r32";
     reset();
     run([
         0x31, 0xD2,                   // xor edx, edx
@@ -252,7 +252,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(0), 14n, "div quotient");
     expect(reg64(2), 2n, "div remainder");
 
-    activeTest = "idiv r64";
+    active_test = "idiv r64";
     reset();
     run([
         0x48, 0xC7, 0xC0, 0x9C, 0xFF, 0xFF, 0xFF, // mov rax, -100
@@ -264,7 +264,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(2), 0xFFFF_FFFF_FFFF_FFFEn, "idiv remainder -2");
 
     // Shifts: CL is masked to the operand width, CF is the last bit out.
-    activeTest = "shifts";
+    active_test = "shifts";
     reset();
     run([
         0xB8, 0x01, 0x00, 0x00, 0x00,             // mov eax, 1
@@ -276,10 +276,10 @@ emulator.add_listener("emulator-loaded", () => {
         0x48, 0xD1, 0xE0,                         // shl rax, 1
     ]);
     expect(reg64(0), 0n, "shifted out the top bit");
-    expectFlags({ cf: 1 });
+    expect_flags({ cf: 1 });
 
     // Rotates set CF and OF too.
-    activeTest = "rol/ror";
+    active_test = "rol/ror";
     reset();
     run([
         0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
@@ -287,10 +287,10 @@ emulator.add_listener("emulator-loaded", () => {
         0xD1, 0xC8,                   // ror eax, 1
     ]);
     expect(reg64(0), 1n, "rol then ror");
-    expectFlags({ cf: 0, of: 0 });
+    expect_flags({ cf: 0, of: 0 });
 
     // Bit test/modify, register and immediate forms.
-    activeTest = "bt/bts/btc";
+    active_test = "bt/bts/btc";
     reset();
     run([
         0x31, 0xC0,                               // xor eax, eax
@@ -302,10 +302,10 @@ emulator.add_listener("emulator-loaded", () => {
         0x0F, 0xBA, 0xE0, 0x1F,                   // bt  eax, 31
     ]);
     expect(reg64(0), 0x8000_0000n, "bit ops leave the value");
-    expectFlags({ cf: 1 });
+    expect_flags({ cf: 1 });
 
     // Bit scan.
-    activeTest = "bsf/bsr";
+    active_test = "bsf/bsr";
     reset();
     run([
         0xB8, 0x08, 0x00, 0x00, 0x00, // mov eax, 8
@@ -314,10 +314,10 @@ emulator.add_listener("emulator-loaded", () => {
     ]);
     expect(reg64(3), 3n, "bsf");
     expect(reg64(1), 3n, "bsr");
-    expectFlags({ zf: 0 });
+    expect_flags({ zf: 0 });
 
     // setcc writes a byte, cmovcc moves or not depending on the flags.
-    activeTest = "setcc/cmovcc";
+    active_test = "setcc/cmovcc";
     reset();
     run([
         0x31, 0xC9,                   // xor ecx, ecx
@@ -335,10 +335,10 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(1), 1n, "cmovne not taken");
     expect(reg64(2), 0n, "setne");
     expect(reg64(3), 2n, "source unchanged");
-    expectFlags({ zf: 1 });
+    expect_flags({ zf: 1 });
 
     // bswap.
-    activeTest = "bswap";
+    active_test = "bswap";
     reset();
     run([
         0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // mov rax, 0x1122334455667788
@@ -347,7 +347,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(0), 0x8877_6655_4433_2211n, "bswap rax");
 
     // xchg, xadd and cmpxchg.
-    activeTest = "xchg eax, ebx";
+    active_test = "xchg eax, ebx";
     reset();
     run([
         0xB8, 0x11, 0x00, 0x00, 0x00, // mov eax, 0x11
@@ -357,9 +357,9 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(0), 0x22n, "xchg eax");
     expect(reg64(3), 0x11n, "xchg ebx");
 
-    activeTest = "xchg qword [rax], rcx";
+    active_test = "xchg qword [rax], rcx";
     reset();
-    setReg64(0, SCRATCH);
+    set_reg64(0, SCRATCH);
     run([
         0x48, 0xC7, 0x00, 0xAA, 0x00, 0x00, 0x00, // mov qword [rax], 0xAA
         0xB9, 0x55, 0x00, 0x00, 0x00,             // mov ecx, 0x55
@@ -368,7 +368,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(1), 0xAAn, "xchg loads the old memory value");
     expect(read64(SCRATCH), 0x55n, "xchg stores rcx");
 
-    activeTest = "xadd eax, ebx";
+    active_test = "xadd eax, ebx";
     reset();
     run([
         0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
@@ -378,9 +378,9 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(0), 3n, "xadd sum");
     expect(reg64(3), 1n, "xadd old value");
 
-    activeTest = "xadd qword [r8], rbx";
+    active_test = "xadd qword [r8], rbx";
     reset();
-    setReg64(8, SCRATCH);
+    set_reg64(8, SCRATCH);
     run([
         0x49, 0xC7, 0x00, 0x05, 0x00, 0x00, 0x00, // mov qword [r8], 5
         0xBB, 0x03, 0x00, 0x00, 0x00,             // mov ebx, 3
@@ -389,7 +389,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(3), 5n, "xadd returns the old value");
     expect(read64(SCRATCH), 8n, "xadd sum in memory");
 
-    activeTest = "cmpxchg ebx, ecx (match)";
+    active_test = "cmpxchg ebx, ecx (match)";
     reset();
     run([
         0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax, 5
@@ -398,9 +398,9 @@ emulator.add_listener("emulator-loaded", () => {
         0x0F, 0xB1, 0xCB,             // cmpxchg ebx, ecx
     ]);
     expect(reg64(3), 7n, "cmpxchg writes on a match");
-    expectFlags({ zf: 1 });
+    expect_flags({ zf: 1 });
 
-    activeTest = "cmpxchg ebx, ecx (mismatch)";
+    active_test = "cmpxchg ebx, ecx (mismatch)";
     reset();
     run([
         0xB8, 0x05, 0x00, 0x00, 0x00, // mov eax, 5
@@ -410,11 +410,11 @@ emulator.add_listener("emulator-loaded", () => {
     ]);
     expect(reg64(0), 9n, "cmpxchg fails: eax = old value");
     expect(reg64(3), 9n, "cmpxchg fails: destination unchanged");
-    expectFlags({ zf: 0 });
+    expect_flags({ zf: 0 });
 
-    activeTest = "cmpxchg qword [r8], rcx";
+    active_test = "cmpxchg qword [r8], rcx";
     reset();
-    setReg64(8, SCRATCH);
+    set_reg64(8, SCRATCH);
     run([
         0x49, 0xC7, 0x00, 0x08, 0x00, 0x00, 0x00, // mov qword [r8], 8
         0xB8, 0x08, 0x00, 0x00, 0x00,             // mov eax, 8
@@ -422,10 +422,10 @@ emulator.add_listener("emulator-loaded", () => {
         0x49, 0x0F, 0xB1, 0x08,                   // cmpxchg qword [r8], rcx
     ]);
     expect(read64(SCRATCH), 0x99n, "cmpxchg writes memory on a match");
-    expectFlags({ zf: 1 });
+    expect_flags({ zf: 1 });
 
     // The sign-extend family.
-    activeTest = "cqo/cdq/cdqe";
+    active_test = "cqo/cdq/cdqe";
     reset();
     run([
         0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, -1
@@ -438,7 +438,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(0), 0xFFFF_FFFF_FFFF_FFFFn, "cdqe sign-extends");
     expect(reg64(2), 0xFFFF_FFFFn, "cdq writes edx only");
 
-    activeTest = "movsxd";
+    active_test = "movsxd";
     reset();
     run([
         0xB8, 0x00, 0x00, 0x00, 0x80, // mov eax, 0x80000000
@@ -447,9 +447,9 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(2), 0xFFFF_FFFF_8000_0000n, "movsxd");
 
     // Memory-operand bit tests, shifts and sign extension.
-    activeTest = "bt/bts/btr/btc qword [rax], rcx";
+    active_test = "bt/bts/btr/btc qword [rax], rcx";
     reset();
-    setReg64(0, SCRATCH);
+    set_reg64(0, SCRATCH);
     run([
         0x48, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x00, // mov qword [rax], 0
         0xB9, 0x05, 0x00, 0x00, 0x00,             // mov ecx, 5
@@ -459,11 +459,11 @@ emulator.add_listener("emulator-loaded", () => {
         0x48, 0x0F, 0xA3, 0x08,                   // bt  qword [rax], rcx
     ]);
     expect(read64(SCRATCH), 0x20n, "bit 5 toggled back on");
-    expectFlags({ cf: 1 });
+    expect_flags({ cf: 1 });
 
-    activeTest = "shl/sar qword [r8], cl";
+    active_test = "shl/sar qword [r8], cl";
     reset();
-    setReg64(8, SCRATCH);
+    set_reg64(8, SCRATCH);
     run([
         0x49, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00, // mov qword [r8], 1
         0xB9, 0x04, 0x00, 0x00, 0x00,             // mov ecx, 4
@@ -476,9 +476,9 @@ emulator.add_listener("emulator-loaded", () => {
     expect(reg64(9), 0x10n, "memory shl");
     expect(reg64(10), 0xFFFF_FFFF_FFFF_FFFFn, "memory sar");
 
-    activeTest = "movsx/movzx/imul from memory";
+    active_test = "movsx/movzx/imul from memory";
     reset();
-    setReg64(8, SCRATCH);
+    set_reg64(8, SCRATCH);
     run([
         0x49, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x00, // mov qword [r8], 0
         0x41, 0xC7, 0x00, 0x80, 0xFF, 0xFF, 0xFF, // mov dword [r8], 0xFFFFFF80
@@ -517,7 +517,7 @@ emulator.add_listener("emulator-loaded", () => {
         for(let cc = 0; cc < 16; cc++)
         {
             const [name, takenFlags, notTakenFlags] = conditions[cc];
-            activeTest = "j" + name;
+            active_test = "j" + name;
 
             reset();
             cpu.flags[0] = 0x2 | takenFlags;

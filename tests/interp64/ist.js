@@ -88,9 +88,9 @@ emulator.add_listener("emulator-loaded", () => {
     write64(GDTR + 2, BigInt(GDT));
 
     // #UD handler (marker) and the vector 0x80 handler (records RSP).
-    const udHandler = [0x48, 0xC7, 0x04, 0x25, 0x00, 0x60, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xF4];
+    const ud_handler = [0x48, 0xC7, 0x04, 0x25, 0x00, 0x60, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xF4];
     const handler = [0x48, 0x89, 0x24, 0x25, 0x00, 0x70, 0x00, 0x00, 0xF4]; // mov [SAVED_RSP], rsp
-    for(let i = 0; i < udHandler.length; i++) ex.write8(UD_HANDLER + i, udHandler[i]);
+    for(let i = 0; i < ud_handler.length; i++) ex.write8(UD_HANDLER + i, ud_handler[i]);
     for(let i = 0; i < handler.length; i++) ex.write8(HANDLER + i, handler[i]);
     write64(IDT + 6 * 16, gate(UD_HANDLER, 0x08, 0xE, 0));
     write64(IDT + 0x80 * 16, gate(HANDLER, 0x08, 0xE, 1));

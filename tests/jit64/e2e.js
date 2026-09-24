@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync as mkdtemp_sync, readFileSync as read_file_sync, rmSync as rm_sync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { v64 } from "../../src/main.js";
@@ -24,16 +24,16 @@ const SOURCE = new URL("./e2e.asm", import.meta.url);
 
 function assemble()
 {
-    const dir = mkdtempSync(path.join(tmpdir(), "jit64-e2e-"));
+    const dir = mkdtemp_sync(path.join(tmpdir(), "jit64-e2e-"));
     const binary = path.join(dir, "e2e.bin");
     try
     {
         execFileSync("nasm", ["-f", "bin", "-o", binary, SOURCE.pathname], { stdio: "inherit" });
-        return readFileSync(binary);
+        return read_file_sync(binary);
     }
     finally
     {
-        rmSync(dir, { recursive: true, force: true });
+        rm_sync(dir, { recursive: true, force: true });
     }
 }
 
@@ -59,7 +59,7 @@ emulator.add_listener("emulator-loaded", () => {
         ex.write32(address + 4, Number(value >> 32n & 0xFFFF_FFFFn));
     };
     // Guest physical memory, read through the CPU rather than the wasm buffer.
-    const readGuest = (address, bytes) => {
+    const read_guest = (address, bytes) => {
         let value = 0n;
         for(let i = bytes - 1; i >= 0; i--)
         {
@@ -71,7 +71,7 @@ emulator.add_listener("emulator-loaded", () => {
         const u = u32();
         return (BigInt(u[32 + index]) << 32n) | BigInt(u[16 + index]);
     };
-    const extReg = index => guest().getBigUint64(160 + 8 * index, true);
+    const ext_reg = index => guest().getBigUint64(160 + 8 * index, true);
 
     // Identity-map the first 1 GiB with 2 MiB pages.
     const PML4 = 0x10000;
@@ -115,14 +115,14 @@ emulator.add_listener("emulator-loaded", () => {
         assert.equal(cpu.in_hlt[0], 1, "the program halted");
         return {
             compiled: ex.jit64_compiled_count(),
-            r8: extReg(0),
-            r9: extReg(1),
-            r10: extReg(2),
-            r13: extReg(5),
-            r14: extReg(6),
-            r15: extReg(7),
-            word: readGuest(0x80020, 2),
-            qword: readGuest(0x80028, 8),
+            r8: ext_reg(0),
+            r9: ext_reg(1),
+            r10: ext_reg(2),
+            r13: ext_reg(5),
+            r14: ext_reg(6),
+            r15: ext_reg(7),
+            word: read_guest(0x80020, 2),
+            qword: read_guest(0x80028, 8),
         };
     };
 

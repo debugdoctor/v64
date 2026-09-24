@@ -42,12 +42,12 @@ function assemble()
     }
 }
 
-function bzImage(body)
+function bz_image(body)
 {
-    const setupSects = 4;
-    const protStart = (setupSects + 1) * 512;
-    const image = new Uint8Array((protStart + 0x200 + body.length + 511) & ~511);
-    image[0x1F1] = setupSects;
+    const setup_sects = 4;
+    const prot_start = (setup_sects + 1) * 512;
+    const image = new Uint8Array((prot_start + 0x200 + body.length + 511) & ~511);
+    image[0x1F1] = setup_sects;
     image[0x1FE] = 0x55;
     image[0x1FF] = 0xAA;
     image[0x201] = 0x40;
@@ -55,22 +55,22 @@ function bzImage(body)
     image[0x206] = 0x0C;
     image[0x207] = 0x02;
     image[0x238] = 0xFF;
-    image.set(body, protStart + 0x200);
+    image.set(body, prot_start + 0x200);
     return image;
 }
 
 const file = new Uint8Array(FILE_SIZE);
 for(let i = 0; i < file.length; i++) file[i] = (i * 7 + 3) & 0xFF;
 
-const kernelPath = path.join(os.tmpdir(), "v64-e2e-9p64-kernel.img");
-fs.writeFileSync(kernelPath, bzImage(assemble()));
+const kernel_path = path.join(os.tmpdir(), "v64-e2e-9p64-kernel.img");
+fs.writeFileSync(kernel_path, bz_image(assemble()));
 
 const emulator = new v64({
     autostart: false,
     memory_size: 8 * 1024 * 1024,
     disable_jit: 1,
     log_level: 0,
-    bzimage: { url: kernelPath, async: false },
+    bzimage: { url: kernel_path, async: false },
     filesystem: {},
     cmdline: "",
     direct_boot: true,

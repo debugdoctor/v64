@@ -30,7 +30,7 @@ emulator.add_listener("emulator-loaded", () => {
         ex.write32(address + 4, Number(value >> 32n & 0xFFFF_FFFFn));
     };
     // Read guest physical memory (through the CPU), not the raw wasm buffer.
-    const readGuest = (address, bytes) => {
+    const read_guest = (address, bytes) => {
         let value = 0n;
         for(let i = bytes - 1; i >= 0; i--)
         {
@@ -202,10 +202,10 @@ emulator.add_listener("emulator-loaded", () => {
     const translated = BigInt(ex.read8(0x90000)) | BigInt(ex.read8(0x90001)) << 8n;
     assert.equal(translated, 0x1100n, "non-identity translated store");
     assert.equal(ex.read8(0x70000), 0, "unmapped physical alias untouched");
-    const crossPageLow = Array.from({ length: 4 }, (_, i) => ex.read8(0x90FFC + i));
-    const crossPageHigh = Array.from({ length: 4 }, (_, i) => ex.read8(0xC0000 + i));
-    assert.deepEqual(crossPageLow, [0x88, 0x77, 0x66, 0x55], "cross-page low bytes");
-    assert.deepEqual(crossPageHigh, [0x44, 0x33, 0x22, 0x11], "cross-page high bytes");
+    const cross_page_low = Array.from({ length: 4 }, (_, i) => ex.read8(0x90FFC + i));
+    const cross_page_high = Array.from({ length: 4 }, (_, i) => ex.read8(0xC0000 + i));
+    assert.deepEqual(cross_page_low, [0x88, 0x77, 0x66, 0x55], "cross-page low bytes");
+    assert.deepEqual(cross_page_high, [0x44, 0x33, 0x22, 0x11], "cross-page high bytes");
     assert.deepEqual(
         Array.from({ length: 4 }, (_, i) => ex.read8(0x8000C + i)),
         [0xAA, 0xAA, 0xAA, 0xAA],
@@ -216,7 +216,7 @@ emulator.add_listener("emulator-loaded", () => {
 
     // dec/jnz is one block. 500 interpreted iterations, then 100 compiled
     // iterations of both instructions: 1 + 500*2 + 100*2 + 1 = 1202.
-    const loopBase = 0x2000;
+    const loop_base = 0x2000;
     const loop = [
         0xB9, 0x58, 0x02, 0x00, 0x00, // mov ecx, 600
         0xFF, 0xC9,                   // dec ecx
@@ -225,13 +225,13 @@ emulator.add_listener("emulator-loaded", () => {
     ];
     for(let i = 0; i < loop.length; i++)
     {
-        ex.write8(loopBase + i, loop[i]);
+        ex.write8(loop_base + i, loop[i]);
     }
     cpu.in_hlt[0] = 0;
-    new DataView(buffer).setBigUint64(232, BigInt(loopBase), true);
+    new DataView(buffer).setBigUint64(232, BigInt(loop_base), true);
     const before = u32[166];
-    let loopGuard = 0;
-    while(!cpu.in_hlt[0] && loopGuard++ < 100000)
+    let loop_guard = 0;
+    while(!cpu.in_hlt[0] && loop_guard++ < 100000)
     {
         ex.main_loop();
     }
@@ -239,38 +239,38 @@ emulator.add_listener("emulator-loaded", () => {
 
     // Self-modifying code: a guest store to the physical code page must drop the
     // blocks compiled from that page, without clearing the whole cache.
-    const compiledBeforeSmc = ex.jit64_compiled_count();
-    const storeBase = 0x3000; // page 3, distinct from the loop at page 2
+    const compiled_before_smc = ex.jit64_compiled_count();
+    const store_base = 0x3000; // page 3, distinct from the loop at page 2
     const store = [
         0xC6, 0x04, 0x25, 0x00, 0x21, 0x00, 0x00, 0x01, // mov byte [0x2100], 1
         0xF4,                                           // hlt
     ];
     for(let i = 0; i < store.length; i++)
     {
-        ex.write8(storeBase + i, store[i]);
+        ex.write8(store_base + i, store[i]);
     }
     cpu.in_hlt[0] = 0;
-    new DataView(buffer).setBigUint64(232, BigInt(storeBase), true);
-    let smcGuard = 0;
-    while(!cpu.in_hlt[0] && smcGuard++ < 1000)
+    new DataView(buffer).setBigUint64(232, BigInt(store_base), true);
+    let smc_guard = 0;
+    while(!cpu.in_hlt[0] && smc_guard++ < 1000)
     {
         ex.main_loop();
     }
     assert.equal(ex.read8(0x2100), 1, "store landed in the code page");
     assert.ok(
-        ex.jit64_compiled_count() < compiledBeforeSmc,
+        ex.jit64_compiled_count() < compiled_before_smc,
         "self-modifying code dropped the block(s) from that page",
     );
 
     // cmov/setcc with memory operands, compiled as a hot block.
     {
-        const cmovBase = 0x4000;
+        const cmov_base = 0x4000;
         ex.write8(0x60000, 0x34);
         ex.write8(0x60001, 0x12);
         ex.write8(0x60002, 0x00);
         ex.write8(0x60003, 0x00);
         ex.write8(0x60008, 0xAA);
-        const cmovProgram = [
+        const cmov_program = [
             0xB9, 0x58, 0x02, 0x00, 0x00,                   // mov ecx, 600
             0x39, 0xC9,                                     // cmp ecx, ecx (ZF=1)
             0xB8, 0x00, 0x00, 0x00, 0x00,                   // mov eax, 0
@@ -280,12 +280,12 @@ emulator.add_listener("emulator-loaded", () => {
             0x75, 0xE5,                                     // jnz cmove (not the mov ecx,600)
             0xF4,                                           // hlt
         ];
-        for(let i = 0; i < cmovProgram.length; i++)
+        for(let i = 0; i < cmov_program.length; i++)
         {
-            ex.write8(cmovBase + i, cmovProgram[i]);
+            ex.write8(cmov_base + i, cmov_program[i]);
         }
         cpu.in_hlt[0] = 0;
-        new DataView(buffer).setBigUint64(232, BigInt(cmovBase), true);
+        new DataView(buffer).setBigUint64(232, BigInt(cmov_base), true);
         let g = 0;
         while(!cpu.in_hlt[0] && g++ < 100000)
         {
@@ -298,12 +298,12 @@ emulator.add_listener("emulator-loaded", () => {
     // Stage 5 coverage: 16-bit operands (`66`), address-size override (`67`),
     // LOCK, memory-form shifts and CPUID, all inside a hot compiled block.
     {
-        const covBase = 0x5000;
+        const cov_base = 0x5000;
         ex.write8(0x60000, 0x44);
         ex.write8(0x60001, 0x33);
         ex.write8(0x60002, 0x22);
         ex.write8(0x60003, 0x11);
-        const covProgram = [
+        const cov_program = [
             0x41, 0xBC, 0x58, 0x02, 0x00, 0x00, // mov r12d, 600
             0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, -1
             0x66, 0xB8, 0x34, 0x12, // mov ax, 0x1234
@@ -323,20 +323,20 @@ emulator.add_listener("emulator-loaded", () => {
             0x75, 0xBC, // jnz loop
             0xF4, // hlt
         ];
-        for(let i = 0; i < covProgram.length; i++)
+        for(let i = 0; i < cov_program.length; i++)
         {
-            ex.write8(covBase + i, covProgram[i]);
+            ex.write8(cov_base + i, cov_program[i]);
         }
         cpu.in_hlt[0] = 0;
-        new DataView(buffer).setBigUint64(232, BigInt(covBase), true);
-        const compiledBeforeCov = ex.jit64_compiled_count();
+        new DataView(buffer).setBigUint64(232, BigInt(cov_base), true);
+        const compiled_before_cov = ex.jit64_compiled_count();
         let g = 0;
         while(!cpu.in_hlt[0] && g++ < 200000)
         {
             ex.main_loop();
         }
         assert.ok(
-            ex.jit64_compiled_count() > compiledBeforeCov,
+            ex.jit64_compiled_count() > compiled_before_cov,
             "the Stage 5 block was JIT-compiled",
         );
 
@@ -347,16 +347,16 @@ emulator.add_listener("emulator-loaded", () => {
         assert.equal(u32[16 + 3] >>> 0, 0x756E6547, "cpuid leaf 0 ebx");
         assert.equal(u32[16 + 1] >>> 0, 0x6C65746E, "cpuid leaf 0 ecx");
         assert.equal(u32[16 + 2] >>> 0, 0x49656E69, "cpuid leaf 0 edx");
-        const covWord = readGuest(0x80020, 2);
-        assert.equal(covWord, 0xABCEn, "16-bit memory add");
-        assert.equal(readGuest(0x80028, 8), 600n, "lock add and memory-form shifts");
+        const cov_word = read_guest(0x80020, 2);
+        assert.equal(cov_word, 0xABCEn, "16-bit memory add");
+        assert.equal(read_guest(0x80028, 8), 600n, "lock add and memory-form shifts");
     }
 
     // A 16-bit CL shift by more than the operand width must not underflow the
     // carry calculation in the JIT helper.
     {
-        const shiftBase = 0x6000;
-        const shiftProgram = [
+        const shift_base = 0x6000;
+        const shift_program = [
             0x41, 0xBC, 0x58, 0x02, 0x00, 0x00, // mov r12d, 600
             0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, -1
             0x66, 0xB8, 0x34, 0x12, // mov ax, 0x1234
@@ -367,12 +367,12 @@ emulator.add_listener("emulator-loaded", () => {
             0x75, 0xF5, // jnz loop
             0xF4, // hlt
         ];
-        for(let i = 0; i < shiftProgram.length; i++)
+        for(let i = 0; i < shift_program.length; i++)
         {
-            ex.write8(shiftBase + i, shiftProgram[i]);
+            ex.write8(shift_base + i, shift_program[i]);
         }
         cpu.in_hlt[0] = 0;
-        new DataView(buffer).setBigUint64(232, BigInt(shiftBase), true);
+        new DataView(buffer).setBigUint64(232, BigInt(shift_base), true);
         let g = 0;
         while(!cpu.in_hlt[0] && g++ < 200000)
         {

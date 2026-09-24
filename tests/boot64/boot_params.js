@@ -43,7 +43,7 @@ emulator.add_listener("emulator-loaded", () => {
         for(let i = 0; i < 8; i++) value |= BigInt(read8(address + i)) << BigInt(i * 8);
         return value;
     };
-    const readString = (address, length) => {
+    const read_string = (address, length) => {
         let text = "";
         for(let i = 0; i < length; i++)
         {
@@ -93,14 +93,14 @@ emulator.add_listener("emulator-loaded", () => {
 
     // struct setup_header, embedded at boot_params + 0x1F1.
     expect(read16(BOOT_PARAMS + 0x1FE), 0xAA55, "hdr.boot_flag");
-    expect(readString(BOOT_PARAMS + 0x202, 4), "HdrS", "hdr.header");
+    expect(read_string(BOOT_PARAMS + 0x202, 4), "HdrS", "hdr.header");
     expect(read16(BOOT_PARAMS + 0x206), 0x020C, "hdr.version");
     expect(read8(BOOT_PARAMS + 0x1F1), setup_sects, "hdr.setup_sects");
     expect(read32(BOOT_PARAMS + 0x238), 0xFF, "hdr.cmdline_size");
 
     // The command line.
     expect(read32(BOOT_PARAMS + 0x228), 0x80000, "hdr.cmd_line_ptr");
-    expect(readString(0x80000, CMDLINE.length + 1), CMDLINE, "the command line was copied");
+    expect(read_string(0x80000, CMDLINE.length + 1), CMDLINE, "the command line was copied");
 
     // struct boot_params memory map.
     const entries = read8(BOOT_PARAMS + 0x1E8);

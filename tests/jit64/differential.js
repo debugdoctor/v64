@@ -112,7 +112,7 @@ emulator.add_listener("emulator-loaded", () => {
         return ((t ^ t >>> 14) >>> 0) / 4294967296;
     };
 
-    const setReg64 = (i, value) => {
+    const set_reg64 = (i, value) => {
         if(i < 8)
         {
             u32[16 + i] = Number(value & 0xFFFF_FFFFn);
@@ -128,7 +128,7 @@ emulator.add_listener("emulator-loaded", () => {
             ? (BigInt(u32[32 + i]) << 32n) | BigInt(u32[16 + i])
             : ext[i - 8];
 
-    const buildProgram = random => {
+    const build_program = random => {
         const body = [];
         const count = 12 + Math.floor(random() * 13);
         for(let i = 0; i < count; i++)
@@ -136,8 +136,8 @@ emulator.add_listener("emulator-loaded", () => {
             body.push(...POOL[Math.floor(random() * POOL.length)]);
         }
         const prefix = [0x41, 0xBC, ITERATIONS & 0xFF, ITERATIONS >> 8 & 0xFF, ITERATIONS >> 16 & 0xFF, ITERATIONS >> 24 & 0xFF];
-        const jnzAt = prefix.length + body.length + 3; // + dec r12d
-        const rel = prefix.length - (jnzAt + 6);
+        const jnz_at = prefix.length + body.length + 3; // + dec r12d
+        const rel = prefix.length - (jnz_at + 6);
         const suffix = [
             0x41, 0xFF, 0xCC, // dec r12d
             0x0F, 0x85, rel & 0xFF, rel >> 8 & 0xFF, rel >> 16 & 0xFF, rel >> 24 & 0xFF,
@@ -146,7 +146,7 @@ emulator.add_listener("emulator-loaded", () => {
         return prefix.concat(body, suffix);
     };
 
-    const seedRegs = random => {
+    const seed_regs = random => {
         const regs = new Array(16).fill(0n);
         for(const i of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14])
         {
@@ -159,10 +159,10 @@ emulator.add_listener("emulator-loaded", () => {
         ex.jit64_set_enabled(jitEnabled ? 1 : 0);
         ex.jit64_clear_cache();
         for(let i = 0; i < program.length; i++) ex.write8(BASE + i, program[i]);
-        for(let i = 0; i < 16; i++) setReg64(i, regs[i]);
-        setReg64(12, 0n);
-        setReg64(15, BigInt(SCRATCH));
-        setReg64(4, 0x80000n); // rsp
+        for(let i = 0; i < 16; i++) set_reg64(i, regs[i]);
+        set_reg64(12, 0n);
+        set_reg64(15, BigInt(SCRATCH));
+        set_reg64(4, 0x80000n); // rsp
         for(let i = 0; i < memory.length; i++) ex.write8(SCRATCH + i, memory[i]);
 
         cpu.instruction_pointer[0] = BASE;
@@ -185,18 +185,18 @@ emulator.add_listener("emulator-loaded", () => {
         };
     };
 
-    let compiledAny = false;
+    let compiled_any = false;
     let mismatches = 0;
     for(let seed = 1; seed <= CASES; seed++)
     {
         const random = rng(seed);
-        const program = buildProgram(random);
-        const regs = seedRegs(random);
+        const program = build_program(random);
+        const regs = seed_regs(random);
         const memory = Array.from({ length: 32 }, () => Math.floor(random() * 256));
 
         const interpreted = run(program, regs, memory, false);
         const compiled = run(program, regs, memory, true);
-        if(ex.jit64_compiled_count() > 0) compiledAny = true;
+        if(ex.jit64_compiled_count() > 0) compiled_any = true;
 
         const problems = [];
         if(!interpreted.halted) problems.push("interpreter did not halt");
@@ -231,7 +231,7 @@ emulator.add_listener("emulator-loaded", () => {
         }
     }
 
-    if(!compiledAny)
+    if(!compiled_any)
     {
         console.log("FAIL no program was JIT-compiled");
         process.exit(1);

@@ -64,12 +64,12 @@ const handler = [
     0x48, 0xCF,                                     // iretq
 ];
 
-function bzImage(body)
+function bz_image(body)
 {
-    const setupSects = 4;
-    const protStart = (setupSects + 1) * 512;
-    const image = new Uint8Array((protStart + 0x200 + body.length + 511) & ~511);
-    image[0x1F1] = setupSects;
+    const setup_sects = 4;
+    const prot_start = (setup_sects + 1) * 512;
+    const image = new Uint8Array((prot_start + 0x200 + body.length + 511) & ~511);
+    image[0x1F1] = setup_sects;
     image[0x1FE] = 0x55;
     image[0x1FF] = 0xAA;
     image[0x201] = 0x40;
@@ -77,19 +77,19 @@ function bzImage(body)
     image[0x206] = 0x0C;
     image[0x207] = 0x02;
     image[0x238] = 0xFF;
-    image.set(body, protStart + 0x200);
+    image.set(body, prot_start + 0x200);
     return image;
 }
 
-const imagePath = path.join(os.tmpdir(), "v64-e2e-apic.img");
-fs.writeFileSync(imagePath, bzImage(kernel));
+const image_path = path.join(os.tmpdir(), "v64-e2e-apic.img");
+fs.writeFileSync(image_path, bz_image(kernel));
 
 const emulator = new v64({
     autostart: false,
     memory_size: 8 * 1024 * 1024,
     disable_jit: 1,
     log_level: 0,
-    bzimage: { url: imagePath, async: false },
+    bzimage: { url: image_path, async: false },
     cmdline: "",
     direct_boot: true,
     wasm_path: process.env.WASM_PATH || undefined,
@@ -107,9 +107,9 @@ emulator.add_listener("emulator-loaded", () => {
         (ex.read8(address) | ex.read8(address + 1) << 8 | ex.read8(address + 2) << 16 | ex.read8(address + 3) << 24) >>> 0;
 
     // Map the APIC MMIO page into the boot page tables.
-    const pdIndex = (APIC >> 21) & 0x1FF;
+    const pd_index = (APIC >> 21) & 0x1FF;
     write64(PDPT + 3 * 8, BigInt(PD2) | 0x7n);
-    write64(PD2 + pdIndex * 8, BigInt(APIC) | 0x87n);
+    write64(PD2 + pd_index * 8, BigInt(APIC) | 0x87n);
 
     for(let i = 0; i < handler.length; i++) ex.write8(HANDLER + i, handler[i]);
     const gate = (offset, selector, type) => {

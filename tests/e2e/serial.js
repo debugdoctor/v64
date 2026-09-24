@@ -20,7 +20,7 @@ const CMDLINE = "console=ttyS0 root=/dev/ram0";
 
 // 8250 at 0x3F8, polled the way early Linux prints a line: wait until the
 // transmitter holding register is empty, then write the byte.
-function uartByte(value)
+function uart_byte(value)
 {
     return [
         0xBA, 0xFD, 0x03, 0x00, 0x00, // mov edx, 0x3FD
@@ -34,7 +34,7 @@ function uartByte(value)
 }
 
 // Same poll, but the byte is the one the command line walk already loaded.
-function uartAl()
+function uart_al()
 {
     return [
         0xBA, 0xFD, 0x03, 0x00, 0x00, // mov edx, 0x3FD
@@ -56,7 +56,7 @@ const label = name => { labels[name] = code.length; };
 const jz = name => { patches.push({ at: code.length, name, near: false }); emit(0x74, 0); };
 const jmp = name => { patches.push({ at: code.length, name, near: true }); emit(0xE9, 0, 0, 0, 0); };
 
-emit(...[..."v64 serial\n"].flatMap(c => uartByte(c.charCodeAt(0))));
+emit(...[..."v64 serial\n"].flatMap(c => uart_byte(c.charCodeAt(0))));
 emit(0x48, 0x89, 0xF0);                   // mov rax, rsi (boot_params)
 emit(0x8B, 0x80, 0x28, 0x02, 0x00, 0x00); // mov eax, [rax + 0x228]
 emit(0x48, 0x89, 0xC6);                   // mov rsi, rax
@@ -64,11 +64,11 @@ label("next");
 emit(0x8A, 0x06);                         // mov al, [rsi]
 emit(0x84, 0xC0);                         // test al, al
 jz("done");
-emit(...uartAl());
+emit(...uart_al());
 emit(0x48, 0xFF, 0xC6);                   // inc rsi
 jmp("next");
 label("done");
-emit(...uartByte(0x0A));
+emit(...uart_byte(0x0A));
 emit(0xF4);                               // hlt
 
 for(const patch of patches)
@@ -88,12 +88,12 @@ for(const patch of patches)
     }
 }
 
-function bzImage(body)
+function bz_image(body)
 {
-    const setupSects = 4;
-    const protStart = (setupSects + 1) * 512;
-    const image = new Uint8Array((protStart + 0x200 + body.length + 511) & ~511);
-    image[0x1F1] = setupSects;
+    const setup_sects = 4;
+    const prot_start = (setup_sects + 1) * 512;
+    const image = new Uint8Array((prot_start + 0x200 + body.length + 511) & ~511);
+    image[0x1F1] = setup_sects;
     image[0x1FE] = 0x55;
     image[0x1FF] = 0xAA;
     image[0x201] = 0x40;
@@ -101,12 +101,12 @@ function bzImage(body)
     image[0x206] = 0x0C;
     image[0x207] = 0x02; // protocol 0x020c
     image[0x238] = 0xFF; // cmdline_size
-    image.set(body, protStart + 0x200);
+    image.set(body, prot_start + 0x200);
     return image;
 }
 
-const imagePath = path.join(os.tmpdir(), "v64-e2e-serial.img");
-fs.writeFileSync(imagePath, bzImage(code));
+const image_path = path.join(os.tmpdir(), "v64-e2e-serial.img");
+fs.writeFileSync(image_path, bz_image(code));
 
 const serial = [];
 const emulator = new v64({
@@ -114,7 +114,7 @@ const emulator = new v64({
     memory_size: 8 * 1024 * 1024,
     disable_jit: 1,
     log_level: 0,
-    bzimage: { url: imagePath, async: false },
+    bzimage: { url: image_path, async: false },
     cmdline: CMDLINE,
     direct_boot: true,
     wasm_path: process.env.WASM_PATH || undefined,

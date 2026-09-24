@@ -26,3 +26,9 @@ var cs = {
 const Buffer = {
     allocUnsafe : function(length) {},
 };
+
+// OPFS: `navigator.storage.getDirectory()`, missing from the bundled externs
+/**
+ * @return {!Promise<!FileSystemDirectoryHandle>}
+ */
+StorageManager.prototype.getDirectory = function() {};

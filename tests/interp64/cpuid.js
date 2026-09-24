@@ -36,8 +36,8 @@ emulator.add_listener("emulator-loaded", () => {
 
     const failures = [];
     const advertised = [];
-    let activeTest = "";
-    const note = message => failures.push(activeTest + ": " + message);
+    let active_test = "";
+    const note = message => failures.push(active_test + ": " + message);
     const expect = (got, want, message) => {
         if(got !== want) note(message + " [want " + want + ", got " + got + "]");
     };
@@ -58,14 +58,14 @@ emulator.add_listener("emulator-loaded", () => {
         0xF4,
     ];
 
-    const buildPageTables = () => {
+    const build_page_tables = () => {
         write64(PML4, BigInt(PDPT) | 0x3n);
         write64(PDPT, BigInt(PD) | 0x3n);
         for(let i = 0; i < 512; i++) write64(PD + i * 8, BigInt(i) * 0x200000n | 0x83n);
     };
 
-    const runCode = code => {
-        buildPageTables();
+    const run_code = code => {
+        build_page_tables();
         for(let i = 0; i < code.length; i++) ex.write8(BASE + i, code[i]);
         ex.write8(BASE + code.length, 0xF4);
         for(let i = 0; i < handler.length; i++) ex.write8(HANDLER + i, handler[i]);
@@ -88,21 +88,21 @@ emulator.add_listener("emulator-loaded", () => {
 
     const imm32 = value => [value & 0xFF, value >> 8 & 0xFF, value >> 16 & 0xFF, value >> 24 & 0xFF];
     const cpuid = (leaf, sub) => {
-        runCode([0xB8, ...imm32(leaf), 0xB9, ...imm32(sub), 0x0F, 0xA2]);
+        run_code([0xB8, ...imm32(leaf), 0xB9, ...imm32(sub), 0x0F, 0xA2]);
         return { eax: u32[16], ebx: u32[16 + 3], ecx: u32[16 + 1], edx: u32[16 + 2] };
     };
 
     // If a feature bit is advertised, the instruction must not #UD.
-    const mustWork = (name, leaf, sub, reg, bit, code) => {
+    const must_work = (name, leaf, sub, reg, bit, code) => {
         const value = cpuid(leaf, sub)[reg] >>> 0;
         if((value & (1 << bit)) === 0) return;
         advertised.push(name);
-        activeTest = "CPUID advertises " + name;
-        expect(runCode(code), false, "advertised but #UD");
+        active_test = "CPUID advertises " + name;
+        expect(run_code(code), false, "advertised but #UD");
     };
 
     // Leaf 0: vendor and max level.
-    activeTest = "leaf 0";
+    active_test = "leaf 0";
     const leaf0 = cpuid(0, 0);
     expect(leaf0.ebx >>> 0, 0x756E6547, "vendor ebx");
     expect(leaf0.edx >>> 0, 0x49656E69, "vendor edx");
@@ -110,23 +110,23 @@ emulator.add_listener("emulator-loaded", () => {
     expect(leaf0.eax >>> 0 >= 7, true, "max level covers leaf 7");
 
     // Leaf 1 features with an instruction attached.
-    mustWork("FPU", 1, 0, "edx", 0, [0xD9, 0xE8]);                          // fld1
-    mustWork("TSC", 1, 0, "edx", 4, [0x0F, 0x31]);                          // rdtsc
-    mustWork("MSR", 1, 0, "edx", 5, [0xB9, 0x80, 0x00, 0x00, 0xC0, 0x0F, 0x32]); // rdmsr EFER
-    mustWork("CMOV", 1, 0, "edx", 15, [0x0F, 0x44, 0xC3]);                  // cmove eax,ebx
-    mustWork("MMX", 1, 0, "edx", 23, [0x0F, 0x6E, 0xC0]);                   // movd mm0,eax
-    mustWork("FXSR", 1, 0, "edx", 24, [0x0F, 0xAE, 0x04, 0x25, 0x00, 0x30, 0x00, 0x00]); // fxsave
-    mustWork("SSE", 1, 0, "edx", 25, [0x0F, 0x28, 0xC1]);                   // movaps xmm0,xmm1
-    mustWork("SSE2", 1, 0, "edx", 26, [0x66, 0x0F, 0x6F, 0xC1]);            // movdqa
-    mustWork("SSE3", 1, 0, "ecx", 0, [0xF2, 0x0F, 0xD0, 0xC1]);             // addsubps
-    mustWork("POPCNT", 1, 0, "ecx", 23, [0xF3, 0x0F, 0xB8, 0xC3]);          // popcnt eax,ebx
-    mustWork("RDRAND", 1, 0, "ecx", 30, [0x0F, 0xC7, 0xF0]);                // rdrand eax
+    must_work("FPU", 1, 0, "edx", 0, [0xD9, 0xE8]);                          // fld1
+    must_work("TSC", 1, 0, "edx", 4, [0x0F, 0x31]);                          // rdtsc
+    must_work("MSR", 1, 0, "edx", 5, [0xB9, 0x80, 0x00, 0x00, 0xC0, 0x0F, 0x32]); // rdmsr EFER
+    must_work("CMOV", 1, 0, "edx", 15, [0x0F, 0x44, 0xC3]);                  // cmove eax,ebx
+    must_work("MMX", 1, 0, "edx", 23, [0x0F, 0x6E, 0xC0]);                   // movd mm0,eax
+    must_work("FXSR", 1, 0, "edx", 24, [0x0F, 0xAE, 0x04, 0x25, 0x00, 0x30, 0x00, 0x00]); // fxsave
+    must_work("SSE", 1, 0, "edx", 25, [0x0F, 0x28, 0xC1]);                   // movaps xmm0,xmm1
+    must_work("SSE2", 1, 0, "edx", 26, [0x66, 0x0F, 0x6F, 0xC1]);            // movdqa
+    must_work("SSE3", 1, 0, "ecx", 0, [0xF2, 0x0F, 0xD0, 0xC1]);             // addsubps
+    must_work("POPCNT", 1, 0, "ecx", 23, [0xF3, 0x0F, 0xB8, 0xC3]);          // popcnt eax,ebx
+    must_work("RDRAND", 1, 0, "ecx", 30, [0x0F, 0xC7, 0xF0]);                // rdrand eax
 
     // Leaf 7: enhanced REP MOVSB.
-    mustWork("ERMS", 7, 0, "ebx", 9, [0xB9, 0x00, 0x00, 0x00, 0x00, 0xF3, 0xA4]); // rep movsb
+    must_work("ERMS", 7, 0, "ebx", 9, [0xB9, 0x00, 0x00, 0x00, 0x00, 0xF3, 0xA4]); // rep movsb
 
     // Extended leaf: LM/SYSCALL yes, NX/RDTSCP no.
-    activeTest = "leaf 0x80000001";
+    active_test = "leaf 0x80000001";
     const ext = cpuid(0x80000001, 0);
     expect((ext.edx >>> 0) & (1 << 29), 1 << 29, "LM");
     expect((ext.edx >>> 0) & (1 << 11), 1 << 11, "SYSCALL");
@@ -134,15 +134,15 @@ emulator.add_listener("emulator-loaded", () => {
     expect((ext.edx >>> 0) & (1 << 27), 0, "RDTSCP not claimed");
 
     // OSXSAVE must only be claimed if XGETBV works.
-    mustWork("OSXSAVE", 1, 0, "ecx", 27, [0x0F, 0x01, 0xD0]);               // xgetbv
+    must_work("OSXSAVE", 1, 0, "ecx", 27, [0x0F, 0x01, 0xD0]);               // xgetbv
 
     // Physical address width must fit the 32-bit physical space.
-    activeTest = "leaf 0x80000008";
+    active_test = "leaf 0x80000008";
     const addr = cpuid(0x80000008, 0);
-    const physBits = (addr.eax >>> 0) & 0xFF;
-    const virtBits = ((addr.eax >>> 0) >> 8) & 0xFF;
-    expect(physBits >= 32 && physBits <= 52, true, "physical address bits (got " + physBits + ")");
-    expect(virtBits >= 48, true, "virtual address bits (got " + virtBits + ")");
+    const phys_bits = (addr.eax >>> 0) & 0xFF;
+    const virt_bits = ((addr.eax >>> 0) >> 8) & 0xFF;
+    expect(phys_bits >= 32 && phys_bits <= 52, true, "physical address bits (got " + phys_bits + ")");
+    expect(virt_bits >= 48, true, "virtual address bits (got " + virt_bits + ")");
 
     if(advertised.length) console.log("advertised features checked: " + advertised.join(", "));
 

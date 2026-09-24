@@ -42,9 +42,9 @@ emulator.add_listener("emulator-loaded", () => {
     const u32 = new Uint32Array(buffer);
 
     const failures = [];
-    let activeTest = "";
+    let active_test = "";
     const fmt = value => typeof value === "bigint" ? "0x" + value.toString(16) : String(value);
-    const note = message => failures.push(activeTest + ": " + message);
+    const note = message => failures.push(active_test + ": " + message);
     const expect = (got, want, message) => {
         if(got !== want) note(message + " [want " + fmt(want) + ", got " + fmt(got) + "]");
     };
@@ -76,7 +76,7 @@ emulator.add_listener("emulator-loaded", () => {
 
     // Identity-map the first 1 GiB: 4 KiB pages for the first 2 MiB (so single
     // pages can be remapped), 2 MiB pages for the rest.
-    const buildPageTables = () => {
+    const build_page_tables = () => {
         write64(PML4, BigInt(PDPT) | 0x3n);
         write64(PDPT, BigInt(PD) | 0x3n);
         write64(PD, BigInt(PT) | 0x3n);
@@ -108,7 +108,7 @@ emulator.add_listener("emulator-loaded", () => {
     write64(IDT + 14 * 16, gate(BigInt(HANDLER), 0x08, 0xE));
 
     const boot = (program, setup) => {
-        buildPageTables();
+        build_page_tables();
         if(setup) setup();
         for(let i = 0; i < program.length; i++)
         {
@@ -141,7 +141,7 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     // 1 GiB huge page: PDPT[1].PS maps 0x40000000..0x7FFFFFFF, here to PA 0.
-    activeTest = "1 GiB PDPT huge page";
+    active_test = "1 GiB PDPT huge page";
     boot([
         0x48, 0xB8, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, // mov rax, 0x40000000
         0xBB, 0x34, 0x12, 0x00, 0x00,                               // mov ebx, 0x1234
@@ -153,7 +153,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(read64(0), 0x1234n, "aliases to PA 0");
 
     // 2 MiB page reached through PDPT[2] -> PD2, physical 0x200000.
-    activeTest = "2 MiB page at 0x80000000";
+    active_test = "2 MiB page at 0x80000000";
     boot([
         0x48, 0xB8, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, // mov rax, 0x80000000
         0xBB, 0x78, 0x56, 0x00, 0x00,                               // mov ebx, 0x5678
@@ -168,7 +168,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(read64(0x200000), 0x5678n, "landed at physical 0x200000");
 
     // 4 KiB page: PT[2] remaps VA 0x2000 to PA 0x40000.
-    activeTest = "4 KiB non-identity page";
+    active_test = "4 KiB non-identity page";
     boot([
         0x48, 0xC7, 0xC0, 0x00, 0x20, 0x00, 0x00, // mov rax, 0x2000
         0xBB, 0xAB, 0x00, 0x00, 0x00,             // mov ebx, 0xAB
@@ -182,7 +182,7 @@ emulator.add_listener("emulator-loaded", () => {
 
     // A present but read-only page can be read and faults on write, with the
     // #PF error code P|W|U = 1|1|0.
-    activeTest = "read-only page";
+    active_test = "read-only page";
     boot([
         0x48, 0xC7, 0xC0, 0x00, 0x30, 0x00, 0x00, // mov rax, 0x3000
         0x48, 0x8B, 0x08,                         // mov rcx, [rax]  (readable)
@@ -195,7 +195,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(read64(SCRATCH_ERR), 0x3n, "error code P=1 W=1 U=0");
 
     // A not-present page faults with error code 0.
-    activeTest = "not-present page";
+    active_test = "not-present page";
     boot([
         0x48, 0xC7, 0xC0, 0x00, 0x40, 0x00, 0x00, // mov rax, 0x4000
         0x48, 0x8B, 0x08,                         // mov rcx, [rax]
@@ -206,7 +206,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(read64(SCRATCH_ERR), 0n, "error code P=0");
 
     // A canonical address above 4 GiB, mapped down to physical 0.
-    activeTest = "canonical address above 4 GiB";
+    active_test = "canonical address above 4 GiB";
     boot([
         0x48, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, 0xFFFFFFFF80000000
         0xBB, 0xAD, 0xDE, 0x00, 0x00,                               // mov ebx, 0xDEAD
@@ -222,7 +222,7 @@ emulator.add_listener("emulator-loaded", () => {
     expect(read64(0), 0xDEADn, "high address aliases to PA 0");
 
     // A non-canonical address is a #GP, not a #PF.
-    activeTest = "non-canonical address";
+    active_test = "non-canonical address";
     boot([
         0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // mov rax, 0x0001000000000000
         0x48, 0x8B, 0x08,                                           // mov rcx, [rax]

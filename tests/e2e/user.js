@@ -38,11 +38,11 @@ function wrmsr(msr, value)
 // STAR: kernel CS base 0x10, user CS base 0x30. LSTAR is patched below.
 wrmsr(0xC0000080n, 1n);
 wrmsr(0xC0000081n, (0x30n << 48n) | (0x10n << 32n));
-const lstarAt = code.length;
+const lstar_at = code.length;
 wrmsr(0xC0000082n, 0n);
 wrmsr(0xC0000084n, 0n);
 
-const userRipAt = code.length;
+const user_rip_at = code.length;
 emit(0x48, 0xB9, ...imm64(0));                  // mov rcx, user (patched)
 emit(0x49, 0xC7, 0xC3, 0x02, 0x00, 0x00, 0x00); // mov r11, 2
 emit(0x48, 0xBC, ...imm64(USER_STACK));         // mov rsp, user stack
@@ -51,7 +51,7 @@ emit(0xF4);
 
 // SYSCALL handler: the byte is in AL. Write it to COM1 and return.
 const handler = ENTRY + code.length;
-code.splice(lstarAt + 6, 4, ...imm32(handler));
+code.splice(lstar_at + 6, 4, ...imm32(handler));
 emit(0xBA, 0xFD, 0x03, 0x00, 0x00); // mov edx, 0x3FD
 emit(0x86, 0xC3);                   // xchg al, bl
 emit(0xEC, 0xA8, 0x20, 0x74, 0xFB); // in al, dx; test al, 0x20; jz wait
@@ -61,30 +61,30 @@ emit(0xEE);                         // out dx, al
 emit(0x0F, 0x07);                   // sysret
 
 const user = ENTRY + code.length;
-code.splice(userRipAt + 2, 8, ...imm64(user));
+code.splice(user_rip_at + 2, 8, ...imm64(user));
 
-const userCode = [];
-const userEmit = (...bytes) => userCode.push(...bytes);
-userEmit(0x31, 0xC0);                  // xor eax, eax
-userEmit(0xB9, ...imm32(LOOPS));       // mov ecx, loops
-const loopAt = userCode.length;
-userEmit(0x83, 0xC0, 0x01);            // add eax, 1
-userEmit(0xFF, 0xC9);                  // dec ecx
-userEmit(0x75, (loopAt - (userCode.length + 2)) & 0xFF); // jnz loop, from the next instruction
+const user_code = [];
+const user_emit = (...bytes) => user_code.push(...bytes);
+user_emit(0x31, 0xC0);                  // xor eax, eax
+user_emit(0xB9, ...imm32(LOOPS));       // mov ecx, loops
+const loop_at = user_code.length;
+user_emit(0x83, 0xC0, 0x01);            // add eax, 1
+user_emit(0xFF, 0xC9);                  // dec ecx
+user_emit(0x75, (loop_at - (user_code.length + 2)) & 0xFF); // jnz loop, from the next instruction
 for(const byte of Buffer.from(MESSAGE))
 {
-    userEmit(0xB0, byte);              // mov al, digit
-    userEmit(0x0F, 0x05);              // syscall
+    user_emit(0xB0, byte);              // mov al, digit
+    user_emit(0x0F, 0x05);              // syscall
 }
-userEmit(0xF4);
-code.push(...userCode);
+user_emit(0xF4);
+code.push(...user_code);
 
-function bzImage(body)
+function bz_image(body)
 {
-    const setupSects = 4;
-    const protStart = (setupSects + 1) * 512;
-    const image = new Uint8Array((protStart + 0x200 + body.length + 511) & ~511);
-    image[0x1F1] = setupSects;
+    const setup_sects = 4;
+    const prot_start = (setup_sects + 1) * 512;
+    const image = new Uint8Array((prot_start + 0x200 + body.length + 511) & ~511);
+    image[0x1F1] = setup_sects;
     image[0x1FE] = 0x55;
     image[0x1FF] = 0xAA;
     image[0x201] = 0x40;
@@ -92,19 +92,19 @@ function bzImage(body)
     image[0x206] = 0x0C;
     image[0x207] = 0x02;
     image[0x238] = 0xFF;
-    image.set(body, protStart + 0x200);
+    image.set(body, prot_start + 0x200);
     return image;
 }
 
-const imagePath = path.join(os.tmpdir(), "v64-e2e-user.img");
-fs.writeFileSync(imagePath, bzImage(code));
+const image_path = path.join(os.tmpdir(), "v64-e2e-user.img");
+fs.writeFileSync(image_path, bz_image(code));
 
 const serial = [];
 const emulator = new v64({
     autostart: false,
     memory_size: 8 * 1024 * 1024,
     log_level: 0,
-    bzimage: { url: imagePath, async: false },
+    bzimage: { url: image_path, async: false },
     cmdline: "",
     direct_boot: true,
     wasm_path: process.env.WASM_PATH || undefined,

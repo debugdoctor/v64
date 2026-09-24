@@ -43,7 +43,7 @@ function leb(bytes, p)
     return [value, p];
 }
 
-function parseLimits(bytes, p, kind, found)
+function parse_limits(bytes, p, kind, found)
 {
     let flags;
     [flags, p] = leb(bytes, p);
@@ -58,7 +58,7 @@ function parseLimits(bytes, p, kind, found)
     return p;
 }
 
-function inspectModule(source)
+function inspect_module(source)
 {
     const bytes = source instanceof Uint8Array ? source : new Uint8Array(source);
     if(bytes[0] !== 0x00 || bytes[1] !== 0x61 || bytes[2] !== 0x73 || bytes[3] !== 0x6D)
@@ -95,11 +95,11 @@ function inspectModule(source)
                 else if(kind === 1)
                 {
                     p++; // element type
-                    p = parseLimits(bytes, p, "table", found);
+                    p = parse_limits(bytes, p, "table", found);
                 }
                 else if(kind === 2)
                 {
-                    p = parseLimits(bytes, p, "memory", found);
+                    p = parse_limits(bytes, p, "memory", found);
                 }
                 else if(kind === 3)
                 {
@@ -120,7 +120,7 @@ function inspectModule(source)
             for(let i = 0; i < count; i++)
             {
                 p++; // element type
-                p = parseLimits(bytes, p, "table", found);
+                p = parse_limits(bytes, p, "table", found);
             }
         }
         else if(id === 5) // memory section
@@ -129,7 +129,7 @@ function inspectModule(source)
             [count, p] = leb(bytes, p);
             for(let i = 0; i < count; i++)
             {
-                p = parseLimits(bytes, p, "memory", found);
+                p = parse_limits(bytes, p, "memory", found);
             }
         }
 
@@ -151,7 +151,7 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     // 1. The built module declares 32-bit memory and a 32-bit table.
-    const declared = inspectModule(emulator.wasm_source);
+    const declared = inspect_module(emulator.wasm_source);
     const memories = declared.filter(entry => entry.kind === "memory");
     const tables = declared.filter(entry => entry.kind === "table");
     expect(memories.length > 0, true, "the module declares a memory");
@@ -218,7 +218,7 @@ emulator.add_listener("emulator-loaded", () => {
     // A 64-bit virtual address above 4 GiB, resolved to physical memory below
     // 4 GiB. 64-bit arithmetic runs in between.
     cpu.instruction_pointer[0] = BASE;
-    const highProgram = [
+    const high_program = [
         0x48, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, HIGH_VA
         0x48, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // mov rdx, 1<<32
         0x48, 0x01, 0xD0,                                           // add rax, rdx
@@ -228,15 +228,15 @@ emulator.add_listener("emulator-loaded", () => {
         0x48, 0x8B, 0x08,                                           // mov rcx, [rax]
         0xF4,
     ];
-    const highHalted = run(highProgram, 100000);
-    expect(highHalted, true, "the high-address program halted");
+    const high_halted = run(high_program, 100000);
+    expect(high_halted, true, "the high-address program halted");
     expect(reg64(1), 0xDEADn, "read back through the high address");
     expect(reg64(2), 0x1_0000_0000n, "64-bit add above 4 GiB");
     expect(read64(0), 0xDEADn, "the high address landed below 4 GiB");
 
     // A hot 64-bit loop goes through the shared 32-bit function table.
     cpu.instruction_pointer[0] = 0x2000;
-    const loopProgram = [
+    const loop_program = [
         0x48, 0x31, 0xC0,                         // xor rax, rax
         0x48, 0xC7, 0xC1, 0x58, 0x02, 0x00, 0x00, // mov rcx, 600
         0x48, 0x83, 0xC0, 0x01,                   // add rax, 1
@@ -244,9 +244,9 @@ emulator.add_listener("emulator-loaded", () => {
         0x75, 0xF4,                               // jnz loop
         0xF4,
     ];
-    for(let i = 0; i < loopProgram.length; i++)
+    for(let i = 0; i < loop_program.length; i++)
     {
-        ex.write8(0x2000 + i, loopProgram[i]);
+        ex.write8(0x2000 + i, loop_program[i]);
     }
     ex.jit64_clear_cache();
     ex.enter_long_mode(PML4);

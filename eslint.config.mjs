@@ -40,6 +40,8 @@ export default [
                 "HTMLElement": "readonly",
                 "HTMLTextAreaElement": "readonly",
                 "AbortController": "readonly",
+                "StorageManager": "readonly",
+                "setImmediate": "readonly",
 
                 "AudioContext": "readonly",
                 "AudioWorkletProcessor": "readonly",
