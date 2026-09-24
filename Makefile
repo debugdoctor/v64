@@ -374,12 +374,25 @@ interp64-tests: build/v64-debug.wasm
 boot64-tests: build/v64-debug.wasm
 	node tests/boot64/run.js
 
-# Roadmap scenes: serial console after a direct 64-bit boot, then a ring 3
-# program whose hot loop is compiled and whose output goes through SYSCALL.
+# Roadmap scenes: serial console after a direct 64-bit boot, a ring 3 program
+# whose hot loop is compiled and whose output goes through SYSCALL, then the
+# device scenes (timer/serial input, APIC/IO-APIC/ACPI/HPET, network, disk).
+# `tests/e2e/linux.js` and `tests/e2e/initramfs.js` are gated on a real kernel
+# and initramfs image and are not part of the default run.
 e2e-tests: build/v64-debug.wasm
 	node tests/e2e/serial.js
 	node tests/e2e/user.js
 	node tests/e2e/modes.js
+	node tests/e2e/timer.js
+	node tests/e2e/serial-rx.js
+	node tests/e2e/apic.js
+	node tests/e2e/ioapic.js
+	node tests/e2e/acpi.js
+	node tests/e2e/hpet.js
+	node tests/e2e/network64.js
+	node tests/e2e/disk64.js
+	node tests/e2e/virtio_blk64.js
+	node tests/e2e/9p64.js
 
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test

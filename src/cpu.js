@@ -33,6 +33,7 @@ import { IDEController } from "./ide.js";
 import { VirtioNet } from "./virtio_net.js";
 import { VGAScreen } from "./vga.js";
 import { VirtioBalloon } from "./virtio_balloon.js";
+import { VirtioBlk } from "./virtio_blk.js";
 import { Virtio9p, Virtio9pHandler, Virtio9pProxy } from "../lib/9p.js";
 
 import { load_kernel, load_kernel64 } from "./kernel.js";
@@ -562,6 +563,7 @@ CPU.prototype.get_state = function()
     state[82] = this.devices.virtio_console;
     state[83] = this.devices.virtio_net;
     state[84] = this.devices.virtio_balloon;
+    state[92] = this.devices.virtio_blk;
 
     // state[85] new ide set above
 
@@ -738,6 +740,7 @@ CPU.prototype.set_state = function(state)
     this.devices.virtio_console && this.devices.virtio_console.set_state(state[82]);
     this.devices.virtio_net && this.devices.virtio_net.set_state(state[83]);
     this.devices.virtio_balloon && this.devices.virtio_balloon.set_state(state[84]);
+    this.devices.virtio_blk && state[92] && this.devices.virtio_blk.set_state(state[92]);
     this.devices.vmware && state[89] && this.devices.vmware.set_state(state[89]);
     this.devices.parallel0 && state[90] && this.devices.parallel0.set_state(state[90]);
     this.devices.parallel1 && state[91] && this.devices.parallel1.set_state(state[91]);
@@ -1279,6 +1282,10 @@ CPU.prototype.init = function(settings, device_bus)
         if(settings.virtio_balloon)
         {
             this.devices.virtio_balloon = new VirtioBalloon(this, device_bus);
+        }
+        if(settings.virtio_blk)
+        {
+            this.devices.virtio_blk = new VirtioBlk(this, settings.virtio_blk);
         }
 
         if(true)

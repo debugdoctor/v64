@@ -417,6 +417,10 @@ v64.prototype.continue_init = async function(emulator, options)
                 settings.fdb = buffer;
                 break;
 
+            case "virtio_blk":
+                settings.virtio_blk = buffer;
+                break;
+
             case "multiboot":
                 settings.multiboot = buffer.buffer;
                 break;
@@ -506,6 +510,7 @@ v64.prototype.continue_init = async function(emulator, options)
     add_file("hdb", options.hdb);
     add_file("fda", options.fda);
     add_file("fdb", options.fdb);
+    add_file("virtio_blk", options.virtio_blk);
     add_file("initial_state", options.initial_state);
     add_file("multiboot", options.multiboot);
     add_file("bzimage", options.bzimage);
