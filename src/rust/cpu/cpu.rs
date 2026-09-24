@@ -2002,6 +2002,18 @@ pub unsafe fn translate_address_system_read(address: i32) -> OrPageFault<u32> {
         translate_address(address, false, false, false, true)
     }
 }
+
+// Same as translate_address_system_read, but keeps the full 64-bit address in
+// long mode. The IDT/GDT/TSS live above 4 GiB, so the 32-bit entry point above
+// cannot be used for them.
+pub unsafe fn translate_address_system_read64(address: u64) -> OrPageFault<u32> {
+    if *long_mode {
+        translate_address_64(address, false, false)
+    }
+    else {
+        translate_address(address as i32, false, false, false, true)
+    }
+}
 pub unsafe fn translate_address_system_write(address: i32) -> OrPageFault<u32> {
     if *long_mode {
         translate_address_64(address as u32 as u64, true, false)
@@ -3485,6 +3497,25 @@ pub unsafe fn main_loop() -> f64 {
     return 0.0;
 }
 
+// Diagnostics: run a fixed number of cycles (LOOP_COUNTER instructions each)
+// so JIT and interpreter runs can be compared at identical instruction counts.
+#[no_mangle]
+pub unsafe fn run_fixed_cycles(n: u32) {
+    for _ in 0..n {
+        do_many_cycles_native();
+    }
+}
+
+// Diagnostics: advance exactly `n` guest instructions (finer than a
+// LOOP_COUNTER block) so a divergence can be bisected to one instruction.
+#[no_mangle]
+pub unsafe fn run_exact_instructions(n: u32) {
+    let start = *instruction_counter;
+    while (*instruction_counter).wrapping_sub(start) < n && !*in_hlt {
+        cycle_internal();
+    }
+}
+
 pub unsafe fn do_many_cycles_native() {
     profiler::stat_increment(stat::DO_MANY_CYCLES);
     let initial_instruction_counter = *instruction_counter;
@@ -3499,8 +3530,14 @@ pub unsafe fn do_many_cycles_native() {
 // 16-byte IDT gate; error_code is only set for #DF, #TS, #NP, #SS, #GP, #PF, #AC, #CP
 pub unsafe fn call_interrupt_vector64(interrupt_nr: i32, error_code: Option<u64>) {
     if *exception_in_progress {
-        // a fault during delivery would recurse forever; a real CPU raises #DF
-        dbg_log!("interp64: fault during exception delivery, halting");
+        // A fault during delivery would recurse forever; a real CPU raises #DF.
+        dbg_log!(
+            "interp64: double fault: vector {} failed to deliver; nested fault cr2=0x{:x} err={:?} at rip=0x{:x}, halting",
+            interrupt_nr,
+            *cr2,
+            error_code,
+            *rip
+        );
         *in_hlt = true;
         return;
     }
@@ -3516,11 +3553,11 @@ unsafe fn write64_virtual(vaddr: u64, value: u64) -> OrPageFault<()> {
 }
 
 unsafe fn deliver_interrupt_vector64(interrupt_nr: i32, error_code: Option<u64>) {
-    let descriptor_address = (*idtr_offset as u32).wrapping_add((interrupt_nr as u32) << 4);
-    let low_addr = return_on_pagefault!(translate_address_system_read(descriptor_address as i32));
+    let idt_base = if *idtr_base != 0 { *idtr_base } else { *idtr_offset as u32 as u64 };
+    let descriptor_address = idt_base.wrapping_add((interrupt_nr as u64) << 4);
+    let low_addr = return_on_pagefault!(translate_address_system_read64(descriptor_address));
     let low = memory::read64s(low_addr) as u64;
-    let high_addr =
-        return_on_pagefault!(translate_address_system_read(descriptor_address as i32 + 8));
+    let high_addr = return_on_pagefault!(translate_address_system_read64(descriptor_address + 8));
     let high = memory::read64s(high_addr) as u64;
 
     let offset = (low & 0xFFFF) | ((low >> 48 & 0xFFFF) << 16) | ((high & 0xFFFF_FFFF) << 32);
@@ -3532,10 +3569,13 @@ unsafe fn deliver_interrupt_vector64(interrupt_nr: i32, error_code: Option<u64>)
     // 0xE = interrupt gate, 0xF = trap gate (64-bit variants)
     if !present || gate_type != 0xE && gate_type != 0xF {
         dbg_log!(
-            "interp64: invalid IDT gate nr={} type={:x} present={}",
+            "interp64: invalid IDT gate: vector={} type={:x} present={} idtr=0x{:x} cr2=0x{:x} rip=0x{:x}, halting",
             interrupt_nr,
             gate_type,
-            present
+            present,
+            *idtr_offset as u32,
+            *cr2,
+            *rip
         );
         *in_hlt = true;
         return;
@@ -4955,6 +4995,8 @@ pub unsafe fn reset_cpu() {
     // http://www.sandpile.org/x86/initial.htm
     *idtr_size = 0;
     *idtr_offset = 0;
+    *idtr_base = 0;
+    *gdtr_base = 0;
 
     *gdtr_size = 0;
     *gdtr_offset = 0;

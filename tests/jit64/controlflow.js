@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
-// Differential fuzzing of jit64 against the interpreter.
+// Control-flow differential fuzzing of jit64 against the interpreter.
 //
-// Random straight-line 64-bit programs are generated from a pool of encodings
-// both engines decode, wrapped in a hot loop so the JIT compiles them. Each
-// program is run once interpreted and once compiled; registers, the defined
-// flags and a scratch page must match. Registers and memory are the
-// architecture's outputs, so a mismatch is a bug in one of the two engines.
+// differential.js only runs straight-line programs, so a block-level bug in
+// branch handling stays invisible there. This generator emits forward `jcc`/
+// `jmp` (rel8 and rel32) and backward branches to a counter-guarded loop head,
+// then compares the final rip, registers, flags and scratch page of the
+// interpreted and compiled runs.
 //
 // Requires a debug wasm build: `make build/v64-debug.wasm`
-// Run with: `node tests/jit64/differential.js`
+// Run with: `node tests/jit64/controlflow.js`
 
 import { v64 } from "../../src/main.js";
 
@@ -19,10 +19,9 @@ const PML4 = 0x10000;
 const PDPT = 0x11000;
 const PD = 0x12000;
 const PT = 0x13000;
-const ITERATIONS = 600;
-const CASES = +process.env.JIT64_DIFF_CASES || 40;
+const ITERATIONS = 800;
+const CASES = +process.env.JIT64_CF_CASES || 300;
 
-// Defined for every instruction in the pool.
 const FLAG_MASK = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7); // CF, PF, ZF, SF
 
 const POOL = [
@@ -43,34 +42,17 @@ const POOL = [
     [0x48, 0xC1, 0xE9, 0x05], // shr rcx, 5
     [0x48, 0xC1, 0xFA, 0x02], // sar rdx, 2
     [0x49, 0xD3, 0xE0], // shl r8, cl
-    [0x49, 0xD3, 0xE9], // shr r9, cl
-    [0x49, 0xD3, 0xFA], // sar r10, cl
-    [0x0F, 0xB6, 0xC3], // movzx eax, bl
-    [0x48, 0x0F, 0xBE, 0xC3], // movsx rax, bl
-    [0x48, 0x63, 0xC3], // movsxd rax, ebx
-    [0x48, 0x8D, 0x44, 0x8B, 0x08], // lea rax, [rbx + rcx*4 + 8]
-    [0x4F, 0x8D, 0x04, 0xD1], // lea r8, [r9 + r10*8]
-    [0x48, 0x0F, 0xC8], // bswap rax
-    [0x49, 0x0F, 0xC9], // bswap r9
-    [0x48, 0x0F, 0xAF, 0xC3], // imul rax, rbx
-    [0x48, 0x6B, 0xCA, 0x07], // imul rcx, rdx, 7
-    [0x48, 0x0F, 0x44, 0xC3], // cmove rax, rbx
-    [0x48, 0x0F, 0x45, 0xCA], // cmovne rcx, rdx
+    [0x41, 0x89, 0xD6], // mov r14d, edx
+    [0x41, 0xD1, 0xEE], // shr r14d, 1
+    [0x41, 0x83, 0xFC, 0x02], // cmp r12d, 2
     [0x0F, 0x94, 0xC0], // sete al
     [0x0F, 0x95, 0xC3], // setne bl
     [0x00, 0xD8], // add al, bl
-    [0x66, 0x29, 0xD8], // sub ax, bx
     [0x01, 0xD8], // add eax, ebx
     [0x45, 0x31, 0xC8], // xor r8d, r9d
     [0x4D, 0x89, 0xDA], // mov r10, r11
     [0x49, 0x89, 0x47, 0x08], // mov [r15+8], rax
-    [0x49, 0x8B, 0x5F, 0x08], // mov rbx, [r15+8]
     [0x49, 0x01, 0x47, 0x10], // add qword [r15+16], rax
-    [0x41, 0x89, 0x4F, 0x18], // mov [r15+24], ecx
-    [0x41, 0x8B, 0x57, 0x18], // mov edx, [r15+24]
-    [0x41, 0x89, 0xD6], // mov r14d, edx
-    [0x41, 0xD1, 0xEE], // shr r14d, 1
-    [0x41, 0x83, 0xFC, 0x02], // cmp r12d, 2
 ];
 
 const emulator = new v64({
@@ -93,7 +75,6 @@ emulator.add_listener("emulator-loaded", () => {
         ex.write32(address + 4, Number(value >> 32n & 0xFFFF_FFFFn));
     };
 
-    // Identity-map the first 1 GiB: 4 KiB pages for the first 2 MiB.
     write64(PML4, BigInt(PDPT) | 0x3n);
     write64(PDPT, BigInt(PD) | 0x3n);
     write64(PD, BigInt(PT) | 0x3n);
@@ -106,7 +87,6 @@ emulator.add_listener("emulator-loaded", () => {
         write64(PD + i * 8, BigInt(i) * 0x200000n | 0x83n);
     }
 
-    // mulberry32
     const rng = seed => () => {
         seed |= 0;
         seed = seed + 0x6D2B79F5 | 0;
@@ -131,22 +111,83 @@ emulator.add_listener("emulator-loaded", () => {
             ? (BigInt(u32[32 + i]) << 32n) | BigInt(u32[16 + i])
             : ext[i - 8];
 
+    // Returns { program, targets } where targets lists the byte offsets that
+    // must produce identical control flow.
+    // Layout (offsets are absolute):
+    //   0:  mov r12d, ITERATIONS      (6 bytes)
+    //   6:  dec r12d                  (3 bytes)  <- the loop head every backward
+    //   9:  jz end                    (6 bytes)     branch targets, so it always
+    //  15:  <body>                                decrements and terminates
+    //       jmp 6    (5 bytes)
+    //       hlt      (1 byte)
+    const HEAD = 6;
+    const BODY_START = 15;
     const build_program = random => {
-        const body = [];
-        const count = 12 + Math.floor(random() * 13);
+        const prefix = [0x41, 0xBC, ITERATIONS & 0xFF, ITERATIONS >> 8 & 0xFF, ITERATIONS >> 16 & 0xFF, ITERATIONS >> 24 & 0xFF, 0x41, 0xFF, 0xCC];
+
+        const count = 8 + Math.floor(random() * 9);
+        const steps = [];
         for(let i = 0; i < count; i++)
         {
-            body.push(...POOL[Math.floor(random() * POOL.length)]);
+            if(random() < 0.3)
+            {
+                const rel32 = random() < 0.5;
+                steps.push({ branch: true, cc: Math.floor(random() * 16), rel32, len: rel32 ? 6 : 2 });
+            }
+            else
+            {
+                const bytes = POOL[Math.floor(random() * POOL.length)];
+                steps.push({ bytes, len: bytes.length });
+            }
         }
-        const prefix = [0x41, 0xBC, ITERATIONS & 0xFF, ITERATIONS >> 8 & 0xFF, ITERATIONS >> 16 & 0xFF, ITERATIONS >> 24 & 0xFF];
-        const jnz_at = prefix.length + body.length + 3; // + dec r12d
-        const rel = prefix.length - (jnz_at + 6);
+
+        const off = [];
+        let cursor = BODY_START;
+        for(const step of steps)
+        {
+            off.push(cursor);
+            cursor += step.len;
+        }
+        const tail = cursor;
+        const end = tail + 5;
+
+        const body = [];
+        for(let i = 0; i < steps.length; i++)
+        {
+            const step = steps[i];
+            if(!step.branch)
+            {
+                body.push(...step.bytes);
+                continue;
+            }
+            const after = off[i] + step.len;
+            const candidates = [HEAD, tail, end];
+            for(let j = i + 1; j < steps.length; j++) candidates.push(off[j]);
+            // Keep only targets that fit the chosen displacement.
+            const max = step.rel32 ? 0x7FFF_FFFF : 127;
+            const min = step.rel32 ? -0x8000_0000 : -128;
+            const choices = candidates.filter(t => t - after >= min && t - after <= max);
+            const target = choices[Math.floor(random() * choices.length)];
+            const rel = target - after;
+            if(step.rel32)
+            {
+                body.push(0x0F, 0x80 + step.cc,
+                    rel & 0xFF, rel >> 8 & 0xFF, rel >> 16 & 0xFF, rel >> 24 & 0xFF);
+            }
+            else
+            {
+                body.push(0x70 + step.cc, rel & 0xFF);
+            }
+        }
+
+        const jz_rel = end - 15;
+        const head = [0x0F, 0x84, jz_rel & 0xFF, jz_rel >> 8 & 0xFF, jz_rel >> 16 & 0xFF, jz_rel >> 24 & 0xFF];
+        const tail_jmp_rel = HEAD - (tail + 5);
         const suffix = [
-            0x41, 0xFF, 0xCC, // dec r12d
-            0x0F, 0x85, rel & 0xFF, rel >> 8 & 0xFF, rel >> 16 & 0xFF, rel >> 24 & 0xFF,
+            0xE9, tail_jmp_rel & 0xFF, tail_jmp_rel >> 8 & 0xFF, tail_jmp_rel >> 16 & 0xFF, tail_jmp_rel >> 24 & 0xFF,
             0xF4, // hlt
         ];
-        return prefix.concat(body, suffix);
+        return prefix.concat(head, body, suffix);
     };
 
     const seed_regs = random => {
@@ -165,7 +206,7 @@ emulator.add_listener("emulator-loaded", () => {
         for(let i = 0; i < 16; i++) set_reg64(i, regs[i]);
         set_reg64(12, 0n);
         set_reg64(15, BigInt(SCRATCH));
-        set_reg64(4, 0x80000n); // rsp
+        set_reg64(4, 0x80000n);
         for(let i = 0; i < memory.length; i++) ex.write8(SCRATCH + i, memory[i]);
 
         cpu.instruction_pointer[0] = BASE;
@@ -176,12 +217,13 @@ emulator.add_listener("emulator-loaded", () => {
         ex.enter_long_mode(PML4);
 
         let guard = 0;
-        while(!cpu.in_hlt[0] && guard++ < 20000)
+        while(!cpu.in_hlt[0] && guard++ < 400)
         {
             ex.main_loop();
         }
         return {
             halted: cpu.in_hlt[0] === 1,
+            rip: cpu.instruction_pointer[0] >>> 0,
             regs: Array.from({ length: 16 }, (_, i) => reg64(i)),
             flags: cpu.flags[0] >>> 0,
             memory: Array.from({ length: memory.length }, (_, i) => ex.read8(SCRATCH + i)),
@@ -204,6 +246,10 @@ emulator.add_listener("emulator-loaded", () => {
         const problems = [];
         if(!interpreted.halted) problems.push("interpreter did not halt");
         if(!compiled.halted) problems.push("JIT did not halt");
+        if(interpreted.rip !== compiled.rip)
+        {
+            problems.push("rip: interp 0x" + interpreted.rip.toString(16) + " vs jit 0x" + compiled.rip.toString(16));
+        }
         for(let i = 0; i < 16; i++)
         {
             if(interpreted.regs[i] !== compiled.regs[i])
@@ -228,9 +274,14 @@ emulator.add_listener("emulator-loaded", () => {
         if(problems.length)
         {
             mismatches++;
-            console.log("FAIL seed " + seed + ": " + problems[0]);
-            for(const problem of problems.slice(1)) console.log("     " + problem);
-            console.log("     program: [" + program.join(", ") + "]");
+            if(mismatches <= 5)
+            {
+                console.log("FAIL seed " + seed + ": " + problems[0]);
+                for(const problem of problems.slice(1, 3)) console.log("     " + problem);
+                console.log("     program: [" + program.join(", ") + "]");
+                console.log("     regs: [" + regs.map(r => "0x" + r.toString(16)).join(", ") + "]");
+                console.log("     mem: [" + memory.join(", ") + "]");
+            }
         }
     }
 
@@ -241,10 +292,10 @@ emulator.add_listener("emulator-loaded", () => {
     }
     if(mismatches)
     {
-        console.log("jit64 differential: " + mismatches + " mismatching program(s)");
+        console.log("jit64 controlflow: " + mismatches + " mismatching program(s)");
         process.exit(1);
     }
 
-    console.log("jit64 differential: " + CASES + " programs matched");
+    console.log("jit64 controlflow: " + CASES + " programs matched");
     process.exit(0);
 });

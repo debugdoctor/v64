@@ -4,7 +4,12 @@
 
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalI64};
+
+// Instrumentation: log the first few blocks that fail to decode.
+static LOGGED_FAILS: AtomicU32 = AtomicU32::new(0);
 
 const REG_LOW: i32 = 64;
 const REG_HIGH: i32 = 128;
@@ -153,7 +158,7 @@ pub enum ArithOp {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub enum ShiftKind { Shl, Shr, Sar }
+pub enum ShiftKind { Shl, Shr, Sar, Rol, Ror }
 
 struct DecodedBlock {
     instrs: Vec<Instr>,
@@ -195,6 +200,11 @@ fn read_i8(bytes: &[u8], i: &mut usize) -> Result<i8, String> {
 // Read an immediate whose encoded size follows the operand width: 16-bit
 // operands use imm16, 32- and 64-bit operands use imm32 (sign-extended to 64).
 fn read_imm_operand(bytes: &[u8], i: &mut usize, width: u8) -> Result<u64, String> {
+    if width == 8 {
+        let v = *bytes.get(*i).ok_or("truncated imm8")? as u64;
+        *i += 1;
+        return Ok(v);
+    }
     if width == 16 {
         if *i + 2 > bytes.len() {
             return Err("truncated imm16".into());
@@ -209,9 +219,12 @@ fn read_imm_operand(bytes: &[u8], i: &mut usize, width: u8) -> Result<u64, Strin
     }
 }
 
-// Encoded immediate size for the operand width (imm16 vs imm32).
+// Encoded immediate size for the operand width (imm8 vs imm16 vs imm32).
 fn imm_operand_bytes(width: u8) -> usize {
-    if width == 16 {
+    if width == 8 {
+        1
+    }
+    else if width == 16 {
         2
     }
     else {
@@ -248,7 +261,7 @@ fn decode_mem(
         scale = sib >> 6;
         let index_low = sib >> 3 & 7;
         let base_low = sib & 7;
-        if index_low != 4 {
+        if index_low != 4 || rex_x != 0 {
             index = Some(index_low | rex_x << 3);
         }
         if base_low == 5 && mod_bits == 0 {
@@ -325,6 +338,15 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                 // instructions handled here (string operations are not JITted).
                 0xF0 | 0xF2 => {
                     i += 1;
+                },
+                // In long mode the ES/CS/SS/DS overrides are ignored. The FS/GS
+                // overrides change the effective address, which the address
+                // generator does not model, so those blocks stay interpreted.
+                0x26 | 0x2E | 0x36 | 0x3E => {
+                    i += 1;
+                },
+                0x64 | 0x65 => {
+                    return Err("unsupported segment override".into());
                 },
                 0x40..=0x4F => {
                     rex = bytes[i];
@@ -512,18 +534,34 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
             },
 
             // mov/lea/add/sub/cmp/test r/m, r and r, r/m
-            0x89 | 0x8B | 0x8D | 0x01 | 0x03 | 0x09 | 0x0B | 0x11 | 0x13 | 0x19 | 0x1B
+            0x88 | 0x8A | 0x89 | 0x8B | 0x8D | 0x01 | 0x03 | 0x09 | 0x0B | 0x11 | 0x13 | 0x19 | 0x1B
             | 0x21 | 0x23 | 0x29 | 0x2B | 0x31 | 0x33 | 0x39 | 0x3B | 0x85 => {
-                let width = operand_width(prefix_66, rex_w);
+                let width = if opcode == 0x88 || opcode == 0x8A {
+                    8
+                }
+                else {
+                    operand_width(prefix_66, rex_w)
+                };
                 let modrm = *bytes.get(i).ok_or("truncated modrm")?;
                 i += 1;
                 let reg = (modrm >> 3 & 7) | rex_r << 3;
                 let rm = (modrm & 7) | rex_b << 3;
+                // Without a REX prefix the 8-bit registers 4..7 are AH/CH/DH/BH;
+                // map them into the 16..19 index space.
+                let map_high = |x: u8| if (4..8).contains(&x) { 16 + (x - 4) } else { x };
+                let (reg, rm) = if width == 8 && rex == 0 {
+                    (map_high(reg), if modrm >> 6 == 3 { map_high(rm) } else { rm })
+                }
+                else {
+                    (reg, rm)
+                };
                 if modrm >> 6 == 3 {
                     if opcode == 0x8D {
                         return Err("lea requires a memory operand".into());
                     }
                     out.push(match opcode {
+                        0x88 => Instr::MovRegReg { dst: rm, src: reg, width },
+                        0x8A => Instr::MovRegReg { dst: reg, src: rm, width },
                         0x89 => Instr::MovRegReg { dst: rm, src: reg, width },
                         0x8B => Instr::MovRegReg { dst: reg, src: rm, width },
                         0x01 => Instr::AddRegReg { dst: rm, src: reg, width },
@@ -549,6 +587,8 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                 else {
                     let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
                     out.push(match opcode {
+                        0x88 => Instr::MovMemReg { mem, src: reg, width },
+                        0x8A => Instr::MovRegMem { dst: reg, mem, width },
                         0x89 => Instr::MovMemReg { mem, src: reg, width },
                         0x8B => Instr::MovRegMem { dst: reg, mem, width },
                         0x8D => Instr::Lea { dst: reg, mem, width },
@@ -635,15 +675,31 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                 }
             },
 
-            // test r/m64, imm32 (sign-extended)
-            0xF7 => {
-                let width = operand_width(prefix_66, rex_w);
+            // test/not/neg r/m8, imm8 (0xF6) and r/m, imm (0xF7)
+            0xF6 | 0xF7 => {
+                let width = if opcode == 0xF6 {
+                    8
+                }
+                else {
+                    operand_width(prefix_66, rex_w)
+                };
                 let modrm = *bytes.get(i).ok_or("truncated modrm")?;
                 i += 1;
                 let group = modrm >> 3 & 7;
+                // Without a REX prefix the 8-bit registers 4..7 are AH/CH/DH/BH;
+                // map them into the 16..19 index space.
+                let reg_rm = {
+                    let x = (modrm & 7) | rex_b << 3;
+                    if width == 8 && rex == 0 && (4..8).contains(&x) {
+                        16 + (x - 4)
+                    }
+                    else {
+                        x
+                    }
+                };
                 if matches!(group, 2 | 3) {
                     if modrm >> 6 == 3 {
-                        let r = (modrm & 7) | rex_b << 3;
+                        let r = reg_rm;
                         out.push(if group == 2 {
                             Instr::NotReg { r, width }
                         }
@@ -684,7 +740,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     out.push(Instr::ArithMemImm { op: ArithOp::Test, mem, value, width });
                 }
                 else {
-                    let r = (modrm & 7) | rex_b << 3;
+                    let r = reg_rm;
                     out.push(Instr::ArithRegImm { op: ArithOp::Test, r, value, width });
                 }
             },
@@ -786,6 +842,8 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                 let modrm = *bytes.get(i).ok_or("truncated shift modrm")?;
                 i += 1;
                 let kind = match modrm >> 3 & 7 {
+                    0 => ShiftKind::Rol,
+                    1 => ShiftKind::Ror,
                     4 => ShiftKind::Shl,
                     5 => ShiftKind::Shr,
                     7 => ShiftKind::Sar,
@@ -1045,6 +1103,20 @@ fn load_reg(b: &mut WasmBuilder, locals: &mut Vec<(u8, WasmLocalI64)>, r: u8) ->
     if let Some(i) = find_reg(locals, r) {
         return i;
     }
+    if r >= 16 {
+        // AH/CH/DH/BH: the high byte of register r-16. Never cached, so it is
+        // always derived from the base register's current local.
+        let bi = load_reg(b, locals, r - 16);
+        b.get_local_i64(&locals[bi].1);
+        b.const_i64(8);
+        b.shr_u_i64();
+        b.const_i64(0xFF);
+        b.and_i64();
+        let local = b.set_new_local_i64();
+        // Key 0xFF never matches a register index and is skipped on write-back.
+        locals.push((0xFF, local));
+        return locals.len() - 1;
+    }
     if r >= 8 {
         b.const_i32(REG_EXT + 8 * (r as i32 - 8));
         b.load_aligned_i64(0);
@@ -1230,7 +1302,18 @@ fn emit_mask(b: &mut WasmBuilder, width: u8) {
 // Write `value` into the register local `dst`. A 16-bit write preserves the
 // upper bits; 32-bit writes zero-extend (the caller masks to 32 bits).
 fn emit_write_reg(b: &mut WasmBuilder, dst: &WasmLocalI64, value: &WasmLocalI64, width: u8) {
-    if width == 16 {
+    if width == 8 {
+        // An 8-bit write preserves the upper 56 bits.
+        b.get_local_i64(dst);
+        b.const_i64(!0xFF);
+        b.and_i64();
+        b.get_local_i64(value);
+        b.const_i64(0xFF);
+        b.and_i64();
+        b.or_i64();
+        b.set_local_i64(dst);
+    }
+    else if width == 16 {
         b.get_local_i64(dst);
         b.const_i64(!0xFFFF);
         b.and_i64();
@@ -1255,10 +1338,25 @@ fn write_reg_value(
     value: &WasmLocalI64,
     width: u8,
 ) {
+    if r >= 16 {
+        // AH/CH/DH/BH: merge into bits 8..15 of the base register.
+        let bi = load_reg(b, locals, r - 16);
+        b.get_local_i64(&locals[bi].1);
+        b.const_i64(!0xFF00);
+        b.and_i64();
+        b.get_local_i64(value);
+        b.const_i64(0xFF);
+        b.and_i64();
+        b.const_i64(8);
+        b.shl_i64();
+        b.or_i64();
+        b.set_local_i64(&locals[bi].1);
+        return;
+    }
     if let Some(di) = find_reg(locals, r) {
         emit_write_reg(b, &locals[di].1, value, width);
     }
-    else if width == 16 {
+    else if width == 8 || width == 16 {
         let di = load_reg(b, locals, r);
         emit_write_reg(b, &locals[di].1, value, width);
     }
@@ -1589,6 +1687,10 @@ fn bump_instruction_counter(b: &mut WasmBuilder) {
 
 fn emit_registers_back(b: &mut WasmBuilder, locals: &[(u8, WasmLocalI64)]) {
     for (r, local) in locals {
+        if *r >= 16 {
+            // High-byte temporaries (and their base is written back separately).
+            continue;
+        }
         store_reg(b, local, *r);
     }
 }
@@ -1850,6 +1952,19 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 if count == 0 {
                     continue;
                 }
+                if kind == ShiftKind::Rol || kind == ShiftKind::Ror {
+                    // Rotates reset CF/OF but leave the other flags; the runtime
+                    // helper handles that, so delegate instead of inlining.
+                    let ri = load_reg(&mut b, &mut locals, r);
+                    b.get_local_i64(&locals[ri].1);
+                    b.const_i64(count as i64);
+                    b.const_i32(width as i32 | (kind as i32) << 8);
+                    b.call_fn3_i64_i64_i32_ret_i64("jit64_shift");
+                    let result = b.set_new_local_i64();
+                    emit_write_reg(&mut b, &locals[ri].1, &result, width);
+                    b.free_local_i64(result);
+                    continue;
+                }
                 let ri = load_reg(&mut b, &mut locals, r);
                 b.get_local_i64(&locals[ri].1);
                 emit_mask(&mut b, width);
@@ -1867,6 +1982,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                     ShiftKind::Shl => b.shl_i64(),
                     ShiftKind::Shr => b.shr_u_i64(),
                     ShiftKind::Sar => b.shr_s_i64(),
+                    _ => unreachable!(),
                 }
                 emit_mask(&mut b, width);
                 let result = b.set_new_local_i64();
@@ -2333,6 +2449,13 @@ static mut COMPILE_BUF: [u8; COMPILE_BUF_SIZE] = [0; COMPILE_BUF_SIZE];
 static mut JIT64_MEMORY_FAULT: u8 = 0;
 // Lets tests and benchmarks run the same code with the JIT off.
 static mut JIT64_ENABLED: bool = true;
+// Dispatch counters (diagnostics; see jit64_stat).
+static mut JIT64_RUN_HITS: u64 = 0;
+static mut JIT64_RUN_MISSES: u64 = 0;
+static mut JIT64_INTERP: u64 = 0;
+static mut JIT64_COMPILES: u64 = 0;
+static mut JIT64_COMPILE_FAILS: u64 = 0;
+static mut JIT64_FAULTS: u64 = 0;
 static mut HOTNESS: *mut HashMap<u64, u32> = std::ptr::null_mut();
 // guest RIP -> wasm table index of the compiled block
 static mut BLOCKS: *mut HashMap<u64, u16> = std::ptr::null_mut();
@@ -2364,6 +2487,7 @@ unsafe fn code_pages() -> &'static mut HashMap<u32, HashSet<u64>> {
 
 // Does nothing if the bytes cannot be decoded yet.
 unsafe fn compile_and_register(rip: u64) {
+    JIT64_COMPILES += 1;
     let page_end = (rip | 0xFFF) + 1;
     let mut bytes = Vec::new();
     let mut addr = rip;
@@ -2377,7 +2501,15 @@ unsafe fn compile_and_register(rip: u64) {
 
     let module = match compile_bytes(rip, &bytes) {
         Ok(module) => module,
-        Err(_) => return,
+        Err(e) =>
+        {
+            JIT64_COMPILE_FAILS += 1;
+            if LOGGED_FAILS.fetch_add(1, Ordering::Relaxed) < 40
+            {
+                dbg_log!("jit64: cannot compile 0x{:x}: {}", rip, e);
+            }
+            return;
+        },
     };
     if module.len() > COMPILE_BUF_SIZE {
         return;
@@ -2409,8 +2541,13 @@ pub unsafe fn try_run(rip: u64) -> bool {
     }
     let index = match blocks().get(&rip) {
         Some(&index) => index,
-        None => return false,
+        None =>
+        {
+            JIT64_RUN_MISSES += 1;
+            return false;
+        },
     };
+    JIT64_RUN_HITS += 1;
     let indirect = index as i32 + crate::cpu::cpu::WASM_TABLE_OFFSET as i32;
     wasm::call_indirect1(indirect, 0);
     jit64_finish_fault();
@@ -2424,9 +2561,13 @@ pub unsafe fn note_interpreted(rip: u64) {
     if blocks().contains_key(&rip) {
         return;
     }
+    JIT64_INTERP += 1;
     let count = hotness().entry(rip).or_insert(0);
     *count += 1;
-    if *count >= JIT64_THRESHOLD {
+    // Compile exactly once. Retrying on every interpretation of a block that
+    // cannot be decoded (e.g. an unsupported opcode) is far more expensive than
+    // just leaving it in the interpreter.
+    if *count == JIT64_THRESHOLD {
         compile_and_register(rip);
     }
 }
@@ -2467,6 +2608,22 @@ pub unsafe fn invalidate_physical_page(page: u32) {
 
 #[no_mangle]
 pub unsafe fn jit64_compiled_count() -> u32 { blocks().len() as u32 }
+
+// Diagnostics: 0 run hits, 1 run misses, 2 interpreted, 3 compiles, 4 failures,
+// 5 compiled block count.
+#[no_mangle]
+pub unsafe fn jit64_stat(index: u32) -> u64 {
+    match index {
+        0 => JIT64_RUN_HITS,
+        1 => JIT64_RUN_MISSES,
+        2 => JIT64_INTERP,
+        3 => JIT64_COMPILES,
+        4 => JIT64_COMPILE_FAILS,
+        5 => blocks().len() as u64,
+        6 => JIT64_FAULTS,
+        _ => 0,
+    }
+}
 
 // Enable or disable block compilation and dispatch (used by tests/benchmarks).
 #[no_mangle]
@@ -2575,26 +2732,43 @@ pub unsafe fn jit64_shift(value: u64, raw_count: u64, encoded: u32) -> u64 {
         return value;
     }
     let sign = 1u64 << (width - 1);
-    let (result, carry, overflow) = match kind {
+    let (result, carry, overflow, rotate) = match kind {
         0 => {
             let result = value.wrapping_shl(count) & mask;
             // A left shift by at least the operand width shifts out every bit;
             // carry is undefined there, so report no carry.
             let carry = count < width && value >> (width - count) & 1 != 0;
-            (result, carry, count == 1 && (result & sign != 0) ^ carry)
+            (result, carry, count == 1 && (result & sign != 0) ^ carry, false)
         },
-        1 => (value >> count, value >> (count - 1) & 1 != 0, count == 1 && value & sign != 0),
+        1 => (value >> count, value >> (count - 1) & 1 != 0, count == 1 && value & sign != 0, false),
         2 => {
             let signed = (value ^ sign).wrapping_sub(sign);
-            (((signed as i64) >> count) as u64 & mask, value >> (count - 1) & 1 != 0, false)
+            (((signed as i64) >> count) as u64 & mask, value >> (count - 1) & 1 != 0, false, false)
+        },
+        3 => {
+            // ROL: only CF and OF change.
+            let result = ((value << count) | (value >> (width - count))) & mask;
+            let carry = value >> (width - count) & 1 != 0;
+            (result, carry, count == 1 && (result & sign != 0) != carry, true)
+        },
+        4 => {
+            // ROR: only CF and OF change.
+            let result = ((value >> count) | (value << (width - count))) & mask;
+            let carry = value >> (count - 1) & 1 != 0;
+            let msb = result & sign != 0;
+            let next = result >> (width - 2) & 1 != 0;
+            (result, carry, count == 1 && msb != next, true)
         },
         _ => unreachable!(),
     };
-    let mut new_flags = *crate::cpu::global_pointers::flags & !FLAG_MASK;
+    // A rotate only touches CF and OF; it leaves the other flags alone.
+    let mut new_flags = *crate::cpu::global_pointers::flags & !if rotate { 1 | 1 << 11 } else { FLAG_MASK };
     if carry { new_flags |= 1; }
-    if result == 0 { new_flags |= 1 << 6; }
-    if result & sign != 0 { new_flags |= 1 << 7; }
-    if (result as u8).count_ones() & 1 == 0 { new_flags |= 1 << 2; }
+    if !rotate {
+        if result == 0 { new_flags |= 1 << 6; }
+        if result & sign != 0 { new_flags |= 1 << 7; }
+        if (result as u8).count_ones() & 1 == 0 { new_flags |= 1 << 2; }
+    }
     if overflow { new_flags |= 1 << 11; }
     *crate::cpu::global_pointers::flags = new_flags;
     *crate::cpu::global_pointers::flags_changed = 0;
@@ -2692,6 +2866,7 @@ pub unsafe fn jit64_finish_fault() {
     if JIT64_MEMORY_FAULT == 0 {
         return;
     }
+    JIT64_FAULTS += 1;
     JIT64_MEMORY_FAULT = 0;
     *crate::cpu::global_pointers::rip = *crate::cpu::global_pointers::previous_rip;
     *crate::cpu::global_pointers::instruction_pointer = *crate::cpu::global_pointers::rip as i32;

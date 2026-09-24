@@ -96,6 +96,10 @@ pub const kernel_gs_base: *mut u64 = 1120 as *mut u64;
 
 pub const tss_size_32: *mut bool = 1128 as *mut bool;
 
+// Full 64-bit IDT/GDT base in long mode; the *_offset fields keep the low 32 bits.
+pub const idtr_base: *mut u64 = 1240 as *mut u64;
+pub const gdtr_base: *mut u64 = 1248 as *mut u64;
+
 pub const sse_scratch_register: *mut reg128 = 1136 as *mut reg128;
 
 pub const fpu_st: *mut F80 = 1152 as *mut F80;

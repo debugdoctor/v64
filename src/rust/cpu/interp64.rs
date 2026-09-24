@@ -1681,6 +1681,40 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             *rip = (*rip).wrapping_add(displacement as u64);
         },
 
+        // POP r/m64 (8F /0)
+        0x8F => {
+            let (modrm, operand) = decode_operand(&pfx)?;
+            if modrm.reg & 7 != 0 {
+                crate::cpu::cpu::trigger_ud();
+            }
+            else {
+                let value = pop64()?;
+                probe_operand_write(operand, OpSize::S64)?;
+                write_operand(operand, OpSize::S64, pfx.has_rex(), value)?;
+            }
+        },
+
+        // INC/DEC r/m8 (FE /0 and /1)
+        0xFE => {
+            let (modrm, operand) = decode_operand(&pfx)?;
+            match modrm.reg & 7 {
+                group @ (0 | 1) => {
+                    let carry = *flags & FLAG_CARRY;
+                    let value = read_operand(operand, OpSize::S8, pfx.has_rex())?;
+                    probe_operand_write(operand, OpSize::S8)?;
+                    let result = alu(
+                        if group == 0 { AluOp::Add } else { AluOp::Sub },
+                        value,
+                        1,
+                        OpSize::S8,
+                    );
+                    *flags = *flags & !FLAG_CARRY | carry;
+                    write_operand(operand, OpSize::S8, pfx.has_rex(), result)?;
+                },
+                _ => crate::cpu::cpu::trigger_ud(),
+            }
+        },
+
         // CALL/JMP r/m64 (FF /2 and /4)
         0xFF => {
             let (modrm, operand) = decode_operand(&pfx)?;
@@ -1717,6 +1751,11 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
                     set_cpl_segments(selector, selector as u8 & 3);
                     *rip = target;
                 },
+                // push r/m64
+                6 => {
+                    let value = read_operand(operand, OpSize::S64, pfx.has_rex())?;
+                    push64(value)?;
+                },
                 _ => crate::cpu::cpu::trigger_ud(),
             }
         },
@@ -1740,11 +1779,153 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             write_reg64(RSP as i32, rsp);
         },
 
+        // RETF (0xCB) / RETF imm16 (0xCA): far return. In long mode the return
+        // address and the CS selector are popped as 64-bit values.
+        0xCB | 0xCA => {
+            let adjustment = if opcode == 0xCA { fetch16()? as u64 } else { 0 };
+            let new_rip = pop64()?;
+            let new_cs = pop64()?;
+            *sreg.offset(1) = new_cs as u16; // CS
+            *cpl = new_cs as u8 & 3;
+            *rip = new_rip;
+            let rsp = read_reg64(RSP as i32).wrapping_add(adjustment);
+            write_reg64(RSP as i32, rsp);
+        },
+
+        // MOVS (0xA4/0xA5), STOS (0xAA/0xAB), LODS (0xAC/0xAD). F3 repeats.
+        0xA4 | 0xA5 | 0xAA | 0xAB | 0xAC | 0xAD => {
+            let elem_size = if opcode & 1 == 0 { OpSize::S8 } else { size };
+            let bytes = (elem_size.bits() / 8) as u64;
+            let delta = if *flags & (1 << 10) != 0 { -(bytes as i64) } else { bytes as i64 };
+
+            let rep = pfx.f3;
+            let mut count = if rep { read_reg64(RCX as i32) } else { 1 };
+
+            while count > 0 {
+                let rsi = read_reg64(RSI as i32);
+                let rdi = read_reg64(RDI as i32);
+
+                match opcode & 0xFE {
+                    // MOVS
+                    0xA4 => {
+                        let value = mem_read(rsi, elem_size)?;
+                        mem_write(rdi, elem_size, value)?;
+                        write_reg64(RSI as i32, rsi.wrapping_add(delta as u64));
+                        write_reg64(RDI as i32, rdi.wrapping_add(delta as u64));
+                    },
+                    // STOS
+                    0xAA => {
+                        let value = read_reg(RAX, elem_size, pfx.has_rex());
+                        mem_write(rdi, elem_size, value)?;
+                        write_reg64(RDI as i32, rdi.wrapping_add(delta as u64));
+                    },
+                    // LODS
+                    _ => {
+                        let value = mem_read(rsi, elem_size)?;
+                        write_reg(RAX, elem_size, pfx.has_rex(), value);
+                        write_reg64(RSI as i32, rsi.wrapping_add(delta as u64));
+                    },
+                }
+
+                if rep {
+                    count -= 1;
+                    write_reg64(RCX as i32, count);
+                }
+                else {
+                    count = 0;
+                }
+            }
+        },
+
+        // CMPS (0xA6/0xA7) and SCAS (0xAE/0xAF). F3 repeats while equal,
+        // F2 repeats while not equal.
+        0xA6 | 0xA7 | 0xAE | 0xAF => {
+            let elem_size = if opcode & 1 == 0 { OpSize::S8 } else { size };
+            let bytes = (elem_size.bits() / 8) as u64;
+            let delta = if *flags & (1 << 10) != 0 { -(bytes as i64) } else { bytes as i64 };
+
+            let rep = pfx.f3 || pfx.f2;
+            let mut count = if rep { read_reg64(RCX as i32) } else { 1 };
+
+            while count > 0 {
+                let rsi = read_reg64(RSI as i32);
+                let rdi = read_reg64(RDI as i32);
+
+                if opcode & 0xFE == 0xA6 {
+                    // CMPS: [rsi] - [rdi]
+                    let a = mem_read(rsi, elem_size)?;
+                    let b = mem_read(rdi, elem_size)?;
+                    alu(AluOp::Cmp, a, b, elem_size);
+                    write_reg64(RSI as i32, rsi.wrapping_add(delta as u64));
+                }
+                else {
+                    // SCAS: accumulator - [rdi]
+                    let a = read_reg(RAX, elem_size, pfx.has_rex());
+                    let b = mem_read(rdi, elem_size)?;
+                    alu(AluOp::Cmp, a, b, elem_size);
+                }
+                write_reg64(RDI as i32, rdi.wrapping_add(delta as u64));
+
+                count -= 1;
+                if rep {
+                    write_reg64(RCX as i32, count);
+                    let zf = *flags & FLAG_ZF as i32 != 0;
+                    if zf != pfx.f3 {
+                        break;
+                    }
+                }
+                else {
+                    count = 0;
+                }
+            }
+        },
+
         // LEAVE: mov rsp, rbp; pop rbp
         0xC9 => {
             write_reg64(RSP as i32, read_reg64(RBP as i32));
             let value = pop64()?;
             write_reg64(RBP as i32, value);
+        },
+
+        // FNINIT (DB E3), FNCLEX (DB E2), FNSTCW (D9 /7), FLDCW (D9 /5),
+        // FNSTSW m16 (DD /7) and FNSTSW AX (DF E0).
+        0xD9 | 0xDB | 0xDD | 0xDF => {
+            let (modrm, operand) = decode_operand(&pfx)?;
+            let address = if let Operand::Mem(address) = operand { address } else { 0 };
+
+            match (opcode, modrm.mod_bits, modrm.reg, modrm.rm) {
+                // FLDCW m16
+                (0xD9, m, 5, _) if m != 3 => {
+                    *fpu_control_word = mem_read(address, OpSize::S16)? as u16;
+                },
+                // FNSTCW m16
+                (0xD9, m, 7, _) if m != 3 => {
+                    mem_write(address, OpSize::S16, *fpu_control_word as u64)?;
+                },
+                // FNSTSW m16
+                (0xDD, m, 7, _) if m != 3 => {
+                    mem_write(address, OpSize::S16, *fpu_status_word as u64)?;
+                },
+                // FNINIT
+                (0xDB, 3, 4, 3) => {
+                    *fpu_control_word = 0x37F;
+                    *fpu_status_word = 0;
+                    *fpu_stack_empty = 0xFF;
+                    *fpu_stack_ptr = 0;
+                },
+                // FNCLEX
+                (0xDB, 3, 4, 2) => {
+                    *fpu_status_word = 0;
+                },
+                // FNSTSW AX
+                (0xDF, 3, 4, 0) => {
+                    write_reg(RAX, OpSize::S16, false, *fpu_status_word as u64);
+                },
+                _ => {
+                    dbg_log!("#ud interp64: x87 opcode {:02x}", opcode);
+                    crate::cpu::cpu::trigger_ud();
+                },
+            }
         },
 
         // IRETQ (0xCF)
@@ -2009,6 +2190,54 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
             }
         },
 
+        // SHLD/SHRD r/m, r, imm8 (0F A4/0F AC) or CL (0F A5/0F AD)
+        0xA4 | 0xA5 | 0xAC | 0xAD => {
+            let shld = opcode == 0xA4 || opcode == 0xA5;
+            let trailing = if opcode == 0xA4 || opcode == 0xAC { 1 } else { 0 };
+            let (modrm, operand) = decode_operand_with_trailing(pfx, trailing)?;
+            let size = if size == OpSize::S8 { OpSize::S32 } else { size };
+            let has_rex = pfx.has_rex();
+            let count = if trailing != 0 {
+                fetch8()? as u32
+            }
+            else {
+                read_reg64(RCX as i32) as u32 & 0xFF
+            } & if size == OpSize::S64 { 63 } else { 31 };
+            if count == 0 {
+                return Ok(());
+            }
+            let dst = read_operand(operand, size, has_rex)? & size.mask();
+            let src = read_reg(modrm.reg, size, has_rex) & size.mask();
+            probe_operand_write(operand, size)?;
+            let bits = size.bits();
+            let sign = size.sign_bit();
+            let (result, cf) = if shld {
+                let result = (dst << count | src >> (bits - count)) & size.mask();
+                (result, dst >> (bits - count) & 1 != 0)
+            }
+            else {
+                let result = (dst >> count | src << (bits - count)) & size.mask();
+                (result, dst >> (count - 1) & 1 != 0)
+            };
+            set_logic_flags(result, size);
+            *flags &= !(FLAG_CF | FLAG_OF) as i32;
+            if cf {
+                *flags |= FLAG_CF as i32;
+            }
+            // OF is only defined for a count of one
+            if count == 1
+                && if shld {
+                    (result & sign != 0) ^ cf
+                }
+                else {
+                    (dst & sign != 0) ^ cf
+                }
+            {
+                *flags |= FLAG_OF as i32;
+            }
+            write_operand(operand, size, has_rex, result)?;
+        },
+
         // CPUID (0F A2)
         0xA2 => {
             crate::cpu::instructions_0f::instr_0FA2();
@@ -2093,22 +2322,28 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                     // SGDT
                     0 => {
                         mem_write(address, OpSize::S16, *gdtr_size as u32 as u64)?;
-                        mem_write(address + 2, OpSize::S64, *gdtr_offset as u32 as u64)?;
+                        let base = if *gdtr_base != 0 { *gdtr_base } else { *gdtr_offset as u32 as u64 };
+                        mem_write(address + 2, OpSize::S64, base)?;
                     },
                     // SIDT
                     1 => {
                         mem_write(address, OpSize::S16, *idtr_size as u32 as u64)?;
-                        mem_write(address + 2, OpSize::S64, *idtr_offset as u32 as u64)?;
+                        let base = if *idtr_base != 0 { *idtr_base } else { *idtr_offset as u32 as u64 };
+                        mem_write(address + 2, OpSize::S64, base)?;
                     },
                     // LGDT
                     2 => {
                         *gdtr_size = mem_read(address, OpSize::S16)? as i32;
-                        *gdtr_offset = mem_read(address + 2, OpSize::S64)? as u32 as i32;
+                        let base = mem_read(address + 2, OpSize::S64)?;
+                        *gdtr_offset = base as u32 as i32;
+                        *gdtr_base = base;
                     },
                     // LIDT
                     3 => {
                         *idtr_size = mem_read(address, OpSize::S16)? as i32;
-                        *idtr_offset = mem_read(address + 2, OpSize::S64)? as u32 as i32;
+                        let base = mem_read(address + 2, OpSize::S64)?;
+                        *idtr_offset = base as u32 as i32;
+                        *idtr_base = base;
                     },
                     // SMSW
                     4 => {

@@ -46,6 +46,7 @@ const ACPI_MADT_ADDRESS = 0xF0100;
 const ACPI_HPET_ADDRESS = 0xF0200;
 const ACPI_DSDT_ADDRESS = 0xF0300;
 const ACPI_FADT_ADDRESS = 0xF0400;
+const ACPI_SPCR_ADDRESS = 0xF0500;
 const APIC_MEM_ADDRESS = 0xFEE00000;
 const IOAPIC_MEM_ADDRESS = 0xFEC00000;
 
@@ -145,8 +146,20 @@ function build_acpi_tables(mem8)
     set64(0x8C, BigInt(ACPI_DSDT_ADDRESS));  // X_DSDT
     table(ACPI_FADT_ADDRESS, "FACP", 6, fadt);
 
+    // SPCR: the 16550 UART at 0x3F8, so the kernel binds ttyS0 as a real console
+    // instead of only using it when earlycon is on the command line.
+    const spcr = [
+        0x00, 0x00, 0x00, 0x00,          // interface type (16550), reserved
+        0x01, 8, 0, 1,                   // generic address: system I/O, 8-bit, offset 0, byte access
+        0xF8, 0x03, 0, 0, 0, 0, 0, 0,    // base address 0x3F8
+        0x01, 4,                         // interrupt type, IRQ 4
+        0x00, 0x00, 0x00, 0x00,          // global system interrupt
+        7, 0, 1, 3, 0,                   // 115200 baud, no parity, 1 stop bit, ANSI
+    ];
+    table(ACPI_SPCR_ADDRESS, "SPCR", 2, spcr);
+
     // RSDT (32-bit pointers) and XSDT (64-bit pointers) list the tables.
-    const pointers = [ACPI_MADT_ADDRESS, ACPI_FADT_ADDRESS, ACPI_HPET_ADDRESS];
+    const pointers = [ACPI_MADT_ADDRESS, ACPI_FADT_ADDRESS, ACPI_HPET_ADDRESS, ACPI_SPCR_ADDRESS];
     const rsdt = [];
     for(const pointer of pointers)
     {

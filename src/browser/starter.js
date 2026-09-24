@@ -113,26 +113,22 @@ export function v64(options)
         "jit64_compile": (index, ptr, len) => {
             const bytes = new Uint8Array(wasm_memory.buffer, Number(ptr), Number(len)).slice();
             const module = new WebAssembly.Module(bytes);
+            // Pass the wasm exports directly instead of JS wrappers: every guest
+            // memory access in a compiled block calls these, and a JS wrapper
+            // would make each one a wasm -> JS -> wasm round trip.
+            const jit64 = cpu.wm.exports;
             const instance = new WebAssembly.Instance(module, { e: {
                 m: wasm_memory,
-                jit64_translate: (address, for_writing) =>
-                    cpu.wm.exports.jit64_translate(address, for_writing),
-                jit64_mem_read: (address, width) =>
-                    cpu.wm.exports.jit64_mem_read(address, width),
-                jit64_mem_probe: (address, access) =>
-                    cpu.wm.exports.jit64_mem_probe(address, access),
-                jit64_mem_write: (address, value, width) =>
-                    cpu.wm.exports.jit64_mem_write(address, value, width),
-                jit64_memory_faulted: () => cpu.wm.exports.jit64_memory_faulted(),
-                jit64_imul: (lhs, rhs, width) =>
-                    cpu.wm.exports.jit64_imul(lhs, rhs, width),
-                jit64_bswap: (value, width) =>
-                    cpu.wm.exports.jit64_bswap(value, width),
-                jit64_shift: (value, count, encoded) =>
-                    cpu.wm.exports.jit64_shift(value, count, encoded),
-                jit64_adc_sbb: (dst, src, encoded) =>
-                    cpu.wm.exports.jit64_adc_sbb(dst, src, encoded),
-                jit64_cpuid: () => cpu.wm.exports.jit64_cpuid(),
+                jit64_translate: jit64.jit64_translate,
+                jit64_mem_read: jit64.jit64_mem_read,
+                jit64_mem_probe: jit64.jit64_mem_probe,
+                jit64_mem_write: jit64.jit64_mem_write,
+                jit64_memory_faulted: jit64.jit64_memory_faulted,
+                jit64_imul: jit64.jit64_imul,
+                jit64_bswap: jit64.jit64_bswap,
+                jit64_shift: jit64.jit64_shift,
+                jit64_adc_sbb: jit64.jit64_adc_sbb,
+                jit64_cpuid: jit64.jit64_cpuid,
             } });
             wasm_table.set(index + WASM_TABLE_OFFSET, instance.exports.f);
         },
