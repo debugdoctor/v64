@@ -1495,6 +1495,10 @@ pub unsafe fn far_jump(eip: i32, selector: i32, is_call: bool, is_osize_32: bool
         *sreg.offset(CS as isize) = selector as u16 & !3 | *cpl as u16;
 
         *instruction_pointer = get_seg_cs() + eip;
+        if *long_mode {
+            *rip = *instruction_pointer as u32 as u64;
+            *previous_rip = *rip;
+        }
 
         update_state_flags();
     }
@@ -2985,13 +2989,28 @@ pub unsafe fn set_cr0(cr0: i32) {
         full_clear_tlb();
     }
 
+    *protected_mode = (*cr & CR0_PE) == CR0_PE;
+    // EFER.LME was armed by wrmsr. Paging on enters long mode. Decided before
+    // the 32-bit PAE cache below, which does not apply to a PML4.
+    if *efer & (1 << 8) != 0 && *cr & CR0_PG != 0 {
+        if !*long_mode {
+            *rip = *instruction_pointer as u32 as u64;
+            *previous_rip = *rip;
+        }
+        *long_mode = true;
+        *efer |= 1 << 10;
+    }
+    else if *cr & CR0_PG == 0 {
+        *long_mode = false;
+        *efer &= !(1 << 10);
+    }
+
     if *cr.offset(4) & CR4_PAE != 0
         && old_cr0 & (CR0_CD | CR0_NW | CR0_PG) != cr0 & (CR0_CD | CR0_NW | CR0_PG)
+        && !*long_mode
     {
         load_pdpte(*cr.offset(3))
     }
-
-    *protected_mode = (*cr & CR0_PE) == CR0_PE;
     *segment_access_bytes.offset(CS as isize) = 0x80 | 0x10 | 0x08 | 0x02; // P dpl0 S E RW
 }
 
@@ -3001,7 +3020,9 @@ pub unsafe fn set_cr3(mut cr3: i32) {
     }
     if *cr.offset(4) & CR4_PAE != 0 {
         cr3 &= !0b1111;
-        load_pdpte(cr3);
+        if !*long_mode {
+            load_pdpte(cr3);
+        }
     }
     else {
         cr3 &= !0b111111100111;

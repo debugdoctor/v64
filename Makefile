@@ -362,6 +362,25 @@ rust-test: $(RUST_FILES)
 	env RUSTFLAGS="-D warnings" RUST_BACKTRACE=full RUST_TEST_THREADS=1 cargo test -- --nocapture
 	./tests/rust/verify-wasmgen-dummy-output.js
 
+jit64-tests: build/v64-debug.wasm
+	node tests/jit64/run.js
+	node tests/jit64/longmode.js
+	node tests/jit64/e2e.js
+	node tests/jit64/benchmark.js
+
+interp64-tests: build/v64-debug.wasm
+	node tests/interp64/run.js
+
+boot64-tests: build/v64-debug.wasm
+	node tests/boot64/run.js
+
+# Roadmap scenes: serial console after a direct 64-bit boot, then a ring 3
+# program whose hot loop is compiled and whose output goes through SYSCALL.
+e2e-tests: build/v64-debug.wasm
+	node tests/e2e/serial.js
+	node tests/e2e/user.js
+	node tests/e2e/modes.js
+
 rust-test-intensive:
 	QUICKCHECK_TESTS=100000000 make rust-test
 

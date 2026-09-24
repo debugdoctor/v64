@@ -29,6 +29,15 @@ emulator.add_listener("emulator-loaded", () => {
         ex.write32(address, Number(value & 0xFFFF_FFFFn));
         ex.write32(address + 4, Number(value >> 32n & 0xFFFF_FFFFn));
     };
+    // Read guest physical memory (through the CPU), not the raw wasm buffer.
+    const readGuest = (address, bytes) => {
+        let value = 0n;
+        for(let i = bytes - 1; i >= 0; i--)
+        {
+            value = value << 8n | BigInt(ex.read8(address + i));
+        }
+        return value;
+    };
 
     // Identity-map the first 1 GiB with 2 MiB pages
     const PML4 = 0x10000;
@@ -284,6 +293,97 @@ emulator.add_listener("emulator-loaded", () => {
         }
         assert.equal(u32[16] >>> 0, 0x1234, "cmove memory source");
         assert.equal(ex.read8(0x60008), 1, "setcc memory destination");
+    }
+
+    // Stage 5 coverage: 16-bit operands (`66`), address-size override (`67`),
+    // LOCK, memory-form shifts and CPUID, all inside a hot compiled block.
+    {
+        const covBase = 0x5000;
+        ex.write8(0x60000, 0x44);
+        ex.write8(0x60001, 0x33);
+        ex.write8(0x60002, 0x22);
+        ex.write8(0x60003, 0x11);
+        const covProgram = [
+            0x41, 0xBC, 0x58, 0x02, 0x00, 0x00, // mov r12d, 600
+            0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, -1
+            0x66, 0xB8, 0x34, 0x12, // mov ax, 0x1234
+            0x66, 0x83, 0xC0, 0x01, // add ax, 1
+            0x49, 0x89, 0xC5, // mov r13, rax
+            0x66, 0xC7, 0x44, 0x24, 0x20, 0xCD, 0xAB, // mov word [rsp+0x20], 0xABCD
+            0x66, 0x83, 0x44, 0x24, 0x20, 0x01, // add word [rsp+0x20], 1
+            0xBB, 0x00, 0x00, 0x06, 0x00, // mov ebx, 0x60000
+            0x67, 0x8B, 0x03, // mov eax, [ebx]
+            0x41, 0x89, 0xC7, // mov r15d, eax
+            0xF0, 0x48, 0x83, 0x44, 0x24, 0x28, 0x01, // lock add qword [rsp+0x28], 1
+            0x48, 0xD1, 0x64, 0x24, 0x28, // shl qword [rsp+0x28], 1
+            0x48, 0xD1, 0x6C, 0x24, 0x28, // shr qword [rsp+0x28], 1
+            0x31, 0xC0, // xor eax, eax
+            0x0F, 0xA2, // cpuid
+            0x41, 0xFF, 0xCC, // dec r12d
+            0x75, 0xBC, // jnz loop
+            0xF4, // hlt
+        ];
+        for(let i = 0; i < covProgram.length; i++)
+        {
+            ex.write8(covBase + i, covProgram[i]);
+        }
+        cpu.in_hlt[0] = 0;
+        new DataView(buffer).setBigUint64(232, BigInt(covBase), true);
+        const compiledBeforeCov = ex.jit64_compiled_count();
+        let g = 0;
+        while(!cpu.in_hlt[0] && g++ < 200000)
+        {
+            ex.main_loop();
+        }
+        assert.ok(
+            ex.jit64_compiled_count() > compiledBeforeCov,
+            "the Stage 5 block was JIT-compiled",
+        );
+
+        const r13cov = new DataView(buffer).getBigUint64(200, true);
+        const r15cov = new DataView(buffer).getBigUint64(216, true);
+        assert.equal(r13cov, 0xFFFF_FFFF_FFFF_1235n, "16-bit arithmetic preserves the upper bits");
+        assert.equal(r15cov, 0x11223344n, "32-bit addressing override load");
+        assert.equal(u32[16 + 3] >>> 0, 0x756E6547, "cpuid leaf 0 ebx");
+        assert.equal(u32[16 + 1] >>> 0, 0x6C65746E, "cpuid leaf 0 ecx");
+        assert.equal(u32[16 + 2] >>> 0, 0x49656E69, "cpuid leaf 0 edx");
+        const covWord = readGuest(0x80020, 2);
+        assert.equal(covWord, 0xABCEn, "16-bit memory add");
+        assert.equal(readGuest(0x80028, 8), 600n, "lock add and memory-form shifts");
+    }
+
+    // A 16-bit CL shift by more than the operand width must not underflow the
+    // carry calculation in the JIT helper.
+    {
+        const shiftBase = 0x6000;
+        const shiftProgram = [
+            0x41, 0xBC, 0x58, 0x02, 0x00, 0x00, // mov r12d, 600
+            0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // mov rax, -1
+            0x66, 0xB8, 0x34, 0x12, // mov ax, 0x1234
+            0xB9, 0x14, 0x00, 0x00, 0x00, // mov ecx, 20
+            0x66, 0xD3, 0xE0, // shl ax, cl
+            0x49, 0x89, 0xC6, // mov r14, rax
+            0x41, 0xFF, 0xCC, // dec r12d
+            0x75, 0xF5, // jnz loop
+            0xF4, // hlt
+        ];
+        for(let i = 0; i < shiftProgram.length; i++)
+        {
+            ex.write8(shiftBase + i, shiftProgram[i]);
+        }
+        cpu.in_hlt[0] = 0;
+        new DataView(buffer).setBigUint64(232, BigInt(shiftBase), true);
+        let g = 0;
+        while(!cpu.in_hlt[0] && g++ < 200000)
+        {
+            ex.main_loop();
+        }
+        const r14shift = new DataView(buffer).getBigUint64(208, true);
+        assert.equal(
+            r14shift,
+            0xFFFF_FFFF_FFFF_0000n,
+            "16-bit shift by more than the width preserves the upper bits",
+        );
     }
 
     console.log("jit64 longmode: test passed (" + compiled + " compiled block(s))");

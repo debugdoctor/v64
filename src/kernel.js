@@ -226,12 +226,13 @@ export function load_kernel64(mem8, bzimage, initrd, cmdline)
         for(let i = 0; i < 8; i++) mem8[address + i] = Number(value >> BigInt(i * 8) & 0xFFn);
     };
 
-    // Identity-map the first 1 GiB with 2 MiB pages.
-    write64(PML4, BigInt(PDPT) | 3n);
-    write64(PDPT, BigInt(PD) | 3n);
+    // Identity-map the first 1 GiB with 2 MiB pages. The user bit lets a kernel
+    // return to ring 3; ring 0 is not restricted by it.
+    write64(PML4, BigInt(PDPT) | 7n);
+    write64(PDPT, BigInt(PD) | 7n);
     for(let i = 0; i < 512; i++)
     {
-        write64(PD + i * 8, BigInt(i) * 0x200000n | 0x83n);
+        write64(PD + i * 8, BigInt(i) * 0x200000n | 0x87n);
     }
 
     // GDT: null, 64-bit code (0x10, L=1), 64-bit data (0x18)

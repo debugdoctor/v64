@@ -1228,6 +1228,15 @@ pub unsafe fn instr_0F30() {
             // Only used in 64 bit mode (by SWAPGS), but set by kvm-unit-test
             dbg_log!("GS Base written");
         },
+        x if x == 0xC0000080u32 as i32 => {
+            // EFER. LME is armed here; long mode starts when paging is enabled.
+            let value = (high as u32 as u64) << 32 | low as u32 as u64;
+            *efer = value & !(1 << 10);
+            if *cr & CR0_PG != 0 && value & (1 << 8) != 0 {
+                *long_mode = true;
+                *efer |= 1 << 10;
+            }
+        },
         IA32_PERFEVTSEL0 | IA32_PERFEVTSEL1 => {}, // linux/9legacy
         IA32_PMC0 | IA32_PMC1 => {},               // linux
         IA32_PAT => {},

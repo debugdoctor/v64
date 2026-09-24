@@ -6,8 +6,8 @@
 #![allow(dead_code)]
 
 use crate::cpu::cpu::{
-    read_reg64, read_tsc, translate_address_64, write_reg64, CR4_TSD, CS, FLAG_CARRY,
-    FLAG_INTERRUPT, SS,
+    io_port_read8, io_port_write8, read_reg64, read_tsc, test_privileges_for_io, translate_address_64,
+    write_reg64, CR4_TSD, CS, FLAG_CARRY, FLAG_INTERRUPT, SS,
 };
 use crate::cpu::global_pointers::*;
 use crate::cpu::memory;
@@ -776,6 +776,8 @@ pub unsafe fn interp64_run_one() {
 // the 64-bit interpreter.
 #[no_mangle]
 pub unsafe fn enter_long_mode(cr3: u32) {
+    // The 16/32-bit interpreter keeps arithmetic flags lazy. Long mode reads the
+    // flags word directly, so resolve them once on entry.
     *flags = crate::cpu::cpu::get_eflags();
     *flags_changed = 0;
     *rip = *instruction_pointer as u32 as u64;
@@ -1042,6 +1044,92 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             jcc(opcode - 0x70, displacement);
         },
 
+        // IN AL, imm8 (E4) / IN AX|EAX, imm8 (E5)
+        0xE4 | 0xE5 => {
+            let port = fetch8()? as i32;
+            let (op, width) = if opcode == 0xE4 {
+                (OpSize::S8, 1)
+            }
+            else if size == OpSize::S16 {
+                (OpSize::S16, 2)
+            }
+            else {
+                (OpSize::S32, 4)
+            };
+            if test_privileges_for_io(port, width) {
+                let value = match width {
+                    1 => io_port_read8(port) as u64,
+                    2 => crate::cpu::cpu::io_port_read16(port) as u16 as u64,
+                    _ => crate::cpu::cpu::io_port_read32(port) as u32 as u64,
+                };
+                write_reg(RAX, op, false, value);
+            }
+        },
+
+        // OUT imm8, AL (E6) / OUT imm8, AX|EAX (E7)
+        0xE6 | 0xE7 => {
+            let port = fetch8()? as i32;
+            let (op, width) = if opcode == 0xE6 {
+                (OpSize::S8, 1)
+            }
+            else if size == OpSize::S16 {
+                (OpSize::S16, 2)
+            }
+            else {
+                (OpSize::S32, 4)
+            };
+            if test_privileges_for_io(port, width) {
+                match width {
+                    1 => io_port_write8(port, read_reg(RAX, op, false) as i32),
+                    2 => crate::cpu::cpu::io_port_write16(port, read_reg(RAX, op, false) as i32),
+                    _ => crate::cpu::cpu::io_port_write32(port, read_reg(RAX, op, false) as i32),
+                }
+            }
+        },
+
+        // IN AL, DX (EC) / IN AX|EAX, DX (ED)
+        0xEC | 0xED => {
+            let port = read_reg(RDX, OpSize::S16, false) as i32;
+            let (op, width) = if opcode == 0xEC {
+                (OpSize::S8, 1)
+            }
+            else if size == OpSize::S16 {
+                (OpSize::S16, 2)
+            }
+            else {
+                (OpSize::S32, 4)
+            };
+            if test_privileges_for_io(port, width) {
+                let value = match width {
+                    1 => io_port_read8(port) as u64,
+                    2 => crate::cpu::cpu::io_port_read16(port) as u16 as u64,
+                    _ => crate::cpu::cpu::io_port_read32(port) as u32 as u64,
+                };
+                write_reg(RAX, op, false, value);
+            }
+        },
+
+        // OUT DX, AL (EE) / OUT DX, AX|EAX (EF)
+        0xEE | 0xEF => {
+            let port = read_reg(RDX, OpSize::S16, false) as i32;
+            let (op, width) = if opcode == 0xEE {
+                (OpSize::S8, 1)
+            }
+            else if size == OpSize::S16 {
+                (OpSize::S16, 2)
+            }
+            else {
+                (OpSize::S32, 4)
+            };
+            if test_privileges_for_io(port, width) {
+                match width {
+                    1 => io_port_write8(port, read_reg(RAX, op, false) as i32),
+                    2 => crate::cpu::cpu::io_port_write16(port, read_reg(RAX, op, false) as i32),
+                    _ => crate::cpu::cpu::io_port_write32(port, read_reg(RAX, op, false) as i32),
+                }
+            }
+        },
+
         // JMP rel8/rel32
         0xEB => {
             let displacement = fetch8()? as i8 as i64;
@@ -1076,6 +1164,18 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
                     *rip = target;
                 },
                 4 => *rip = read_operand(operand, OpSize::S64, pfx.has_rex())?,
+                // jmp m16:64. The indirect far jump firmware uses to land in a
+                // 64-bit code segment; long mode has no direct form.
+                5 => {
+                    let Operand::Mem(address) = operand else {
+                        crate::cpu::cpu::trigger_ud();
+                        return Ok(());
+                    };
+                    let target = mem_read(address, OpSize::S64)?;
+                    let selector = mem_read(address.wrapping_add(8), OpSize::S16)? as u16;
+                    set_cpl_segments(selector, selector as u8 & 3);
+                    *rip = target;
+                },
                 _ => crate::cpu::cpu::trigger_ud(),
             }
         },

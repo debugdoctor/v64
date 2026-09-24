@@ -6,7 +6,8 @@ tests/jit-paging/test-jit-smc
 *.map
 build/
 closure-compiler/
-images/
+**/images/*
+!**/images/README.md
 *.bak
 *.orig
 *.wasm

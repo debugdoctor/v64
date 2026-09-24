@@ -1,6 +1,10 @@
 Use the corresponding `make` target in the root directory to run a test. The
 following list is roughtly sorted from most interesting/useful to least.
 
+- [e2e](e2e/): Scenes from the roadmap (`make e2e-tests`). A direct 64-bit boot
+  prints on the serial console, a ring 3 program prints through SYSCALL after
+  its loop has been JIT-compiled, and a guest walks real mode, protected mode
+  and long mode. Each one is checked by what appears on COM1.
 - [nasm](nasm/): Small unit tests written in assembly, which are run using gdb
   on the host.
 - [qemu](qemu/): Based on tests from qemu. Builds a Linux binary, which tests
