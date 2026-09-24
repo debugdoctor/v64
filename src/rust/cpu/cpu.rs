@@ -234,6 +234,8 @@ pub const IA32_PERFEVTSEL0: i32 = 0x186;
 pub const IA32_PERFEVTSEL1: i32 = 0x187;
 pub const IA32_MISC_ENABLE: i32 = 0x1A0;
 pub const IA32_PAT: i32 = 0x277;
+pub const IA32_MTRR_DEF_TYPE: i32 = 0x2FF;
+pub const IA32_TSC_AUX: i32 = 0xC0000103u32 as i32;
 pub const IA32_RTIT_CTL: i32 = 0x570;
 pub const MSR_PKG_C2_RESIDENCY: i32 = 0x60D;
 pub const IA32_KERNEL_GS_BASE: i32 = 0xC0000101u32 as i32;
@@ -2059,6 +2061,13 @@ pub unsafe fn do_page_walk64(
     if cr0 & CR0_PG == 0 {
         return Ok(vaddr as u32);
     }
+
+    // A non-canonical linear address raises #GP, not #PF.
+    let sign = vaddr >> 47;
+    if sign != 0 && sign != 0x1FFFF {
+        trigger_gp(0);
+        return Err(());
+    }
     if cr4 & CR4_PAE == 0 {
         trigger_pagefault_lin(vaddr, false, for_writing, user, jit);
         return Err(());
@@ -3538,12 +3547,19 @@ unsafe fn deliver_interrupt_vector64(interrupt_nr: i32, error_code: Option<u64>)
     let old_ss = *sreg.offset(SS as isize) as u64;
     let old_rflags = *flags as u32 as u64;
 
+    let old_cpl = *cpl;
     let mut rsp = if ist != 0 {
         // IST stack from the TSS (IST1 is at offset 0x24)
         let tss_base = *segment_offsets.offset(TR as isize) as u32;
         let addr = return_on_pagefault!(translate_address_system_read(
             (tss_base + 0x24 + (ist as u32 - 1) * 8) as i32
         ));
+        memory::read64s(addr) as u64
+    }
+    else if old_cpl == 3 && *segment_offsets.offset(TR as isize) != 0 {
+        // ring3 -> ring0: switch to the TSS RSP0 stack
+        let tss_base = *segment_offsets.offset(TR as isize) as u32;
+        let addr = return_on_pagefault!(translate_address_system_read((tss_base + 4) as i32));
         memory::read64s(addr) as u64
     }
     else {
@@ -3569,6 +3585,9 @@ unsafe fn deliver_interrupt_vector64(interrupt_nr: i32, error_code: Option<u64>)
     *sreg.offset(CS as isize) = selector;
     *segment_offsets.offset(CS as isize) = 0;
     *segment_is_null.offset(CS as isize) = false;
+    *sreg.offset(SS as isize) = selector.wrapping_add(8);
+    *segment_offsets.offset(SS as isize) = 0;
+    *cpl = 0;
 
     let mut new_flags = *flags & !FLAG_TRAP;
     if gate_type == 0xE {
@@ -4795,7 +4814,7 @@ pub unsafe fn handle_irqs() {
         if let Some(irq) = pic::pic_acknowledge_irq() {
             pic_call_irq(irq)
         }
-        else if *acpi_enabled {
+        else if *apic_enabled {
             if let Some(irq) = apic::acknowledge_irq() {
                 pic_call_irq(irq)
             }

@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
-// A 64-bit kernel brings up the local APIC and takes its timer interrupt.
+// A 64-bit kernel takes a device interrupt through the I/O APIC.
 //
-// Direct boot starts the kernel; the host maps the APIC MMIO page and installs
-// an IDT gate. The kernel enables the APIC through IA32_APIC_BASE, reads the
-// version register, programs the LVT timer and waits for three ticks, which
-// the handler acknowledges through the APIC EOI register.
+// The kernel enables the local APIC, programs I/O APIC redirection entry 0 to
+// deliver the 8254 timer (ISA IRQ0) to a vector, and waits for three ticks.
+// The interrupt is raised by the device layer, routed through the I/O APIC to
+// the local APIC, and acknowledged there.
 //
 // Requires a debug wasm build: `make build/v64-debug.wasm`
-// Run with: `node tests/e2e/apic.js`
+// Run with: `node tests/e2e/ioapic.js`
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -16,15 +16,15 @@ import os from "node:os";
 import path from "node:path";
 import { v64 } from "../../src/main.js";
 
-const APIC = 0xFEE00000;
+const LOCAL_APIC = 0xFEE00000;
+const IO_APIC = 0xFEC00000;
 const HANDLER = 0x9000;
 const IDT = 0x8000;
 const PD2 = 0x5000;
-const VECTOR = 0x40;
+const VECTOR = 0x50;
 const TICKS = 3;
 
-// PML4/PDPT/PD as set up by load_kernel64.
-const PML4 = 0x1000;
+// PML4/PDPT as set up by load_kernel64.
 const PDPT = 0x2000;
 
 const kernel = [
@@ -32,24 +32,24 @@ const kernel = [
     0xB8, 0x00, 0x08, 0xE0, 0xFE,                   // mov eax, 0xFEE00800
     0x31, 0xD2,                                     // xor edx, edx
     0x0F, 0x30,                                     // wrmsr
-    0xBB, 0x00, 0x00, 0xE0, 0xFE,                   // mov ebx, APIC
-    0x67, 0x8B, 0x43, 0x20,                         // mov eax, [ebx+0x20] (ID)
-    0x89, 0x04, 0x25, 0x00, 0x60, 0x00, 0x00,       // mov [0x6000], eax
-    0x67, 0x8B, 0x43, 0x30,                         // mov eax, [ebx+0x30] (version)
-    0x89, 0x04, 0x25, 0x04, 0x60, 0x00, 0x00,       // mov [0x6004], eax
-    0xB8, 0xFF, 0x01, 0x00, 0x00,                   // mov eax, 0x1FF (SVR: enabled | 0xFF)
+    0xBB, 0x00, 0x00, 0xE0, 0xFE,                   // mov ebx, LOCAL_APIC
+    0xB8, 0xFF, 0x01, 0x00, 0x00,                   // mov eax, 0x1FF (SVR)
     0x67, 0x89, 0x83, 0xF0, 0x00, 0x00, 0x00,       // mov [ebx+0xF0], eax
+    0xBE, 0x00, 0x00, 0xC0, 0xFE,                   // mov esi, IO_APIC
+    0xB8, 0x10, 0x00, 0x00, 0x00,                   // mov eax, 0x10 (IOREGSEL = IRQ0 low)
+    0x67, 0x89, 0x06,                               // mov [esi], eax
+    0xB8, 0x50, 0x00, 0x00, 0x00,                   // mov eax, VECTOR (edge, unmasked)
+    0x67, 0x89, 0x46, 0x10,                         // mov [esi+0x10], eax
+    0xB8, 0x11, 0x00, 0x00, 0x00,                   // mov eax, 0x11 (IOREGSEL = IRQ0 high)
+    0x67, 0x89, 0x06,                               // mov [esi], eax
     0x31, 0xC0,                                     // xor eax, eax
-    0x67, 0x89, 0x83, 0x80, 0x00, 0x00, 0x00,       // mov [ebx+0x80], eax (TPR)
-    0xB8, 0x40, 0x00, 0x02, 0x00,                   // mov eax, VECTOR | periodic (1<<17)
-    0x67, 0x89, 0x83, 0x20, 0x03, 0x00, 0x00,       // mov [ebx+0x320], eax (LVT timer)
-    0xB8, 0x03, 0x00, 0x00, 0x00,                   // mov eax, 3
-    0x67, 0x89, 0x83, 0xE0, 0x03, 0x00, 0x00,       // mov [ebx+0x3E0], eax (divide)
-    0xB8, 0x98, 0x3A, 0x00, 0x00,                   // mov eax, 15000
-    0x67, 0x89, 0x83, 0x80, 0x03, 0x00, 0x00,       // mov [ebx+0x380], eax (initial count)
-    0xC7, 0x04, 0x25, 0x10, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov dword [0x6010], 0
+    0x67, 0x89, 0x46, 0x10,                         // mov [esi+0x10], eax (destination 0)
+    0xB0, 0x36, 0xE6, 0x43,                         // PIT ch0, mode 3
+    0xB0, 0x9C, 0xE6, 0x40,                         // divisor low
+    0xB0, 0x2E, 0xE6, 0x40,                         // divisor high
+    0xC7, 0x04, 0x25, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov dword [0x6000], 0
     0xFB,                                           // sti
-    0x8B, 0x04, 0x25, 0x10, 0x60, 0x00, 0x00,       // poll: mov eax, [0x6010]
+    0x8B, 0x04, 0x25, 0x00, 0x60, 0x00, 0x00,       // poll: mov eax, [0x6000]
     0x83, 0xF8, TICKS,                              // cmp eax, TICKS
     0x72, 0xF4,                                     // jb poll
     0xFA,                                           // cli
@@ -57,8 +57,8 @@ const kernel = [
 ];
 
 const handler = [
-    0xFF, 0x04, 0x25, 0x10, 0x60, 0x00, 0x00,       // inc dword [0x6010]
-    0xBB, 0x00, 0x00, 0xE0, 0xFE,                   // mov ebx, APIC
+    0xFF, 0x04, 0x25, 0x00, 0x60, 0x00, 0x00,       // inc dword [0x6000]
+    0xBB, 0x00, 0x00, 0xE0, 0xFE,                   // mov ebx, LOCAL_APIC
     0x31, 0xC0,                                     // xor eax, eax
     0x67, 0x89, 0x83, 0xB0, 0x00, 0x00, 0x00,       // mov [ebx+0xB0], eax (EOI)
     0x48, 0xCF,                                     // iretq
@@ -81,7 +81,7 @@ function bzImage(body)
     return image;
 }
 
-const imagePath = path.join(os.tmpdir(), "v64-e2e-apic.img");
+const imagePath = path.join(os.tmpdir(), "v64-e2e-ioapic.img");
 fs.writeFileSync(imagePath, bzImage(kernel));
 
 const emulator = new v64({
@@ -106,10 +106,13 @@ emulator.add_listener("emulator-loaded", () => {
     const read32 = address =>
         (ex.read8(address) | ex.read8(address + 1) << 8 | ex.read8(address + 2) << 16 | ex.read8(address + 3) << 24) >>> 0;
 
-    // Map the APIC MMIO page into the boot page tables.
-    const pdIndex = (APIC >> 21) & 0x1FF;
+    // Map both APIC pages into the boot page tables.
     write64(PDPT + 3 * 8, BigInt(PD2) | 0x7n);
-    write64(PD2 + pdIndex * 8, BigInt(APIC) | 0x87n);
+    for(const address of [LOCAL_APIC, IO_APIC])
+    {
+        const pdIndex = (address >> 21) & 0x1FF;
+        write64(PD2 + pdIndex * 8, BigInt(address) | 0x87n);
+    }
 
     for(let i = 0; i < handler.length; i++) ex.write8(HANDLER + i, handler[i]);
     const gate = (offset, selector, type) => {
@@ -125,9 +128,8 @@ emulator.add_listener("emulator-loaded", () => {
     while(!cpu.in_hlt[0] && Date.now() < deadline) ex.main_loop();
 
     assert.equal(cpu.in_hlt[0], 1, "the kernel halted after the ticks");
-    assert.equal((read32(0x6004) & 0xFF), 0x14, "APIC version register");
-    assert.equal(read32(0x6010), TICKS, "the APIC timer interrupt fired three times");
+    assert.equal(read32(0x6000), TICKS, "the I/O APIC delivered the timer interrupt three times");
 
-    console.log("e2e apic: test passed");
+    console.log("e2e ioapic: test passed");
     process.exit(0);
 });

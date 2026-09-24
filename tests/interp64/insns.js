@@ -219,7 +219,7 @@ emulator.add_listener("emulator-loaded", () => {
     ]);
     expect(reg64(0), 0xFFFF_FFFF_FFFF_FFFEn, "imul rax");
     expect(reg64(2), 0xFFFF_FFFF_FFFF_FFFFn, "imul rdx sign-extends");
-    expectFlags({ cf: 1, of: 1 });
+    expectFlags({ cf: 0, of: 0 });
 
     activeTest = "imul two operand";
     reset();

@@ -4,6 +4,7 @@ pub mod call_indirect;
 pub mod cpu;
 pub mod fpu;
 pub mod global_pointers;
+pub mod hpet;
 pub mod instructions;
 pub mod instructions_0f;
 pub mod interp64;

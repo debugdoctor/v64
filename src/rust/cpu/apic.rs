@@ -1,6 +1,6 @@
 // See Intel's System Programming Guide
 
-use crate::cpu::{cpu::js, global_pointers::acpi_enabled, ioapic};
+use crate::cpu::{cpu::js, global_pointers::apic_enabled, ioapic};
 use std::sync::{Mutex, MutexGuard};
 
 const APIC_LOG_VERBOSE: bool = false;
@@ -109,7 +109,7 @@ pub fn get_apic() -> MutexGuard<'static, Apic> { APIC.try_lock().unwrap() }
 pub fn get_apic_addr() -> u32 { &raw mut *get_apic() as u32 }
 
 pub fn read32(addr: u32) -> u32 {
-    if unsafe { !*acpi_enabled } {
+    if unsafe { !*apic_enabled } {
         return 0;
     }
     read32_internal(&mut get_apic(), addr)
@@ -276,7 +276,7 @@ fn read32_internal(apic: &mut Apic, addr: u32) -> u32 {
 }
 
 pub fn write32(addr: u32, value: u32) {
-    if unsafe { !*acpi_enabled } {
+    if unsafe { !*apic_enabled } {
         return;
     }
     write32_internal(&mut get_apic(), addr, value)

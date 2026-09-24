@@ -22,6 +22,7 @@ const PT = 0x13000;
 
 const MARKER = 0x6000;
 const SLOT = [0x6008, 0x6010, 0x6018, 0x6020, 0x6028, 0x6030];
+const CURRENT_FLAGS = 0x6038;
 
 const F_IF = 1 << 9;
 
@@ -79,22 +80,26 @@ emulator.add_listener("emulator-loaded", () => {
         0x48, 0x89, 0x04, 0x25, 0x28, 0x60, 0x00, 0x00,                         // mov [SLOT4], rax
         0x48, 0x8B, 0x44, 0x24, 0x28,                                           // mov rax, [rsp+0x28]
         0x48, 0x89, 0x04, 0x25, 0x30, 0x60, 0x00, 0x00,                         // mov [SLOT5], rax
+        0x9C,                                                                   // pushfq
+        0x58,                                                                   // pop rax
+        0x48, 0x89, 0x04, 0x25, 0x38, 0x60, 0x00, 0x00,                         // mov [CURRENT_FLAGS], rax
         0xF4,                                                                   // hlt
     ];
 
     // Identity-map the first 1 GiB: 4 KiB pages for the first 2 MiB (so a
-    // single page can be made not-present), 2 MiB pages above that.
+    // single page can be made not-present), 2 MiB pages above that. The user
+    // bit lets the ring-3 case execute from these pages.
     const buildPageTables = () => {
-        write64(PML4, BigInt(PDPT) | 0x3n);
-        write64(PDPT, BigInt(PD) | 0x3n);
-        write64(PD, BigInt(PT) | 0x3n);
+        write64(PML4, BigInt(PDPT) | 0x7n);
+        write64(PDPT, BigInt(PD) | 0x7n);
+        write64(PD, BigInt(PT) | 0x7n);
         for(let i = 0; i < 512; i++)
         {
-            write64(PT + i * 8, BigInt(i) * 0x1000n | 0x3n);
+            write64(PT + i * 8, BigInt(i) * 0x1000n | 0x7n);
         }
         for(let i = 1; i < 512; i++)
         {
-            write64(PD + i * 8, BigInt(i) * 0x200000n | 0x83n);
+            write64(PD + i * 8, BigInt(i) * 0x200000n | 0x87n);
         }
     };
 
@@ -116,6 +121,7 @@ emulator.add_listener("emulator-loaded", () => {
         }
         write64(MARKER, 0n);
         for(const slot of SLOT) write64(slot, 0n);
+        write64(CURRENT_FLAGS, 0n);
 
         cpu.idtr_offset[0] = IDT;
         cpu.idtr_size[0] = 0xFFF;
@@ -186,13 +192,13 @@ emulator.add_listener("emulator-loaded", () => {
     activeTest = "interrupt gate clears IF";
     boot([0xCD, 0x81, 0xF4], { vectors: [0x81], type: 0xE });
     expect(read64(MARKER), 1n, "handler ran");
-    expect(read64(SLOT[2]) & BigInt(F_IF), 0n, "IF cleared");
+    expect(read64(CURRENT_FLAGS) & BigInt(F_IF), 0n, "IF cleared");
 
     // ...a trap gate does not.
     activeTest = "trap gate keeps IF";
     boot([0xCD, 0x82, 0xF4], { vectors: [0x82], type: 0xF });
     expect(read64(MARKER), 1n, "handler ran");
-    expect(read64(SLOT[2]) & BigInt(F_IF), BigInt(F_IF), "IF kept");
+    expect(read64(CURRENT_FLAGS) & BigInt(F_IF), BigInt(F_IF), "IF kept");
 
     // iretq returns to the instruction after `int` and restores RFLAGS.
     {

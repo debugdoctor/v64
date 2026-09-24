@@ -17,6 +17,7 @@ use crate::cpu::cpu::{
     handle_irqs, reg128, APIC_MEM_ADDRESS, APIC_MEM_SIZE, IOAPIC_MEM_ADDRESS, IOAPIC_MEM_SIZE,
 };
 use crate::cpu::global_pointers::memory_size;
+use crate::cpu::hpet;
 use crate::cpu::ioapic;
 use crate::cpu::vga;
 use crate::jit;
@@ -93,6 +94,9 @@ pub fn read8(addr: u32) -> i32 {
         else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
             ioapic::read32((addr - IOAPIC_MEM_ADDRESS) & !3) as i32 >> 8 * (addr & 3) & 0xFF
         }
+        else if addr >= hpet::HPET_MEM_ADDRESS && addr < hpet::HPET_MEM_ADDRESS + hpet::HPET_MEM_SIZE {
+            hpet::read32((addr - hpet::HPET_MEM_ADDRESS) & !3) as i32 >> 8 * (addr & 3) & 0xFF
+        }
         else {
             unsafe { ext::mmap_read8(addr) }
         }
@@ -137,6 +141,9 @@ pub fn read32s(addr: u32) -> i32 {
         }
         else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
             ioapic::read32(addr - IOAPIC_MEM_ADDRESS) as i32
+        }
+        else if addr >= hpet::HPET_MEM_ADDRESS && addr < hpet::HPET_MEM_ADDRESS + hpet::HPET_MEM_SIZE {
+            hpet::read32(addr - hpet::HPET_MEM_ADDRESS) as i32
         }
         else {
             unsafe { ext::mmap_read32(addr) }
@@ -300,6 +307,9 @@ pub unsafe fn mmap_write32(addr: u32, value: i32) {
         ioapic::write32(addr - IOAPIC_MEM_ADDRESS, value as u32);
         handle_irqs();
     }
+    else if addr >= hpet::HPET_MEM_ADDRESS && addr < hpet::HPET_MEM_ADDRESS + hpet::HPET_MEM_SIZE {
+        hpet::write32(addr - hpet::HPET_MEM_ADDRESS, value as u32);
+    }
     else {
         ext::mmap_write32(addr, value)
     }
@@ -311,6 +321,10 @@ pub unsafe fn mmap_write64(addr: u32, value: u64) {
             vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *mut u64,
             value,
         )
+    }
+    else if addr >= hpet::HPET_MEM_ADDRESS && addr < hpet::HPET_MEM_ADDRESS + hpet::HPET_MEM_SIZE {
+        hpet::write32(addr - hpet::HPET_MEM_ADDRESS, value as u32);
+        hpet::write32(addr - hpet::HPET_MEM_ADDRESS + 4, (value >> 32) as u32);
     }
     else {
         ext::mmap_write64(addr, value as i32, (value >> 32) as i32)

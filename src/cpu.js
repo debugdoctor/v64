@@ -398,6 +398,7 @@ CPU.prototype.wasm_patch = function()
     this.device_lower_irq = get_import("device_lower_irq");
 
     this.apic_timer = get_import("apic_timer");
+    this.hpet_timer = get_import("hpet_timer");
 
     if(DEBUG)
     {
@@ -1948,14 +1949,14 @@ CPU.prototype.run_hardware_timers = function(acpi_enabled, now)
     const rtc_time = this.devices.rtc.timer(now, false);
 
     let acpi_time = 100;
-    let apic_time = 100;
     if(acpi_enabled)
     {
         acpi_time = this.devices.acpi.timer(now);
-        apic_time = this.apic_timer(now);
     }
+    const apic_time = this.apic_timer(now);
+    const hpet_time = this.hpet_timer(now);
 
-    return Math.min(pit_time, rtc_time, acpi_time, apic_time);
+    return Math.min(pit_time, rtc_time, acpi_time, apic_time, hpet_time);
 };
 
 CPU.prototype.debug_init = function()

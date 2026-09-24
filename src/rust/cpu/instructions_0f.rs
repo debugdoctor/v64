@@ -10,6 +10,28 @@ unsafe fn unimplemented_sse() {
 }
 
 use crate::config;
+use std::sync::Mutex;
+
+// MSRs whose values are kept outside the shared state layout. The values are
+// only needed within a session, like the PIC/APIC/HPET state.
+struct MsrExtra {
+    pat: u64,
+    mtrr_def_type: u64,
+    tsc_aux: u64,
+    sysenter_esp: u64,
+    sysenter_eip: u64,
+}
+
+static MSR_EXTRA: Mutex<MsrExtra> = Mutex::new(MsrExtra {
+    pat: 0x0007_0406_0007_0406,
+    mtrr_def_type: 0,
+    tsc_aux: 0,
+    sysenter_esp: 0,
+    sysenter_eip: 0,
+});
+
+fn msr_extra() -> std::sync::MutexGuard<'static, MsrExtra> { MSR_EXTRA.try_lock().unwrap() }
+
 use crate::cpu::arith::{
     bsf16, bsf32, bsr16, bsr32, bt_mem, bt_reg, btc_mem, btc_reg, btr_mem, btr_reg, bts_mem,
     bts_reg, cmpxchg16, cmpxchg32, cmpxchg8, popcnt, shld16, shld32, shrd16, shrd32, xadd16,
@@ -800,25 +822,30 @@ pub unsafe fn instr_0F22(r: i32, creg: i32) {
         },
         3 => set_cr3(data),
         4 => {
-            dbg_log!("cr4 <- {:x}", data);
-            if 0 != data as u32
-                & ((1 << 11 | 1 << 12 | 1 << 15 | 1 << 16 | 1 << 19) as u32 | 0xFFC00000)
-            {
-                dbg_log!("trigger_gp: Invalid cr4 bit");
+            let data64 = read_reg64(r);
+            if data64 >> 32 != 0 {
+                // bits 32..63 of CR4 are reserved
                 trigger_gp(0);
                 return;
             }
-            else {
-                if 0 != (*cr.offset(4) ^ data) & (CR4_PGE | CR4_PSE | CR4_PAE) {
-                    full_clear_tlb();
-                }
-                if data & CR4_PAE != 0
-                    && 0 != (*cr.offset(4) ^ data) & (CR4_PGE | CR4_PSE | CR4_SMEP)
-                {
-                    load_pdpte(*cr.offset(3));
-                }
-                *cr.offset(4) = data;
+            let data = data64 as u32 as i32;
+            dbg_log!("cr4 <- {:x}", data);
+            // Reserved: 15, 19, 23..31, and LA57 (12), which is not supported.
+            if 0 != data as u32 & ((1 << 12 | 1 << 15 | 1 << 19) as u32 | 0xFF80_0000) {
+                trigger_gp(0);
+                return;
             }
+            if 0 != (*cr.offset(4) ^ data) & (CR4_PGE | CR4_PSE | CR4_PAE) {
+                full_clear_tlb();
+            }
+            // load_pdpte is the 32-bit PAE path; in long mode CR3 is a PML4.
+            if !*long_mode
+                && data & CR4_PAE != 0
+                && 0 != (*cr.offset(4) ^ data) & (CR4_PGE | CR4_PSE | CR4_SMEP)
+            {
+                load_pdpte(*cr.offset(3));
+            }
+            *cr.offset(4) = data;
         },
         _ => {
             dbg_log!("{}", creg);
@@ -1196,8 +1223,16 @@ pub unsafe fn instr_0F30() {
 
     match index {
         IA32_SYSENTER_CS => *sysenter_cs = low & 0xFFFF,
-        IA32_SYSENTER_EIP => *sysenter_eip = low,
-        IA32_SYSENTER_ESP => *sysenter_esp = low,
+        IA32_SYSENTER_EIP => {
+            let value = (high as u32 as u64) << 32 | low as u32 as u64;
+            msr_extra().sysenter_eip = value;
+            *sysenter_eip = low;
+        },
+        IA32_SYSENTER_ESP => {
+            let value = (high as u32 as u64) << 32 | low as u32 as u64;
+            msr_extra().sysenter_esp = value;
+            *sysenter_esp = low;
+        },
         IA32_FEAT_CTL => {}, // linux 5.x
         MSR_TEST_CTRL => {}, // linux 5.x
         IA32_APIC_BASE => {
@@ -1239,7 +1274,15 @@ pub unsafe fn instr_0F30() {
         },
         IA32_PERFEVTSEL0 | IA32_PERFEVTSEL1 => {}, // linux/9legacy
         IA32_PMC0 | IA32_PMC1 => {},               // linux
-        IA32_PAT => {},
+        IA32_PAT => {
+            msr_extra().pat = (high as u32 as u64) << 32 | low as u32 as u64;
+        },
+        IA32_MTRR_DEF_TYPE => {
+            msr_extra().mtrr_def_type = (high as u32 as u64) << 32 | low as u32 as u64;
+        },
+        IA32_TSC_AUX => {
+            msr_extra().tsc_aux = (high as u32 as u64) << 32 | low as u32 as u64;
+        },
         IA32_SPEC_CTRL => {},      // linux 5.19
         IA32_TSX_CTRL => {},       // linux 5.19
         MSR_TSX_FORCE_ABORT => {}, // linux 5.19
@@ -1248,7 +1291,7 @@ pub unsafe fn instr_0F30() {
         MSR_AMD64_DE_CFG => {},    // linux 6.1
         _ => {
             dbg_log!("Unknown msr: {:x}", index);
-            dbg_assert!(false);
+            trigger_gp(0);
         },
     }
 }
@@ -1284,8 +1327,16 @@ pub unsafe fn instr_0F32() {
 
     match index {
         IA32_SYSENTER_CS => low = *sysenter_cs,
-        IA32_SYSENTER_EIP => low = *sysenter_eip,
-        IA32_SYSENTER_ESP => low = *sysenter_esp,
+        IA32_SYSENTER_EIP => {
+            let value = msr_extra().sysenter_eip;
+            low = value as i32;
+            high = (value >> 32) as i32;
+        },
+        IA32_SYSENTER_ESP => {
+            let value = msr_extra().sysenter_esp;
+            low = value as i32;
+            high = (value >> 32) as i32;
+        },
         IA32_TIME_STAMP_COUNTER => {
             let tsc = read_tsc();
             low = tsc as i32;
@@ -1314,7 +1365,21 @@ pub unsafe fn instr_0F32() {
         IA32_MCG_CAP => {},                        // netbsd
         IA32_PERFEVTSEL0 | IA32_PERFEVTSEL1 => {}, // linux/9legacy
         IA32_PMC0 | IA32_PMC1 => {},               // linux
-        IA32_PAT => {},
+        IA32_PAT => {
+            let value = msr_extra().pat;
+            low = value as i32;
+            high = (value >> 32) as i32;
+        },
+        IA32_MTRR_DEF_TYPE => {
+            let value = msr_extra().mtrr_def_type;
+            low = value as i32;
+            high = (value >> 32) as i32;
+        },
+        IA32_TSC_AUX => {
+            let value = msr_extra().tsc_aux;
+            low = value as i32;
+            high = (value >> 32) as i32;
+        },
         MSR_PKG_C2_RESIDENCY => {},
         IA32_SPEC_CTRL => {},      // linux 5.19
         IA32_TSX_CTRL => {},       // linux 5.19
@@ -1324,7 +1389,7 @@ pub unsafe fn instr_0F32() {
         MSR_AMD64_DE_CFG => {},    // linux 6.1
         _ => {
             dbg_log!("Unknown msr: {:x}", index);
-            dbg_assert!(false);
+            trigger_gp(0);
         },
     }
 
@@ -3261,7 +3326,7 @@ pub unsafe fn instr_0FA2() {
             if config::VMWARE_HYPERVISOR_PORT {
                 ecx |= 1 << 31
             }; // hypervisor
-            edx = (if true /* have fpu */ { 1 } else {  0 }) |      // fpu
+            edx = (if !*long_mode /* have fpu */ { 1 } else {  0 }) |      // fpu
                     vme | 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 |  // vme, pse, tsc, msr, pae
                     1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
                     1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // mmx, fxsr, sse1, sse2
@@ -3339,6 +3404,11 @@ pub unsafe fn instr_0FA2() {
             ebx = i32::from_le_bytes(brand[off + 4..off + 8].try_into().unwrap());
             ecx = i32::from_le_bytes(brand[off + 8..off + 12].try_into().unwrap());
             edx = i32::from_le_bytes(brand[off + 12..off + 16].try_into().unwrap());
+        },
+
+        0x80000008 => {
+            // physical address bits 32 (wasm32), virtual address bits 48
+            eax = 32 | 48 << 8;
         },
 
         0x40000000 => {

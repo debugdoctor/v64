@@ -77,7 +77,7 @@ emulator.add_listener("emulator-loaded", () => {
     write64(GDT + 0, 0n);
     write64(GDT + 8, 0x00AF9A000000FFFFn);
     write64(GDT + 16, 0x00CF92000000FFFFn);
-    write64(GDT + 24, 0x89000000400067n); // TSS: type 0x9, base 0x4000, limit 0x67
+    write64(GDT + 24, 0x0000890040000067n); // TSS: type 0x9, base 0x4000, limit 0x67
     write64(GDT + 32, 0n);
 
     // The TSS, with IST1 pointing at a dedicated stack.
@@ -125,7 +125,7 @@ emulator.add_listener("emulator-loaded", () => {
     if(!cpu.in_hlt[0]) note("did not halt at 0x" + (cpu.instruction_pointer[0] >>> 0).toString(16));
 
     expect(read64(MARKER), 0n, "no #UD");
-    expect(read64(SAVED_RSP), BigInt(IST_STACK), "handler ran on TSS.IST1");
+    expect(read64(SAVED_RSP), BigInt(IST_STACK - 5 * 8), "handler ran on TSS.IST1");
     expect(read64(SAVED_TR) & 0xFFFFn, 0x18n, "TR selector");
 
     if(failures.length)

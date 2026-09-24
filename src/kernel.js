@@ -31,6 +31,24 @@ const LINUX_BOOT_HDR_INIT_SIZE = 0x260;
 const LINUX_BOOT_HDR_CHECKSUM1 = 0xAA55;
 const LINUX_BOOT_HDR_CHECKSUM2 = 0x53726448;
 
+// struct boot_params: acpi_rsdp_addr
+const BOOT_PARAMS_ACPI_RSDP_ADDR = 0x070;
+// struct boot_params: e820_entries and e820_table
+const BOOT_PARAMS_E820_ENTRIES = 0x1E8;
+const BOOT_PARAMS_E820_TABLE = 0x2D0;
+
+// ACPI tables we synthesize for direct boot (no firmware): placed in the
+// 0xE0000..0xFFFFF region Linux also scans for the RSDP.
+const ACPI_RSDP_ADDRESS = 0xF0000;
+const ACPI_RSDT_ADDRESS = 0xF0040;
+const ACPI_XSDT_ADDRESS = 0xF0080;
+const ACPI_MADT_ADDRESS = 0xF0100;
+const ACPI_HPET_ADDRESS = 0xF0200;
+const ACPI_DSDT_ADDRESS = 0xF0300;
+const ACPI_FADT_ADDRESS = 0xF0400;
+const APIC_MEM_ADDRESS = 0xFEE00000;
+const IOAPIC_MEM_ADDRESS = 0xFEC00000;
+
 const LINUX_BOOT_HDR_TYPE_OF_LOADER_NOT_ASSIGNED = 0xFF;
 
 const LINUX_BOOT_HDR_LOADFLAGS_LOADED_HIGH = 1 << 0;
@@ -38,6 +56,121 @@ const LINUX_BOOT_HDR_LOADFLAGS_QUIET_FLAG = 1 << 5;
 const LINUX_BOOT_HDR_LOADFLAGS_KEEP_SEGMENTS = 1 << 6;
 const LINUX_BOOT_HDR_LOADFLAGS_CAN_USE_HEAPS = 1 << 7;
 
+
+// Synthesize the ACPI tables a 64-bit kernel needs to enumerate the CPU and
+// the interrupt controllers. Direct boot has no firmware, so RSDP, RSDT, XSDT
+// and MADT are built here and the RSDP address is published in boot_params.
+function build_acpi_tables(mem8)
+{
+    const write8 = (address, value) => { mem8[address] = value & 0xFF; };
+    const write32 = (address, value) => {
+        mem8[address] = value & 0xFF;
+        mem8[address + 1] = value >> 8 & 0xFF;
+        mem8[address + 2] = value >> 16 & 0xFF;
+        mem8[address + 3] = value >> 24 & 0xFF;
+    };
+    const write64 = (address, value) => {
+        for(let i = 0; i < 8; i++) mem8[address + i] = Number(value >> BigInt(i * 8) & 0xFFn);
+    };
+    const write_string = (address, text) => {
+        for(let i = 0; i < text.length; i++) mem8[address + i] = text.charCodeAt(i);
+    };
+    const checksum = (address, length) => {
+        let sum = 0;
+        for(let i = 0; i < length; i++) sum = (sum + mem8[address + i]) & 0xFF;
+        return -sum & 0xFF;
+    };
+
+    // A table header followed by its body, with the checksum filled in.
+    const table = (address, signature, revision, body) =>
+    {
+        const length = 36 + body.length;
+        write_string(address, signature);
+        write32(address + 4, length);
+        write8(address + 8, revision);
+        write8(address + 9, 0);
+        write_string(address + 10, "v64   ");   // OEM ID
+        write_string(address + 16, "v64ACPI "); // OEM table ID
+        write32(address + 24, 1);               // OEM revision
+        write_string(address + 28, "v64 ");     // creator ID
+        write32(address + 32, 1);               // creator revision
+        for(let i = 0; i < body.length; i++) mem8[address + 36 + i] = body[i];
+        write8(address + 9, checksum(address, length));
+    };
+
+    // MADT: one local APIC and one I/O APIC. ISA IRQs are identity-mapped, so
+    // no interrupt source overrides are needed.
+    const madt = [];
+    const push32 = value => madt.push(value & 0xFF, value >> 8 & 0xFF, value >> 16 & 0xFF, value >> 24 & 0xFF);
+    push32(APIC_MEM_ADDRESS); // local APIC address
+    push32(1);                // flags: PCAT_COMPAT
+    madt.push(0, 8, 0, 0, 1, 0, 0, 0); // Processor Local APIC, APIC ID 0, enabled
+    madt.push(1, 12, 0, 0);            // I/O APIC
+    push32(IOAPIC_MEM_ADDRESS);
+    push32(0);                         // GSI base
+    table(ACPI_MADT_ADDRESS, "APIC", 5, madt);
+
+    // HPET table, pointing at the emulated timer at 0xFED00000.
+    const hpet = [];
+    const push32h = value => hpet.push(value & 0xFF, value >> 8 & 0xFF, value >> 16 & 0xFF, value >> 24 & 0xFF);
+    push32h(0x8086A201);    // event timer block ID
+    hpet.push(0, 64, 0, 0); // generic address: memory, 64-bit, offset 0, access size 0
+    push32h(0xFED00000);    // base address (low)
+    push32h(0);             // base address (high)
+    hpet.push(0);           // HPET number
+    hpet.push(0, 0);        // minimum tick
+    hpet.push(0);           // page protection
+    table(ACPI_HPET_ADDRESS, "HPET", 1, hpet);
+
+    // A minimal DSDT (empty AML) and a FADT that declares hardware-reduced
+    // ACPI, which needs no SMI/SCI/PM blocks. Linux requires both to use ACPI.
+    table(ACPI_DSDT_ADDRESS, "DSDT", 2, []);
+
+    const fadt = new Array(208).fill(0);
+    const set16 = (offset, value) => { fadt[offset - 36] = value & 0xFF; fadt[offset - 36 + 1] = value >> 8 & 0xFF; };
+    const set32 = (offset, value) => {
+        fadt[offset - 36] = value & 0xFF;
+        fadt[offset - 36 + 1] = value >> 8 & 0xFF;
+        fadt[offset - 36 + 2] = value >> 16 & 0xFF;
+        fadt[offset - 36 + 3] = value >> 24 & 0xFF;
+    };
+    const set64 = (offset, value) => {
+        for(let i = 0; i < 8; i++) fadt[offset - 36 + i] = Number(value >> BigInt(i * 8) & 0xFFn);
+    };
+    set32(0x28, ACPI_DSDT_ADDRESS);          // DSDT
+    set16(0x2E, 9);                          // SCI interrupt
+    set32(0x70, 1 << 20);                    // flags: HW_REDUCED_ACPI
+    set64(0x8C, BigInt(ACPI_DSDT_ADDRESS));  // X_DSDT
+    table(ACPI_FADT_ADDRESS, "FACP", 6, fadt);
+
+    // RSDT (32-bit pointers) and XSDT (64-bit pointers) list the tables.
+    const pointers = [ACPI_MADT_ADDRESS, ACPI_FADT_ADDRESS, ACPI_HPET_ADDRESS];
+    const rsdt = [];
+    for(const pointer of pointers)
+    {
+        rsdt.push(pointer & 0xFF, pointer >> 8 & 0xFF, pointer >> 16 & 0xFF, pointer >> 24 & 0xFF);
+    }
+    table(ACPI_RSDT_ADDRESS, "RSDT", 1, rsdt);
+
+    const xsdt = [];
+    const push64 = value => { for(let i = 0; i < 8; i++) xsdt.push(Number(value >> BigInt(i * 8) & 0xFFn)); };
+    for(const pointer of pointers) push64(BigInt(pointer));
+    table(ACPI_XSDT_ADDRESS, "XSDT", 1, xsdt);
+
+    // RSDP, revision 2 (with an XSDT), 36 bytes.
+    write_string(ACPI_RSDP_ADDRESS, "RSD PTR ");
+    write8(ACPI_RSDP_ADDRESS + 8, 0);
+    write_string(ACPI_RSDP_ADDRESS + 9, "v64   ");
+    write8(ACPI_RSDP_ADDRESS + 15, 2);
+    write32(ACPI_RSDP_ADDRESS + 16, ACPI_RSDT_ADDRESS);
+    write32(ACPI_RSDP_ADDRESS + 20, 36);
+    write64(ACPI_RSDP_ADDRESS + 24, BigInt(ACPI_XSDT_ADDRESS));
+    for(let i = 32; i < 36; i++) write8(ACPI_RSDP_ADDRESS + i, 0);
+    write8(ACPI_RSDP_ADDRESS + 8, checksum(ACPI_RSDP_ADDRESS, 20));
+    write8(ACPI_RSDP_ADDRESS + 32, checksum(ACPI_RSDP_ADDRESS, 36));
+
+    return ACPI_RSDP_ADDRESS;
+}
 
 export function load_kernel(mem8, bzimage, initrd, cmdline)
 {
@@ -275,6 +408,26 @@ export function load_kernel64(mem8, bzimage, initrd, cmdline)
     const protected_mode_kernel = new Uint8Array(bzimage, prot_mode_kernel_start);
     dbg_assert(KERNEL_ADDRESS + protected_mode_kernel.length < ramdisk_address || !initrd);
     mem8.set(protected_mode_kernel, KERNEL_ADDRESS);
+
+    // ACPI tables so the kernel can enumerate the CPU and interrupt controllers.
+    const rsdp = build_acpi_tables(mem8);
+    write64(ZERO_PAGE + BOOT_PARAMS_ACPI_RSDP_ADDR, BigInt(rsdp));
+
+    // e820 memory map. The ACPI tables live in the 0xF0000..0x100000 reserved
+    // window, so that range is not reported as usable RAM.
+    const e820 = [
+        [0n, 0x9FC00n, 1],                               // low memory
+        [0xF0000n, 0x10000n, 2],                         // reserved (ACPI/BIOS)
+        [0x100000n, BigInt(mem8.length - 0x100000), 1],  // high memory
+    ];
+    mem8[ZERO_PAGE + BOOT_PARAMS_E820_ENTRIES] = e820.length;
+    for(let i = 0; i < e820.length; i++)
+    {
+        const entry = ZERO_PAGE + BOOT_PARAMS_E820_TABLE + i * 20;
+        write64(entry, e820[i][0]);
+        write64(entry + 8, e820[i][1]);
+        write32(entry + 16, e820[i][2]);
+    }
 
     return {
         entry: KERNEL_ADDRESS + 0x200,

@@ -132,6 +132,7 @@ export function v64(options)
                     cpu.wm.exports.jit64_shift(value, count, encoded),
                 jit64_adc_sbb: (dst, src, encoded) =>
                     cpu.wm.exports.jit64_adc_sbb(dst, src, encoded),
+                jit64_cpuid: () => cpu.wm.exports.jit64_cpuid(),
             } });
             wasm_table.set(index + WASM_TABLE_OFFSET, instance.exports.f);
         },
@@ -255,7 +256,7 @@ v64.prototype.continue_init = async function(emulator, options)
         }
     }
 
-    settings.acpi = options.acpi;
+    settings.acpi = options.acpi || (options.direct_boot ? 1 : 0);
     settings.disable_jit = options.disable_jit;
     settings.load_devices = true;
     settings.memory_size = options.memory_size || 64 * 1024 * 1024;
