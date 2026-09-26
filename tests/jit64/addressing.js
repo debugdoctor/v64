@@ -54,6 +54,10 @@ const CANDIDATES = [
     ["mov [r10+r12*2], cx", [0x66, 0x43, 0x89, 0x0C, 0x62]],
     ["mov [r10+r12*2+2], cx", [0x66, 0x43, 0x89, 0x4C, 0x62, 0x02]],
     ["movzx eax, word [rbx+r12*2]", [0x43, 0x0F, 0xB7, 0x04, 0x63]],
+    // FS/GS overrides: the segment base is added to the effective address.
+    ["mov ecx, %gs:[rax]", [0x65, 0x8B, 0x08]],
+    ["mov %gs:[r10+rcx*2+4], ecx", [0x65, 0x41, 0x89, 0x4C, 0x4A, 0x04]],
+    ["mov ecx, %fs:[rax+8]", [0x64, 0x8B, 0x48, 0x08]],
 ];
 
 const emulator = new v64({
@@ -154,6 +158,8 @@ emulator.add_listener("emulator-loaded", () => {
         set_reg64(4, 0x80000n);
         for(let i = 0; i < memory.length; i++) ex.write8(SCRATCH + i, memory[i]);
 
+        new BigUint64Array(cpu.wasm_memory.buffer, 1104, 1)[0] = 0x40n; // fs_base
+        new BigUint64Array(cpu.wasm_memory.buffer, 1112, 1)[0] = 0x80n; // gs_base
         cpu.instruction_pointer[0] = BASE;
         u32[16 + 4] = 0x80000;
         u32[32 + 4] = 0;

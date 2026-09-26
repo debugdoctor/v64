@@ -111,8 +111,20 @@ IO.prototype.register_read = function(port_addr, device, r8, r16, r32)
     if(DEBUG)
     {
         var fail = function(n) {
-            dbg_assert(false, "Overlapped read" + n + " " + h(port_addr, 4) + " (" + device.name + ")");
-            return -1 >>> (32 - n) | 0;
+            // Real hardware allows treating consecutive byte ports as a wider
+            // port; the kernel relies on this (e.g. wide accesses to the UART).
+            if(n === 8)
+            {
+                dbg_log("Unhandled read8 " + h(port_addr, 4) + " (" + device.name + ")");
+                return -1;
+            }
+            dbg_log("Overlapped read" + n + " " + h(port_addr, 4) + " (" + device.name + ")");
+            var value = 0;
+            for(var i = 0; i < n / 8; i++)
+            {
+                value |= this.port_read8(port_addr + i) << (i * 8);
+            }
+            return value | 0;
         };
         if(!r8) r8 = fail.bind(this, 8);
         if(!r16) r16 = fail.bind(this, 16);
@@ -143,8 +155,18 @@ IO.prototype.register_write = function(port_addr, device, w8, w16, w32)
 
     if(DEBUG)
     {
-        var fail = function(n) {
-            dbg_assert(false, "Overlapped write" + n + " " + h(port_addr) + " (" + device.name + ")");
+        var fail = function(n, data) {
+            // See fail above: split wide accesses over consecutive byte ports.
+            if(n === 8)
+            {
+                dbg_log("Unhandled write8 " + h(port_addr) + " (" + device.name + ")");
+                return;
+            }
+            dbg_log("Overlapped write" + n + " " + h(port_addr) + " (" + device.name + ")");
+            for(var i = 0; i < n / 8; i++)
+            {
+                this.port_write8(port_addr + i, data >>> (i * 8) & 0xFF);
+            }
         };
         if(!w8) w8 = fail.bind(this, 8);
         if(!w16) w16 = fail.bind(this, 16);

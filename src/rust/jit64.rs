@@ -14,6 +14,8 @@ static LOGGED_FAILS: AtomicU32 = AtomicU32::new(0);
 const REG_LOW: i32 = 64;
 const REG_HIGH: i32 = 128;
 const REG_EXT: i32 = 160;
+const FS_BASE_ADDR: i32 = 1104;
+const GS_BASE_ADDR: i32 = 1112;
 const IN_HLT: i32 = 616;
 const FLAGS_ADDR: i32 = 120;
 const FLAGS_CHANGED_ADDR: i32 = 100;
@@ -33,6 +35,8 @@ pub struct Mem {
     pub disp: i64,
     // Effective-address width: 64 by default, 32 when the `67` prefix is present.
     pub addr_size: u8,
+    // FS (0x64) / GS (0x65) override, whose base is added to the address.
+    pub segment: Option<u8>,
 }
 
 // Mask of the bits a value of this operand width occupies.
@@ -114,6 +118,13 @@ pub enum Instr {
     ShiftMem { kind: ShiftKind, mem: Mem, width: u8, count: u8 },
     ShiftMemCl { kind: ShiftKind, mem: Mem, width: u8 },
     Cpuid,
+    Rdtsc,
+    In { imm: Option<u16>, width: u8 },
+    Out { imm: Option<u16>, width: u8 },
+    Cli,
+    PushFlags,
+    BitTestReg { r: u8, index_r: u8, op: u8, width: u8 },
+    BitTestImm { r: u8, index: u64, op: u8, width: u8 },
     ImulRegReg { dst: u8, lhs: u8, rhs: u8, width: u8 },
     ImulRegImm { dst: u8, src: u8, value: u64, width: u8 },
     ImulRegMem { dst: u8, mem: Mem, value: Option<u64>, width: u8 },
@@ -240,6 +251,7 @@ fn decode_mem(
     i: &mut usize,
     block_base: u64,
     addr_size: u8,
+    segment: Option<u8>,
     trailing_bytes: usize,
 ) -> Result<Mem, String> {
     let rex_b = (rex & 0x01 != 0) as u8;
@@ -300,6 +312,7 @@ fn decode_mem(
         scale,
         disp,
         addr_size,
+        segment,
     })
 }
 
@@ -320,6 +333,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
         let mut prefix_f3 = false;
         let mut prefix_66 = false;
         let mut prefix_67 = false;
+        let mut segment_override = None;
         loop {
             match bytes[i] {
                 0xF3 => {
@@ -339,14 +353,14 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                 0xF0 | 0xF2 => {
                     i += 1;
                 },
-                // In long mode the ES/CS/SS/DS overrides are ignored. The FS/GS
-                // overrides change the effective address, which the address
-                // generator does not model, so those blocks stay interpreted.
+                // In long mode the ES/CS/SS/DS overrides are ignored (their
+                // bases are zero); FS/GS contribute to the effective address.
                 0x26 | 0x2E | 0x36 | 0x3E => {
                     i += 1;
                 },
                 0x64 | 0x65 => {
-                    return Err("unsupported segment override".into());
+                    segment_override = Some(bytes[i]);
+                    i += 1;
                 },
                 0x40..=0x4F => {
                     rex = bytes[i];
@@ -402,8 +416,8 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
             },
 
             // mov r/m, imm16/imm32
-            0xC7 => {
-                let width = operand_width(prefix_66, rex_w);
+            0xC6 | 0xC7 => {
+                let width = if opcode == 0xC6 { 8 } else { operand_width(prefix_66, rex_w) };
                 let modrm = *bytes.get(i).ok_or("truncated modrm")?;
                 i += 1;
                 if modrm >> 3 & 7 != 0 {
@@ -419,11 +433,16 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         bytes,
                         &mut i,
                         base,
-                        addr_size,
-                        if width == 16 { 2 } else { 4 },
+                        addr_size, segment_override,
+                        if opcode == 0xC6 { 1 } else if width == 16 { 2 } else { 4 },
                     )?)
                 };
-                let value = if width == 16 {
+                let value = if opcode == 0xC6 {
+                    let v = *bytes.get(i).ok_or("truncated imm8")? as u64;
+                    i += 1;
+                    v
+                }
+                else if width == 16 {
                     if i + 2 > bytes.len() {
                         return Err("truncated imm16".into());
                     }
@@ -439,8 +458,43 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     out.push(Instr::MovMemImm { mem, value, width });
                 }
                 else {
-                    out.push(Instr::MovRegImm { r: (modrm & 7) | rex_b << 3, value, width });
+                    let mut r = (modrm & 7) | rex_b << 3;
+                    if width == 8 && rex == 0 && (4..8).contains(&r) {
+                        r = 16 + (r - 4);
+                    }
+                    out.push(Instr::MovRegImm { r, value, width });
                 }
+            },
+
+            // in/out: E4-E7 use an imm8 port, EC-EF the DX port
+            0xE4 | 0xE5 | 0xE6 | 0xE7 => {
+                let port = *bytes.get(i).ok_or("truncated port")? as u16;
+                i += 1;
+                let width = if opcode & 1 == 0 { 8 } else { operand_width(prefix_66, rex_w) };
+                out.push(if opcode & 2 == 0 {
+                    Instr::In { imm: Some(port), width }
+                }
+                else {
+                    Instr::Out { imm: Some(port), width }
+                });
+            },
+            0xEC | 0xED | 0xEE | 0xEF => {
+                let width = if opcode & 1 == 0 { 8 } else { operand_width(prefix_66, rex_w) };
+                out.push(if opcode & 2 == 0 {
+                    Instr::In { imm: None, width }
+                }
+                else {
+                    Instr::Out { imm: None, width }
+                });
+            },
+            // cli (0xFA)
+            0xFA => out.push(Instr::Cli),
+            // pushfq (0x9C)
+            0x9C => {
+                if prefix_66 {
+                    return Err("16-bit pushf is not supported".into());
+                }
+                out.push(Instr::PushFlags);
             },
 
             // movsxd r64, r/m32
@@ -460,7 +514,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     });
                 }
                 else {
-                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                     out.push(Instr::MovExtendMem {
                         dst, mem, src_width: 32, dst_width: 64, signed: true,
                     });
@@ -483,7 +537,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         bytes,
                         &mut i,
                         base,
-                        addr_size,
+                        addr_size, segment_override,
                         if opcode == 0x6B { 1 } else if width == 16 { 2 } else { 4 },
                     )?)
                 };
@@ -528,15 +582,21 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     });
                 }
                 else {
-                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                     out.push(Instr::XchgMemReg { mem, r, width });
                 }
             },
 
             // mov/lea/add/sub/cmp/test r/m, r and r, r/m
             0x88 | 0x8A | 0x89 | 0x8B | 0x8D | 0x01 | 0x03 | 0x09 | 0x0B | 0x11 | 0x13 | 0x19 | 0x1B
-            | 0x21 | 0x23 | 0x29 | 0x2B | 0x31 | 0x33 | 0x39 | 0x3B | 0x85 => {
-                let width = if opcode == 0x88 || opcode == 0x8A {
+            | 0x21 | 0x23 | 0x29 | 0x2B | 0x31 | 0x33 | 0x39 | 0x3B | 0x85 | 0x00 | 0x02 | 0x08
+            | 0x0A | 0x10 | 0x12 | 0x18 | 0x1A | 0x20 | 0x22 | 0x28 | 0x2A | 0x30 | 0x32 | 0x38
+            | 0x3A | 0x84 => {
+                let width = if matches!(
+                    opcode,
+                    0x88 | 0x8A | 0x00 | 0x02 | 0x08 | 0x0A | 0x10 | 0x12 | 0x18 | 0x1A | 0x20
+                        | 0x22 | 0x28 | 0x2A | 0x30 | 0x32 | 0x38 | 0x3A | 0x84
+                ) {
                     8
                 }
                 else {
@@ -581,11 +641,28 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         0x39 => Instr::ArithRegReg { op: ArithOp::Cmp, dst: rm, src: reg, width },
                         0x3B => Instr::ArithRegReg { op: ArithOp::Cmp, dst: reg, src: rm, width },
                         0x85 => Instr::ArithRegReg { op: ArithOp::Test, dst: rm, src: reg, width },
+                        0x00 => Instr::ArithRegReg { op: ArithOp::Add, dst: rm, src: reg, width },
+                        0x02 => Instr::ArithRegReg { op: ArithOp::Add, dst: reg, src: rm, width },
+                        0x08 => Instr::ArithRegReg { op: ArithOp::Or, dst: rm, src: reg, width },
+                        0x0A => Instr::ArithRegReg { op: ArithOp::Or, dst: reg, src: rm, width },
+                        0x10 => Instr::ArithRegReg { op: ArithOp::Adc, dst: rm, src: reg, width },
+                        0x12 => Instr::ArithRegReg { op: ArithOp::Adc, dst: reg, src: rm, width },
+                        0x18 => Instr::ArithRegReg { op: ArithOp::Sbb, dst: rm, src: reg, width },
+                        0x1A => Instr::ArithRegReg { op: ArithOp::Sbb, dst: reg, src: rm, width },
+                        0x20 => Instr::ArithRegReg { op: ArithOp::And, dst: rm, src: reg, width },
+                        0x22 => Instr::ArithRegReg { op: ArithOp::And, dst: reg, src: rm, width },
+                        0x28 => Instr::ArithRegReg { op: ArithOp::Sub, dst: rm, src: reg, width },
+                        0x2A => Instr::ArithRegReg { op: ArithOp::Sub, dst: reg, src: rm, width },
+                        0x30 => Instr::ArithRegReg { op: ArithOp::Xor, dst: rm, src: reg, width },
+                        0x32 => Instr::ArithRegReg { op: ArithOp::Xor, dst: reg, src: rm, width },
+                        0x38 => Instr::ArithRegReg { op: ArithOp::Cmp, dst: rm, src: reg, width },
+                        0x3A => Instr::ArithRegReg { op: ArithOp::Cmp, dst: reg, src: rm, width },
+                        0x84 => Instr::ArithRegReg { op: ArithOp::Test, dst: rm, src: reg, width },
                         _ => unreachable!(),
                     });
                 }
                 else {
-                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                     out.push(match opcode {
                         0x88 => Instr::MovMemReg { mem, src: reg, width },
                         0x8A => Instr::MovRegMem { dst: reg, mem, width },
@@ -609,14 +686,31 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         0x39 => Instr::ArithMemReg { op: ArithOp::Cmp, mem, src: reg, width },
                         0x3B => Instr::ArithRegMem { op: ArithOp::Cmp, dst: reg, mem, width },
                         0x85 => Instr::ArithMemReg { op: ArithOp::Test, mem, src: reg, width },
+                        0x00 => Instr::ArithMemReg { op: ArithOp::Add, mem, src: reg, width },
+                        0x02 => Instr::ArithRegMem { op: ArithOp::Add, dst: reg, mem, width },
+                        0x08 => Instr::ArithMemReg { op: ArithOp::Or, mem, src: reg, width },
+                        0x0A => Instr::ArithRegMem { op: ArithOp::Or, dst: reg, mem, width },
+                        0x10 => Instr::ArithMemReg { op: ArithOp::Adc, mem, src: reg, width },
+                        0x12 => Instr::ArithRegMem { op: ArithOp::Adc, dst: reg, mem, width },
+                        0x18 => Instr::ArithMemReg { op: ArithOp::Sbb, mem, src: reg, width },
+                        0x1A => Instr::ArithRegMem { op: ArithOp::Sbb, dst: reg, mem, width },
+                        0x20 => Instr::ArithMemReg { op: ArithOp::And, mem, src: reg, width },
+                        0x22 => Instr::ArithRegMem { op: ArithOp::And, dst: reg, mem, width },
+                        0x28 => Instr::ArithMemReg { op: ArithOp::Sub, mem, src: reg, width },
+                        0x2A => Instr::ArithRegMem { op: ArithOp::Sub, dst: reg, mem, width },
+                        0x30 => Instr::ArithMemReg { op: ArithOp::Xor, mem, src: reg, width },
+                        0x32 => Instr::ArithRegMem { op: ArithOp::Xor, dst: reg, mem, width },
+                        0x38 => Instr::ArithMemReg { op: ArithOp::Cmp, mem, src: reg, width },
+                        0x3A => Instr::ArithRegMem { op: ArithOp::Cmp, dst: reg, mem, width },
+                        0x84 => Instr::ArithMemReg { op: ArithOp::Test, mem, src: reg, width },
                         _ => unreachable!(),
                     });
                 }
             },
 
             // add/or/and/sub/xor/cmp r/m, imm (group 1)
-            0x81 | 0x83 => {
-                let width = operand_width(prefix_66, rex_w);
+            0x80 | 0x81 | 0x83 => {
+                let width = if opcode == 0x80 { 8 } else { operand_width(prefix_66, rex_w) };
                 let modrm = *bytes.get(i).ok_or("truncated modrm")?;
                 i += 1;
                 let group = modrm >> 3 & 7;
@@ -633,12 +727,17 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         bytes,
                         &mut i,
                         base,
-                        addr_size,
-                        if opcode == 0x83 { 1 } else if width == 16 { 2 } else { 4 },
+                        addr_size, segment_override,
+                        if opcode == 0x80 || opcode == 0x83 { 1 } else if width == 16 { 2 } else { 4 },
                     )?)
                 };
                 let value = if opcode == 0x83 {
                     read_i8(bytes, &mut i)? as i64 as u64
+                }
+                else if opcode == 0x80 {
+                    let v = *bytes.get(i).ok_or("truncated imm8")? as u64;
+                    i += 1;
+                    v
                 }
                 else if width == 16 {
                     if i + 2 > bytes.len() {
@@ -665,7 +764,10 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     out.push(Instr::ArithMemImm { op, mem, value, width });
                 }
                 else {
-                    let r = (modrm & 7) | rex_b << 3;
+                    let mut r = (modrm & 7) | rex_b << 3;
+                    if width == 8 && rex == 0 && (4..8).contains(&r) {
+                        r = 16 + (r - 4);
+                    }
                     out.push(if op == ArithOp::Add {
                         Instr::AddRegImm { r, value, width }
                     }
@@ -708,7 +810,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         });
                     }
                     else {
-                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                         out.push(if group == 2 {
                             Instr::NotMem { mem, width }
                         }
@@ -731,7 +833,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         bytes,
                         &mut i,
                         base,
-                        addr_size,
+                        addr_size, segment_override,
                         imm_operand_bytes(width),
                     )?)
                 };
@@ -753,8 +855,13 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
             },
 
             // logical/sub/cmp rax, imm32 and test rax, imm32
-            0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D | 0xA9 => {
-                let width = operand_width(prefix_66, rex_w);
+            0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D | 0xA9 | 0x3C | 0xA8 => {
+                let width = if opcode == 0x3C || opcode == 0xA8 {
+                    8
+                }
+                else {
+                    operand_width(prefix_66, rex_w)
+                };
                 let value = read_imm_operand(bytes, &mut i, width)?;
                 let op = match opcode {
                     0x0D => ArithOp::Or,
@@ -763,7 +870,8 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     0x25 => ArithOp::And,
                     0x2D => ArithOp::Sub,
                     0x35 => ArithOp::Xor,
-                    0x3D => ArithOp::Cmp,
+                    0x3D | 0x3C => ArithOp::Cmp,
+                    0xA8 => ArithOp::Test,
                     _ => ArithOp::Test,
                 };
                 out.push(Instr::ArithRegImm { op, r: 0, value, width });
@@ -851,7 +959,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                 };
                 let count_mask = if width == 64 { 63 } else { 31 };
                 if modrm >> 6 != 3 {
-                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                     if opcode == 0xD3 {
                         out.push(Instr::ShiftMemCl { kind, mem, width });
                     }
@@ -890,7 +998,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     return Err("unsupported ff group form".into());
                 }
                 if modrm >> 6 != 3 {
-                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                    let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                     match group {
                         0 | 1 => {
                             out.push(Instr::IncDecMem {
@@ -969,7 +1077,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     let modrm = *bytes.get(i).ok_or("truncated nop modrm")?;
                     i += 1;
                     if modrm >> 6 != 3 {
-                        let _ = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                        let _ = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                     }
                     out.push(Instr::Nop);
                 }
@@ -993,7 +1101,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         });
                     }
                     else {
-                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                         out.push(Instr::MovExtendMem {
                             dst, mem, src_width, dst_width, signed,
                         });
@@ -1013,7 +1121,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         });
                     }
                     else {
-                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                         out.push(Instr::CmovRegMem {
                             code: second - 0x40,
                             dst,
@@ -1036,7 +1144,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         });
                     }
                     else {
-                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                         out.push(Instr::ImulRegMem { dst, mem, value: None, width });
                     }
                 }
@@ -1053,7 +1161,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         });
                     }
                     else {
-                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, 0)?;
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
                         out.push(Instr::SetccMem {
                             code: second - 0x90,
                             mem,
@@ -1070,6 +1178,46 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     });
                 }
                 // CPUID
+                // RDTSC (0F 31)
+                else if second == 0x31 {
+                    out.push(Instr::Rdtsc);
+                }
+                // BT r/m, r (0F A3), register form only
+                else if second == 0xA3 {
+                    let modrm = *bytes.get(i).ok_or("truncated modrm")?;
+                    i += 1;
+                    if modrm >> 6 != 3 {
+                        return Err("bt with a memory operand is not supported".into());
+                    }
+                    let ir = (modrm >> 3 & 7) | rex_r << 3;
+                    out.push(Instr::BitTestReg {
+                        r: (modrm & 7) | rex_b << 3,
+                        index_r: ir,
+                        op: 0,
+                        width: operand_width(prefix_66, rex_w),
+                    });
+                }
+                // group 8: BT/BTS/BTR/BTC r/m, imm8 (0F BA /4../7)
+                else if second == 0xBA {
+                    let width = operand_width(prefix_66, rex_w);
+                    let modrm = *bytes.get(i).ok_or("truncated modrm")?;
+                    i += 1;
+                    let group = modrm >> 3 & 7;
+                    if !(4..=7).contains(&group) {
+                        return Err("unsupported group 8 form".into());
+                    }
+                    if modrm >> 6 != 3 {
+                        return Err("0f ba with a memory operand is not supported".into());
+                    }
+                    let index = *bytes.get(i).ok_or("truncated imm8")? as u64;
+                    i += 1;
+                    out.push(Instr::BitTestImm {
+                        r: (modrm & 7) | rex_b << 3,
+                        index,
+                        op: group - 4,
+                        width,
+                    });
+                }
                 else if second == 0xA2 {
                     out.push(Instr::Cpuid);
                 }
@@ -1197,6 +1345,20 @@ fn gen_effective_addr(b: &mut WasmBuilder, locals: &mut Vec<(u8, WasmLocalI64)>,
     if mask32 {
         b.const_i64(0xFFFF_FFFF);
         b.and_i64();
+    }
+    // The FS/GS base is added after the wrap, matching the interpreter.
+    match mem.segment {
+        Some(0x64) => {
+            b.const_i32(FS_BASE_ADDR);
+            b.load_aligned_i64(0);
+            b.add_i64();
+        },
+        Some(0x65) => {
+            b.const_i32(GS_BASE_ADDR);
+            b.load_aligned_i64(0);
+            b.add_i64();
+        },
+        _ => {},
     }
 }
 
@@ -2115,6 +2277,88 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 locals.clear();
                 b.call_fn0("jit64_cpuid");
             },
+            Instr::BitTestReg { r, index_r, op, width } => {
+                let ri = load_reg(&mut b, &mut locals, r);
+                b.get_local_i64(&locals[ri].1);
+                let ii = load_reg(&mut b, &mut locals, index_r);
+                b.get_local_i64(&locals[ii].1);
+                b.const_i32(op as i32 | (width as i32) << 8);
+                b.call_fn3_i64_i64_i32_ret_i64("jit64_bt");
+                let value = b.set_new_local_i64();
+                write_reg_value(&mut b, &mut locals, r, &value, width);
+                b.free_local_i64(value);
+            },
+            Instr::BitTestImm { r, index, op, width } => {
+                let ri = load_reg(&mut b, &mut locals, r);
+                b.get_local_i64(&locals[ri].1);
+                b.const_i64(index as i64);
+                b.const_i32(op as i32 | (width as i32) << 8);
+                b.call_fn3_i64_i64_i32_ret_i64("jit64_bt");
+                let value = b.set_new_local_i64();
+                write_reg_value(&mut b, &mut locals, r, &value, width);
+                b.free_local_i64(value);
+            },
+            Instr::In { imm, width } => {
+                match imm {
+                    Some(port) => b.const_i64(port as i64),
+                    None => {
+                        let ri = load_reg(&mut b, &mut locals, 2);
+                        b.get_local_i64(&locals[ri].1);
+                        b.const_i64(0xFFFF);
+                        b.and_i64();
+                    },
+                }
+                b.const_i32(width as i32);
+                b.call_fn2_i64_i32_ret_i64("jit64_in");
+                let value = b.set_new_local_i64();
+                write_reg_value(&mut b, &mut locals, 0, &value, width);
+                b.free_local_i64(value);
+            },
+            Instr::Out { imm, width } => {
+                match imm {
+                    Some(port) => b.const_i64(port as i64),
+                    None => {
+                        let ri = load_reg(&mut b, &mut locals, 2);
+                        b.get_local_i64(&locals[ri].1);
+                        b.const_i64(0xFFFF);
+                        b.and_i64();
+                    },
+                }
+                let ai = load_reg(&mut b, &mut locals, 0);
+                b.get_local_i64(&locals[ai].1);
+                emit_mask(&mut b, width);
+                b.const_i32(width as i32);
+                b.call_fn3_i64_i64_i32("jit64_out");
+            },
+            Instr::Cli => {
+                b.call_fn0("jit64_cli");
+            },
+            Instr::PushFlags => {
+                // push64 touches rsp, so flush the resident registers.
+                emit_registers_back(&mut b, &locals);
+                for (_, local) in &locals {
+                    b.free_local_i64(local.unsafe_clone());
+                }
+                locals.clear();
+                b.call_fn0("jit64_pushfq");
+            },
+            Instr::Rdtsc => {
+                b.call_fn0_ret_i64("jit64_rdtsc");
+                let raw = b.set_new_local_i64();
+                b.get_local_i64(&raw);
+                b.const_i64(0xFFFF_FFFF);
+                b.and_i64();
+                let low = b.set_new_local_i64();
+                write_reg_value(&mut b, &mut locals, 0, &low, 32);
+                b.free_local_i64(low);
+                b.get_local_i64(&raw);
+                b.const_i64(32);
+                b.shr_u_i64();
+                let high = b.set_new_local_i64();
+                write_reg_value(&mut b, &mut locals, 2, &high, 32);
+                b.free_local_i64(high);
+                b.free_local_i64(raw);
+            },
             Instr::ImulRegReg { dst, lhs, rhs, width } => {
                 let li = load_reg(&mut b, &mut locals, lhs);
                 let ri = load_reg(&mut b, &mut locals, rhs);
@@ -2873,6 +3117,87 @@ pub unsafe fn jit64_finish_fault() {
     crate::cpu::cpu::exit_jit64();
 }
 
+// in/out. A failed translation sets the fault flag so the block rewinds.
+#[no_mangle]
+pub unsafe fn jit64_in(port: u64, width: u32) -> u64 {
+    let port = port as i32;
+    if !crate::cpu::cpu::test_privileges_for_io(port, width as i32) {
+        return 0;
+    }
+    match width {
+        1 => crate::cpu::cpu::io_port_read8(port) as u32 as u64,
+        2 => crate::cpu::cpu::io_port_read16(port) as u16 as u64,
+        _ => crate::cpu::cpu::io_port_read32(port) as u32 as u64,
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_out(port: u64, value: u64, width: u32) {
+    let port = port as i32;
+    if !crate::cpu::cpu::test_privileges_for_io(port, width as i32) {
+        return;
+    }
+    match width {
+        1 => crate::cpu::cpu::io_port_write8(port, value as i32),
+        2 => crate::cpu::cpu::io_port_write16(port, value as i32),
+        _ => crate::cpu::cpu::io_port_write32(port, value as i32),
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_cli() {
+    *crate::cpu::global_pointers::flags &= !crate::cpu::cpu::FLAG_INTERRUPT;
+    *crate::cpu::global_pointers::flags_changed = 0;
+}
+
+#[no_mangle]
+pub unsafe fn jit64_pushfq() {
+    let rsp = crate::cpu::cpu::read_reg64(4).wrapping_sub(8);
+    let phys = match crate::cpu::cpu::translate_address_64_jit(rsp, true, false) {
+        Ok(phys) => phys,
+        Err(()) => {
+            JIT64_MEMORY_FAULT = 1;
+            return;
+        },
+    };
+    crate::cpu::memory::write32(phys, *crate::cpu::global_pointers::flags);
+    crate::cpu::memory::write32(phys + 4, 0);
+    crate::cpu::cpu::write_reg64(4, rsp);
+}
+
+// rdtsc: the value the interpreter's RDTSC would return.
+#[no_mangle]
+pub unsafe fn jit64_rdtsc() -> u64 { crate::cpu::cpu::read_tsc() }
+
+// BT/BTS/BTR/BTC (op: 0..3), matching interp64::bit_test: only CF is touched.
+#[no_mangle]
+pub unsafe fn jit64_bt(value: u64, index: u64, encoded: u32) -> u64 {
+    let op = encoded & 0xFF;
+    let width = (encoded >> 8) & 0xFF;
+    let bit = index as u32 & (width - 1);
+    let old = (value >> bit) & 1 != 0;
+    let flags = crate::cpu::global_pointers::flags;
+    *flags &= !1; // CF
+    if old {
+        *flags |= 1;
+    }
+    *crate::cpu::global_pointers::flags_changed = 0;
+    if op == 0 {
+        return value;
+    }
+    let result = match op {
+        1 => value | 1u64 << bit,
+        2 => value & !(1u64 << bit),
+        _ => value ^ 1u64 << bit,
+    };
+    if width == 64 {
+        result
+    }
+    else {
+        result & (1u64 << width) - 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2931,7 +3256,7 @@ mod tests {
         ]).unwrap();
         assert_eq!(lea, vec![Instr::Lea {
             dst: 2,
-            mem: Mem { base: None, index: None, scale: 0, addr_size: 64, disp: 0x1100 },
+            mem: Mem { base: None, index: None, scale: 0, addr_size: 64, disp: 0x1100, segment: None },
             width: 64,
         }]);
 
@@ -2965,7 +3290,7 @@ mod tests {
 
     #[test]
     fn decodes_memory_arithmetic_forms() {
-        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 8 };
+        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 8, segment: None };
         let decoded = decode_block(0, &[
             0x48, 0x83, 0x44, 0x24, 0x08, 0x01, // add qword [rsp+8], 1
             0x4C, 0x31, 0x44, 0x24, 0x08, // xor qword [rsp+8], r8
@@ -2983,7 +3308,7 @@ mod tests {
 
     #[test]
     fn decodes_memory_immediate_and_indirect_control_flow() {
-        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 8 };
+        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 8, segment: None };
         assert_eq!(decode_block(0, &[
             0x48, 0xC7, 0x44, 0x24, 0x08, 0xFF, 0xFF, 0xFF, 0xFF,
         ]).unwrap(), vec![Instr::MovMemImm { mem, value: u64::MAX, width: 64 }]);
@@ -2996,13 +3321,13 @@ mod tests {
         ]);
         assert_eq!(decode_block(0x1000, &[0xFF, 0x15, 0xFA, 0x00, 0x00, 0x00]).unwrap(), vec![
             Instr::CallMem {
-                mem: Mem { base: None, index: None, scale: 0, addr_size: 64, disp: 0x1100 },
+                mem: Mem { base: None, index: None, scale: 0, addr_size: 64, disp: 0x1100, segment: None },
                 return_address: 0x1006,
             },
         ]);
         assert_eq!(decode_block(0, &[0xFF, 0x64, 0x24, 0x08]).unwrap(), vec![
             Instr::JmpMem {
-                mem: Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 8 },
+                mem: Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 8, segment: None },
             },
         ]);
         assert_eq!(decode_block(0, &[0xC9, 0xC3]).unwrap(), vec![
@@ -3026,7 +3351,7 @@ mod tests {
 
     #[test]
     fn decodes_32_bit_memory_operations() {
-        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 24 };
+        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 24, segment: None };
         assert_eq!(decode_block(0, &[
             0xC7, 0x44, 0x24, 0x18, 0xFF, 0xFF, 0xFF, 0xFF,
             0x83, 0x44, 0x24, 0x18, 0x01,
@@ -3049,7 +3374,7 @@ mod tests {
 
     #[test]
     fn decodes_movzx_and_movsx() {
-        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16 };
+        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16, segment: None };
         assert_eq!(decode_block(0, &[
             0x0F, 0xB6, 0xC4, // movzx eax, ah
             0x48, 0x0F, 0xBE, 0xCB, // movsx rcx, bl
@@ -3069,7 +3394,7 @@ mod tests {
 
     #[test]
     fn decodes_movsxd() {
-        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16 };
+        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16, segment: None };
         assert_eq!(decode_block(0, &[
             0x4D, 0x63, 0xC1, // movsxd r8, r9d
             0x4C, 0x63, 0x54, 0x24, 0x10, // movsxd r10, dword [rsp+16]
@@ -3085,7 +3410,7 @@ mod tests {
 
     #[test]
     fn decodes_imul_forms() {
-        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16 };
+        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16, segment: None };
         assert_eq!(decode_block(0, &[
             0x45, 0x0F, 0xAF, 0xC1, // imul r8d, r9d
             0x4D, 0x6B, 0xC1, 0xFF, // imul r8, r9, -1
@@ -3110,7 +3435,7 @@ mod tests {
 
     #[test]
     fn decodes_adc_and_sbb_forms() {
-        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16 };
+        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16, segment: None };
         assert_eq!(decode_block(0, &[
             0x4D, 0x11, 0xC8, // adc r8, r9
             0x49, 0x83, 0xD8, 0xFF, // sbb r8, -1
@@ -3147,7 +3472,7 @@ mod tests {
 
     #[test]
     fn decodes_memory_unary_and_xchg() {
-        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16 };
+        let mem = Mem { base: Some(4), index: None, scale: 0, addr_size: 64, disp: 16, segment: None };
         assert_eq!(decode_block(0, &[
             0x48, 0xF7, 0x54, 0x24, 0x10,
             0x48, 0xF7, 0x5C, 0x24, 0x10,
@@ -3189,7 +3514,7 @@ mod tests {
 
     #[test]
     fn decodes_cmov_and_setcc_memory_forms() {
-        let mem = Mem { base: Some(0), index: None, scale: 0, addr_size: 64, disp: 0 };
+        let mem = Mem { base: Some(0), index: None, scale: 0, addr_size: 64, disp: 0, segment: None };
         assert_eq!(decode_block(0, &[
             0x0F, 0x44, 0x00, // cmove eax, [rax]
             0x0F, 0x94, 0x00, // sete byte [rax]
@@ -3274,12 +3599,12 @@ mod tests {
         ]).unwrap(), vec![
             Instr::MovRegMem {
                 dst: 0,
-                mem: Mem { base: Some(3), index: None, scale: 0, disp: 0, addr_size: 32 },
+                mem: Mem { base: Some(3), index: None, scale: 0, disp: 0, addr_size: 32, segment: None },
                 width: 64,
             },
             Instr::MovRegMem {
                 dst: 0,
-                mem: Mem { base: Some(3), index: None, scale: 0, disp: 0, addr_size: 32 },
+                mem: Mem { base: Some(3), index: None, scale: 0, disp: 0, addr_size: 32, segment: None },
                 width: 16,
             },
         ]);
@@ -3306,24 +3631,24 @@ mod tests {
         ]).unwrap(), vec![
             Instr::ShiftMem {
                 kind: ShiftKind::Shl,
-                mem: Mem { base: Some(0), index: None, scale: 0, disp: 0, addr_size: 64 },
+                mem: Mem { base: Some(0), index: None, scale: 0, disp: 0, addr_size: 64, segment: None },
                 width: 64,
                 count: 1,
             },
             Instr::ShiftMem {
                 kind: ShiftKind::Shl,
-                mem: Mem { base: Some(0), index: None, scale: 0, disp: 0, addr_size: 64 },
+                mem: Mem { base: Some(0), index: None, scale: 0, disp: 0, addr_size: 64, segment: None },
                 width: 64,
                 count: 5,
             },
             Instr::ShiftMemCl {
                 kind: ShiftKind::Shl,
-                mem: Mem { base: Some(0), index: None, scale: 0, disp: 0, addr_size: 64 },
+                mem: Mem { base: Some(0), index: None, scale: 0, disp: 0, addr_size: 64, segment: None },
                 width: 64,
             },
             Instr::ShiftMem {
                 kind: ShiftKind::Shl,
-                mem: Mem { base: Some(0), index: None, scale: 0, disp: 0, addr_size: 64 },
+                mem: Mem { base: Some(0), index: None, scale: 0, disp: 0, addr_size: 64, segment: None },
                 width: 16,
                 count: 4,
             },
