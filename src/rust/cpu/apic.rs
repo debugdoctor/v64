@@ -13,7 +13,7 @@ const APIC_TIMER_MODE_MASK: u32 = 3 << 17;
 const APIC_TIMER_MODE_ONE_SHOT: u32 = 0;
 const APIC_TIMER_MODE_PERIODIC: u32 = 1 << 17;
 
-const _APIC_TIMER_MODE_TSC: u32 = 2 << 17;
+const APIC_TIMER_MODE_TSC: u32 = 2 << 17;
 
 const DELIVERY_MODES: [&str; 8] = [
     "Fixed (0)",
@@ -104,6 +104,20 @@ static APIC: Mutex<Apic> = Mutex::new(Apic {
 });
 
 pub fn get_apic() -> MutexGuard<'static, Apic> { APIC.try_lock().unwrap() }
+
+// IA32_TSC_DEADLINE (0x6E0). The two count fields are unused in TSC-deadline
+// mode, so the 64-bit deadline lives there (APIC_STRUCT_SIZE fixes the layout).
+fn tsc_deadline(apic: &Apic) -> u64 { (apic.timer_current_count as u64) << 32 | apic.timer_initial_count as u64 }
+
+fn set_tsc_deadline_internal(apic: &mut Apic, value: u64) {
+    apic.timer_initial_count = value as u32;
+    apic.timer_current_count = (value >> 32) as u32;
+    if APIC_LOG_VERBOSE {
+        dbg_log!("TSC deadline: {}", value);
+    }
+}
+
+pub fn set_tsc_deadline(value: u64) { set_tsc_deadline_internal(&mut get_apic(), value) }
 
 #[no_mangle]
 pub fn get_apic_addr() -> u32 { &raw mut *get_apic() as u32 }
@@ -253,7 +267,7 @@ fn read32_internal(apic: &mut Apic, addr: u32) -> u32 {
                     apic.timer_initial_count
                         - (diff_in_ticks % (apic.timer_initial_count as u64 + 1)) as u32
                 }
-                else if mode == APIC_TIMER_MODE_ONE_SHOT {
+                else if mode == APIC_TIMER_MODE_ONE_SHOT || mode == APIC_TIMER_MODE_TSC {
                     0
                 }
                 else {
@@ -467,6 +481,30 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
 pub fn apic_timer(now: f64) -> f64 { timer(&mut get_apic(), now) }
 
 fn timer(apic: &mut Apic, now: f64) -> f64 {
+    // TSC-deadline mode (LVT timer bits 18:17 == 2): one-shot when the TSC
+    // reaches IA32_TSC_DEADLINE. The kernel uses it for tickless wakeups.
+    // cf. Intel SDM Vol. 3: https://www.felixcloutier.com/x86/tsc
+    if apic.lvt_timer & APIC_TIMER_MODE_MASK == APIC_TIMER_MODE_TSC {
+        let deadline = tsc_deadline(apic);
+        if deadline == 0 {
+            return 100.0;
+        }
+        let tsc = unsafe { crate::cpu::cpu::read_tsc() };
+        if tsc >= deadline {
+            set_tsc_deadline_internal(apic, 0);
+            if apic.lvt_timer & IOAPIC_CONFIG_MASKED == 0 {
+                deliver(
+                    apic,
+                    (apic.lvt_timer & 0xFF) as u8,
+                    IOAPIC_DELIVERY_FIXED,
+                    false,
+                );
+            }
+            return 100.0;
+        }
+        return (deadline - tsc) as f64 / crate::cpu::cpu::TSC_RATE;
+    }
+
     if apic.timer_initial_count == 0 || apic.timer_current_count == 0 {
         return 100.0;
     }

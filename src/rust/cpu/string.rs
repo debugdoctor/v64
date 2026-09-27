@@ -57,6 +57,19 @@ enum Rep {
 // We implement all string instructions here and rely on the inliner on doing its job of optimising
 // away anything known at compile time (check with `wasm-dis build/v64.wasm`)
 #[inline(always)]
+unsafe fn dirty_write_range(start: u32, len: u32) {
+    if len == 0 {
+        return;
+    }
+    // u64 arithmetic: start + len can wrap at the top of the address space, and
+    // a wrapped range would make this loop run forever.
+    let first = (start >> 12) as u64;
+    let last = ((start as u64) + (len as u64) - 1) >> 12;
+    for page in first..=last.min(0xFFFFF) {
+        jit::jit_dirty_page(Page::of_u32(page as u32));
+    }
+}
+
 unsafe fn string_instruction(
     is_asize_32: bool,
     ds_or_prefix: i32,
@@ -288,10 +301,13 @@ unsafe fn string_instruction(
                     Size::W => write_reg16(AX, src_val),
                     Size::D => write_reg32(EAX, src_val),
                 },
-                Instruction::Ins => match size {
-                    Size::B => memory::write8_no_mmap_or_dirty_check(phys_dst, src_val),
-                    Size::W => memory::write16_no_mmap_or_dirty_check(phys_dst, src_val),
-                    Size::D => memory::write32_no_mmap_or_dirty_check(phys_dst, src_val),
+                Instruction::Ins => {
+                    match size {
+                        Size::B => memory::write8_no_mmap_or_dirty_check(phys_dst, src_val),
+                        Size::W => memory::write16_no_mmap_or_dirty_check(phys_dst, src_val),
+                        Size::D => memory::write32_no_mmap_or_dirty_check(phys_dst, src_val),
+                    }
+                    dirty_write_range(phys_dst, size_bytes as u32);
                 },
                 Instruction::Movs => {
                     if direction == -1 {
@@ -306,11 +322,9 @@ unsafe fn string_instruction(
                         );
                     }
                     else {
-                        memory::memcpy_no_mmap_or_dirty_check(
-                            phys_src,
-                            phys_dst,
-                            count_until_end_of_page * size_bytes as u32,
-                        );
+                        let len = count_until_end_of_page * size_bytes as u32;
+                        memory::memcpy_no_mmap_or_dirty_check(phys_src, phys_dst, len);
+                        dirty_write_range(phys_dst, len);
                     }
                     i = count_until_end_of_page;
                     break;
@@ -325,11 +339,18 @@ unsafe fn string_instruction(
                             src_val as u8,
                             count_until_end_of_page,
                         );
+                        dirty_write_range(phys_dst, count_until_end_of_page);
                         i = count_until_end_of_page;
                         break;
                     },
-                    Size::W => memory::write16_no_mmap_or_dirty_check(phys_dst, src_val),
-                    Size::D => memory::write32_no_mmap_or_dirty_check(phys_dst, src_val),
+                    Size::W => {
+                        memory::write16_no_mmap_or_dirty_check(phys_dst, src_val);
+                        dirty_write_range(phys_dst, 2);
+                    },
+                    Size::D => {
+                        memory::write32_no_mmap_or_dirty_check(phys_dst, src_val);
+                        dirty_write_range(phys_dst, 4);
+                    },
                 },
             };
 

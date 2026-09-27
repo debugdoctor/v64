@@ -134,7 +134,11 @@ export function v64(options)
                 jit64_in: jit64.jit64_in,
                 jit64_out: jit64.jit64_out,
                 jit64_cli: jit64.jit64_cli,
+                jit64_sync_flags: jit64.jit64_sync_flags,
                 jit64_pushfq: jit64.jit64_pushfq,
+                jit64_hlt: jit64.jit64_hlt,
+                jit64_clear_exception_flag: jit64.jit64_clear_exception_flag,
+                jit64_exception_delivered: jit64.jit64_exception_delivered,
             } });
             wasm_table.set(index + WASM_TABLE_OFFSET, instance.exports.f);
         },

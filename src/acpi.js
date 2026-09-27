@@ -50,11 +50,20 @@ export function ACPI(cpu)
     {
         dbg_log("ACPI pm1_status read", LOG_ACPI);
         return this.pm1_status;
+    }, function()
+    {
+        dbg_log("ACPI pm1_event read", LOG_ACPI);
+        return (this.pm1_status | this.pm1_enable << 16) >>> 0;
     });
     io.register_write(0xB000, this, undefined, function(value)
     {
         dbg_log("ACPI pm1_status write: " + h(value, 4), LOG_ACPI);
         this.pm1_status &= ~value;
+    }, function(value)
+    {
+        dbg_log("ACPI pm1_event write: " + h(value, 8), LOG_ACPI);
+        this.pm1_status &= ~(value & 0xFFFF);
+        this.pm1_enable = value >>> 16 & 0xFFFF;
     });
 
     io.register_read(0xB002, this, undefined, function()

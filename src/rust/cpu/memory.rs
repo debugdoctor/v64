@@ -270,13 +270,41 @@ pub unsafe fn memcpy_into_svga_lfb(src_addr: u32, dst_addr: u32, count: u32) {
     )
 }
 
+// Devices behind MMIO are 32-bit; compose narrower writes like read8/read16 do,
+// otherwise 8/16-bit writes to the APIC/IOAPIC/HPET are silently dropped.
+unsafe fn mmap_rmw(addr: u32, value: i32, bits: u32) {
+    let shift = 8 * (addr & 3);
+    let mask = ((1u32 << bits as u32) - 1) << shift;
+    let base = addr & !3;
+    if addr >= APIC_MEM_ADDRESS && addr < APIC_MEM_ADDRESS + APIC_MEM_SIZE {
+        let old = apic::read32(base - APIC_MEM_ADDRESS);
+        apic::write32(base - APIC_MEM_ADDRESS, old & !mask | ((value as u32) << shift) & mask);
+        handle_irqs();
+    }
+    else if addr >= IOAPIC_MEM_ADDRESS && addr < IOAPIC_MEM_ADDRESS + IOAPIC_MEM_SIZE {
+        let old = ioapic::read32(base - IOAPIC_MEM_ADDRESS);
+        ioapic::write32(base - IOAPIC_MEM_ADDRESS, old & !mask | ((value as u32) << shift) & mask);
+        handle_irqs();
+    }
+    else if addr >= hpet::HPET_MEM_ADDRESS && addr < hpet::HPET_MEM_ADDRESS + hpet::HPET_MEM_SIZE {
+        let old = hpet::read32(base - hpet::HPET_MEM_ADDRESS);
+        hpet::write32(base - hpet::HPET_MEM_ADDRESS, old & !mask | ((value as u32) << shift) & mask);
+    }
+    else if bits == 8 {
+        ext::mmap_write8(addr, value)
+    }
+    else {
+        ext::mmap_write16(addr, value)
+    }
+}
+
 pub unsafe fn mmap_write8(addr: u32, value: i32) {
     if in_svga_lfb(addr) {
         vga::mark_dirty(addr);
         *vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) = value as u8
     }
     else {
-        ext::mmap_write8(addr, value)
+        mmap_rmw(addr, value, 8);
     }
 }
 pub unsafe fn mmap_write16(addr: u32, value: i32) {
@@ -288,7 +316,7 @@ pub unsafe fn mmap_write16(addr: u32, value: i32) {
         )
     }
     else {
-        ext::mmap_write16(addr, value)
+        mmap_rmw(addr, value, 16);
     }
 }
 pub unsafe fn mmap_write32(addr: u32, value: i32) {

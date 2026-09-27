@@ -258,6 +258,8 @@ unsafe fn lgdt(addr: i32, mask: i32) {
     let offset = return_on_pagefault!(safe_read32s(addr + 2));
     *gdtr_size = size;
     *gdtr_offset = offset & mask;
+    // Keep the 64-bit base in sync for descriptor lookups. cf. SDM Vol. 2, LGDT.
+    GDTR_BASE = (offset & mask) as u32 as u64;
 }
 #[no_mangle]
 pub unsafe fn instr16_0F01_2_mem(addr: i32) { lgdt(addr, 0xFFFFFF); }
@@ -278,6 +280,8 @@ unsafe fn lidt(addr: i32, mask: i32) {
     let offset = return_on_pagefault!(safe_read32s(addr + 2));
     *idtr_size = size;
     *idtr_offset = offset & mask;
+    // See lgdt. cf. SDM Vol. 2, LIDT.
+    IDTR_BASE = (offset & mask) as u32 as u64;
 }
 #[no_mangle]
 pub unsafe fn instr16_0F01_3_mem(addr: i32) { lidt(addr, 0xFFFFFF); }
@@ -681,7 +685,7 @@ pub unsafe fn instr_660F15_mem(addr: i32, r: i32) {
 }
 
 #[no_mangle]
-pub unsafe fn instr_0F16(source: u64, r: i32) { (*reg_xmm.offset(r as isize)).u64[1] = source; }
+pub unsafe fn instr_0F16(source: u64, r: i32) { (*xmm_ptr(r)).u64[1] = source; }
 pub unsafe fn instr_0F16_mem(addr: i32, r: i32) {
     // movhps xmm, m64
     instr_0F16(return_on_pagefault!(safe_read64s(addr)), r);
@@ -1326,6 +1330,12 @@ pub unsafe fn instr_0F32() {
     let mut high = 0;
 
     match index {
+        x if x == 0xC0000080u32 as i32 => {
+            // IA32_EFER. cf. Intel SDM Vol. 4: https://www.felixcloutier.com/x86/rdmsr
+            let value = *efer;
+            low = value as i32;
+            high = (value >> 32) as i32;
+        },
         IA32_SYSENTER_CS => low = *sysenter_cs,
         IA32_SYSENTER_EIP => {
             let value = msr_extra().sysenter_eip;
@@ -3321,7 +3331,9 @@ pub unsafe fn instr_0FA2() {
         1 => {
             eax = 9 | 14 << 4 | 6 << 8 | 8 << 16; // i7-8500Y (family 6, model 142)
             ebx = 1 << 16 | 8 << 8; // cpu count, clflush size
-            ecx = 1 << 0 | 1 << 23 | 1 << 30; // sse3, popcnt, rdrand
+            // sse3, ssse3, movbe, popcnt, rdrand. Bit assignments:
+            // https://gitlab.com/x86-cpuid.org/x86-cpuid-db
+            ecx = 1 << 0 | 1 << 9 | 1 << 22 | 1 << 23 | 1 << 30;
             let vme = 0 << 1;
             if config::VMWARE_HYPERVISOR_PORT {
                 ecx |= 1 << 31
@@ -3329,7 +3341,8 @@ pub unsafe fn instr_0FA2() {
             edx = 1 |      // fpu
                     vme | 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 |  // vme, pse, tsc, msr, pae
                     1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
-                    1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // mmx, fxsr, sse1, sse2
+                    // mmx is not advertised: the MMX register forms are not implemented
+                    1 << 24 | 1 << 25 | 1 << 26; // fxsr, sse1, sse2
 
             if *acpi_enabled
             //&& this.apic_enabled[0])
@@ -3382,7 +3395,9 @@ pub unsafe fn instr_0FA2() {
         7 => {
             if read_reg32(ECX) == 0 {
                 eax = 0; // maximum supported sub-level
-                ebx = 1 << 9; // enhanced REP MOVSB/STOSB
+                // erms, rdseed, adx
+                // https://gitlab.com/x86-cpuid.org/x86-cpuid-db
+                ebx = 1 << 9 | 1 << 18 | 1 << 19;
                 ecx = 0;
                 edx = 0;
             }

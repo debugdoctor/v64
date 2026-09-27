@@ -22,6 +22,7 @@ const FLAGS_CHANGED_ADDR: i32 = 100;
 const IP_ADDR: i32 = 232;
 const PREVIOUS_RIP_ADDR: i32 = 240;
 const INSTRUCTION_COUNTER_ADDR: i32 = 664;
+const SREG_ADDR: i32 = 668;
 
 // CF | PF | AF | ZF | SF | OF
 const FLAG_MASK: i32 = 0x8D5;
@@ -119,6 +120,15 @@ pub enum Instr {
     ShiftMemCl { kind: ShiftKind, mem: Mem, width: u8 },
     Cpuid,
     Rdtsc,
+
+    // SSE2. The XMM file lives in emulated memory, so these are pairs of
+    // 64-bit accesses rather than 128-bit values.
+    XmmCopy { dst: u8, src: u8 },
+    XmmLoad { dst: u8, mem: Mem },
+    XmmStore { mem: Mem, src: u8 },
+    XmmXor { dst: u8, src: u8 },
+    XmmXorMem { dst: u8, mem: Mem },
+
     In { imm: Option<u16>, width: u8 },
     Out { imm: Option<u16>, width: u8 },
     Cli,
@@ -946,9 +956,10 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
             // leave
             0xC9 => out.push(Instr::Leave),
 
-            // shl/shr/sar r/m, 1/imm8/cl
-            0xD1 | 0xC1 | 0xD3 => {
-                let width = operand_width(prefix_66, rex_w);
+            // shl/shr/sar r/m, 1/imm8/cl (the C0/D0/D2 forms are always 8-bit)
+            0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 => {
+                let byte_form = matches!(opcode, 0xC0 | 0xD0 | 0xD2);
+                let width = if byte_form { 8 } else { operand_width(prefix_66, rex_w) };
                 let modrm = *bytes.get(i).ok_or("truncated shift modrm")?;
                 i += 1;
                 let kind = match modrm >> 3 & 7 {
@@ -962,11 +973,11 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                 let count_mask = if width == 64 { 63 } else { 31 };
                 if modrm >> 6 != 3 {
                     let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
-                    if opcode == 0xD3 {
+                    if matches!(opcode, 0xD2 | 0xD3) {
                         out.push(Instr::ShiftMemCl { kind, mem, width });
                     }
                     else {
-                        let count = if opcode == 0xD1 { 1 } else { read_i8(bytes, &mut i)? as u8 };
+                        let count = if matches!(opcode, 0xD0 | 0xD1) { 1 } else { read_i8(bytes, &mut i)? as u8 };
                         out.push(Instr::ShiftMem {
                             kind,
                             mem,
@@ -977,11 +988,11 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     continue;
                 }
                 let r = (modrm & 7) | rex_b << 3;
-                if opcode == 0xD3 {
+                if matches!(opcode, 0xD2 | 0xD3) {
                     out.push(Instr::ShiftRegCl { kind, r, width });
                 }
                 else {
-                    let count = if opcode == 0xD1 { 1 } else { read_i8(bytes, &mut i)? as u8 };
+                    let count = if matches!(opcode, 0xD0 | 0xD1) { 1 } else { read_i8(bytes, &mut i)? as u8 };
                     out.push(Instr::ShiftReg {
                         kind,
                         r,
@@ -1136,6 +1147,45 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         out.push(Instr::MovExtendMem {
                             dst, mem, src_width, dst_width, signed,
                         });
+                    }
+                }
+                // MOVDQA/MOVDQU xmm, xmm/m128 (66 0F 6F, F3 0F 6F)
+                else if unsafe { JIT64_SSE } && second == 0x6F && (prefix_66 || prefix_f3) {
+                    let modrm = *bytes.get(i).ok_or("truncated movdqa modrm")?;
+                    i += 1;
+                    let dst = (modrm >> 3 & 7) | rex_r << 3;
+                    if modrm >> 6 == 3 {
+                        out.push(Instr::XmmCopy { dst, src: (modrm & 7) | rex_b << 3 });
+                    }
+                    else {
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
+                        out.push(Instr::XmmLoad { dst, mem });
+                    }
+                }
+                // MOVDQA/MOVDQU xmm/m128, xmm (66 0F 7F, F3 0F 7F)
+                else if unsafe { JIT64_SSE } && second == 0x7F && (prefix_66 || prefix_f3) {
+                    let modrm = *bytes.get(i).ok_or("truncated movdqa modrm")?;
+                    i += 1;
+                    let src = (modrm >> 3 & 7) | rex_r << 3;
+                    if modrm >> 6 == 3 {
+                        out.push(Instr::XmmCopy { dst: (modrm & 7) | rex_b << 3, src });
+                    }
+                    else {
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
+                        out.push(Instr::XmmStore { mem, src });
+                    }
+                }
+                // PXOR xmm, xmm/m128 (66 0F EF)
+                else if unsafe { JIT64_SSE } && second == 0xEF && prefix_66 {
+                    let modrm = *bytes.get(i).ok_or("truncated pxor modrm")?;
+                    i += 1;
+                    let dst = (modrm >> 3 & 7) | rex_r << 3;
+                    if modrm >> 6 == 3 {
+                        out.push(Instr::XmmXor { dst, src: (modrm & 7) | rex_b << 3 });
+                    }
+                    else {
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
+                        out.push(Instr::XmmXorMem { dst, mem });
                     }
                 }
                 else if (0x40..=0x4F).contains(&second) {
@@ -1431,9 +1481,75 @@ fn gen_memory_write(
     value: &WasmLocalI64,
     width: u8,
 ) {
+    // An MMIO write (APIC/IOAPIC) can deliver an interrupt synchronously, and
+    // the delivery pushes a frame using the register file — including RSP — so
+    // flush the resident registers first, exactly like the CPU would have them.
+    emit_registers_back(b, locals);
     b.get_local_i64(address);
     b.get_local_i64(value);
     b.const_i32(width as i32);
+    b.call_fn3_i64_i64_i32("jit64_mem_write");
+    gen_check_memory_fault(b, locals);
+    // It changed *rip and RSP: stop the block, but keep this block's register
+    // updates (RSP excepted, since the delivery already set it).
+    b.call_fn0_ret("jit64_exception_delivered");
+    b.if_void();
+    emit_registers_back_except_rsp(b, locals);
+    b.return_();
+    b.block_end();
+}
+
+// SSE2: the XMM file is in emulated memory, so 128-bit operands are pairs of
+// 64-bit halves.
+fn gen_xmm_reg_load(b: &mut WasmBuilder, r: u8, offset: u32) {
+    b.const_i32(crate::cpu::global_pointers::get_reg_xmm_addr(r) as i32);
+    b.load_aligned_i64(offset);
+}
+
+fn gen_xmm_store_half(b: &mut WasmBuilder, r: u8, value: &WasmLocalI64, offset: u32) {
+    b.const_i32(crate::cpu::global_pointers::get_reg_xmm_addr(r) as i32);
+    b.get_local_i64(value);
+    b.store_aligned_i64(offset);
+}
+
+fn gen_xmm_mem_half_read(
+    b: &mut WasmBuilder,
+    locals: &[(u8, WasmLocalI64)],
+    address: &WasmLocalI64,
+    offset: i64,
+) -> WasmLocalI64 {
+    if offset != 0 {
+        b.get_local_i64(address);
+        b.const_i64(offset);
+        b.add_i64();
+    }
+    else {
+        b.get_local_i64(address);
+    }
+    b.const_i32(64);
+    b.call_fn2_i64_i32_ret_i64("jit64_mem_read");
+    let value = b.set_new_local_i64();
+    gen_check_memory_fault(b, locals);
+    value
+}
+
+fn gen_xmm_mem_half_write(
+    b: &mut WasmBuilder,
+    locals: &[(u8, WasmLocalI64)],
+    address: &WasmLocalI64,
+    offset: i64,
+    value: &WasmLocalI64,
+) {
+    if offset != 0 {
+        b.get_local_i64(address);
+        b.const_i64(offset);
+        b.add_i64();
+    }
+    else {
+        b.get_local_i64(address);
+    }
+    b.get_local_i64(value);
+    b.const_i32(64);
     b.call_fn3_i64_i64_i32("jit64_mem_write");
     gen_check_memory_fault(b, locals);
 }
@@ -1888,16 +2004,58 @@ fn emit_registers_back(b: &mut WasmBuilder, locals: &[(u8, WasmLocalI64)]) {
     }
 }
 
+// Like emit_registers_back, but leaves RSP alone: used on the early-return path
+// after a helper delivered an exception, whose frame push already set RSP.
+fn emit_registers_back_except_rsp(b: &mut WasmBuilder, locals: &[(u8, WasmLocalI64)]) {
+    for (r, local) in locals {
+        if *r >= 16 || *r == 4 {
+            continue;
+        }
+        store_reg(b, local, *r);
+    }
+}
+
+// A register loaded inside one arm is only valid there; the other path still
+// reads its local's default 0. At the join, flush this arm's locals to memory.
+fn end_branch_arm(b: &mut WasmBuilder, locals: &mut Vec<(u8, WasmLocalI64)>, saved: usize) {
+    while locals.len() > saved
+    {
+        let (r, local) = locals.pop().unwrap();
+        if r < 16
+        {
+            store_reg(b, &local, r);
+        }
+        b.free_local_i64(local);
+    }
+}
+
 // `block_end` is where execution falls through when the block ends normally.
 fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Vec<u8> {
     let mut b = WasmBuilder::new();
     let mut locals: Vec<(u8, WasmLocalI64)> = Vec::new();
     let mut terminated = false;
 
+    // The interpreter keeps the arithmetic flags lazily computed
+    // (`flags_changed`, `last_op1`, ...); this block reads the raw flags word.
+    // Materialise them first, otherwise a block entered right after an
+    // interpreted instruction tests stale flags and mis-branches.
+    b.call_fn0("jit64_sync_flags");
+    b.call_fn0("jit64_clear_exception_flag");
+
     for (index, instr) in instrs.iter().enumerate() {
         if let Some(instruction_rip) = rips.get(index) {
             b.const_i32(PREVIOUS_RIP_ADDR);
             b.const_i64(*instruction_rip as i64);
+            b.store_aligned_i64(0);
+            // *rip is the address an interrupt taken during this instruction
+            // resumes at. Such an interrupt is delivered from inside a helper,
+            // i.e. after the instruction's effects are applied, so it must point
+            // at the *next* instruction (a stale block-start value re-executed
+            // the whole block; pointing at the current instruction double-ran
+            // its store/out/inc).
+            let resume = rips.get(index + 1).copied().unwrap_or(block_end);
+            b.const_i32(IP_ADDR);
+            b.const_i64(resume as i64);
             b.store_aligned_i64(0);
         }
         bump_instruction_counter(&mut b);
@@ -1994,6 +2152,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.shl_i32();
                 b.or_i32();
                 b.store_aligned_i32(0);
+                let saved = locals.len();
                 b.get_local(&zf);
                 b.if_void();
                 {
@@ -2005,6 +2164,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                     emit_write_reg(&mut b, &locals[di].1, &masked, width);
                     b.free_local_i64(masked);
                 }
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.else_();
                 {
                     b.get_local_i64(&locals[di].1);
@@ -2013,6 +2173,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                     emit_write_reg(&mut b, &locals[ai].1, &masked, width);
                     b.free_local_i64(masked);
                 }
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.block_end();
                 b.free_local(zf);
             },
@@ -2036,6 +2197,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.shl_i32();
                 b.or_i32();
                 b.store_aligned_i32(0);
+                let saved = locals.len();
                 b.get_local(&zf);
                 b.if_void();
                 {
@@ -2048,6 +2210,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                     gen_memory_write(&mut b, &locals, &address, &masked, width);
                     b.free_local_i64(masked);
                 }
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.else_();
                 {
                     b.get_local_i64(&current);
@@ -2056,6 +2219,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                     emit_write_reg(&mut b, &locals[ai].1, &masked, width);
                     b.free_local_i64(masked);
                 }
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.block_end();
                 b.free_local(zf);
                 b.free_local_i64(address);
@@ -2180,6 +2344,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
             Instr::CmovRegReg { code, dst, src, width } => {
                 let si = load_reg(&mut b, &mut locals, src);
                 let di = load_reg(&mut b, &mut locals, dst);
+                let saved = locals.len();
                 gen_condition(&mut b, code);
                 b.if_void();
                 b.get_local_i64(&locals[si].1);
@@ -2187,12 +2352,14 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 let value = b.set_new_local_i64();
                 emit_write_reg(&mut b, &locals[di].1, &value, width);
                 b.free_local_i64(value);
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.block_end();
             },
             Instr::CmovRegMem { code, dst, mem, width } => {
                 let address = gen_memory_address_local(&mut b, &mut locals, &mem);
                 let value = gen_memory_read(&mut b, &locals, &address, width);
                 let di = load_reg(&mut b, &mut locals, dst);
+                let saved = locals.len();
                 gen_condition(&mut b, code);
                 b.if_void();
                 b.get_local_i64(&value);
@@ -2200,6 +2367,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 let masked = b.set_new_local_i64();
                 emit_write_reg(&mut b, &locals[di].1, &masked, width);
                 b.free_local_i64(masked);
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.block_end();
                 b.free_local_i64(address);
                 b.free_local_i64(value);
@@ -2333,8 +2501,10 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.get_local_i64(&locals[ci].1);
                 b.const_i64(if width == 64 { 63 } else { 31 });
                 b.and_i64();
+                let saved = locals.len();
                 b.eqz_i64();
                 b.if_void();
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.else_();
                 b.get_local_i64(&locals[ri].1);
                 b.get_local_i64(&locals[ci].1);
@@ -2343,6 +2513,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 let result = b.set_new_local_i64();
                 emit_write_reg(&mut b, &locals[ri].1, &result, width);
                 b.free_local_i64(result);
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.block_end();
             },
             Instr::ShiftMem { kind, mem, width, count } => {
@@ -2369,8 +2540,10 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.get_local_i64(&locals[ci].1);
                 b.const_i64(if width == 64 { 63 } else { 31 });
                 b.and_i64();
+                let saved = locals.len();
                 b.eqz_i64();
                 b.if_void();
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.else_();
                 gen_memory_probe_write(&mut b, &locals, &address, width);
                 b.get_local_i64(&value);
@@ -2380,6 +2553,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 let result = b.set_new_local_i64();
                 gen_memory_write(&mut b, &locals, &address, &result, width);
                 b.free_local_i64(result);
+                end_branch_arm(&mut b, &mut locals, saved);
                 b.block_end();
                 b.free_local_i64(address);
                 b.free_local_i64(value);
@@ -2416,6 +2590,10 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.free_local_i64(value);
             },
             Instr::In { imm, width } => {
+                // The helper can deliver a #GP itself (unprivileged port I/O),
+                // which must end the block; flush first so the delivery sees the
+                // up-to-date registers.
+                emit_registers_back(&mut b, &locals);
                 match imm {
                     Some(port) => b.const_i64(port as i64),
                     None => {
@@ -2430,8 +2608,14 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 let value = b.set_new_local_i64();
                 write_reg_value(&mut b, &mut locals, 0, &value, width);
                 b.free_local_i64(value);
+                b.call_fn0_ret("jit64_exception_delivered");
+                b.if_void();
+                emit_registers_back_except_rsp(&mut b, &locals);
+                b.return_();
+                b.block_end();
             },
             Instr::Out { imm, width } => {
+                emit_registers_back(&mut b, &locals);
                 match imm {
                     Some(port) => b.const_i64(port as i64),
                     None => {
@@ -2446,6 +2630,10 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 emit_mask(&mut b, width);
                 b.const_i32(width as i32);
                 b.call_fn3_i64_i64_i32("jit64_out");
+                b.call_fn0_ret("jit64_exception_delivered");
+                b.if_void();
+                b.return_();
+                b.block_end();
             },
             Instr::Cli => {
                 b.call_fn0("jit64_cli");
@@ -2458,6 +2646,62 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 }
                 locals.clear();
                 b.call_fn0("jit64_pushfq");
+            },
+            Instr::XmmLoad { dst, mem } => {
+                let address = gen_memory_address_local(&mut b, &mut locals, &mem);
+                let lo = gen_xmm_mem_half_read(&mut b, &locals, &address, 0);
+                let hi = gen_xmm_mem_half_read(&mut b, &locals, &address, 8);
+                gen_xmm_store_half(&mut b, dst, &lo, 0);
+                gen_xmm_store_half(&mut b, dst, &hi, 8);
+                b.free_local_i64(lo);
+                b.free_local_i64(hi);
+                b.free_local_i64(address);
+            },
+            Instr::XmmStore { mem, src } => {
+                let address = gen_memory_address_local(&mut b, &mut locals, &mem);
+                gen_xmm_reg_load(&mut b, src, 0);
+                let lo = b.set_new_local_i64();
+                gen_xmm_reg_load(&mut b, src, 8);
+                let hi = b.set_new_local_i64();
+                gen_xmm_mem_half_write(&mut b, &locals, &address, 0, &lo);
+                gen_xmm_mem_half_write(&mut b, &locals, &address, 8, &hi);
+                b.free_local_i64(lo);
+                b.free_local_i64(hi);
+                b.free_local_i64(address);
+            },
+            Instr::XmmCopy { dst, src } => {
+                gen_xmm_reg_load(&mut b, src, 0);
+                let lo = b.set_new_local_i64();
+                gen_xmm_reg_load(&mut b, src, 8);
+                let hi = b.set_new_local_i64();
+                gen_xmm_store_half(&mut b, dst, &lo, 0);
+                gen_xmm_store_half(&mut b, dst, &hi, 8);
+                b.free_local_i64(lo);
+                b.free_local_i64(hi);
+            },
+            Instr::XmmXor { dst, src } => {
+                for offset in [0u32, 8] {
+                    b.const_i32(crate::cpu::global_pointers::get_reg_xmm_addr(dst) as i32);
+                    gen_xmm_reg_load(&mut b, dst, offset);
+                    gen_xmm_reg_load(&mut b, src, offset);
+                    b.xor_i64();
+                    b.store_aligned_i64(offset);
+                }
+            },
+            Instr::XmmXorMem { dst, mem } => {
+                let address = gen_memory_address_local(&mut b, &mut locals, &mem);
+                let lo = gen_xmm_mem_half_read(&mut b, &locals, &address, 0);
+                let hi = gen_xmm_mem_half_read(&mut b, &locals, &address, 8);
+                for (offset, value) in [(0u32, &lo), (8u32, &hi)] {
+                    b.const_i32(crate::cpu::global_pointers::get_reg_xmm_addr(dst) as i32);
+                    b.get_local_i64(value);
+                    gen_xmm_reg_load(&mut b, dst, offset);
+                    b.xor_i64();
+                    b.store_aligned_i64(offset);
+                }
+                b.free_local_i64(lo);
+                b.free_local_i64(hi);
+                b.free_local_i64(address);
             },
             Instr::Rdtsc => {
                 b.call_fn0_ret_i64("jit64_rdtsc");
@@ -2718,10 +2962,9 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
             },
             Instr::Hlt => {
                 gen_set_ip(&mut b, block_end);
-                b.const_i32(IN_HLT);
-                b.const_i32(1);
-                b.store_u8(0);
+                // Publish registers before entering the halted state.
                 emit_registers_back(&mut b, &locals);
+                b.call_fn0("jit64_hlt");
                 b.return_();
                 terminated = true;
             },
@@ -2747,9 +2990,82 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
 pub fn compile_block(instrs: &[Instr], block_end: u64) -> Vec<u8> {
     compile_block_with_rips(instrs, &[], block_end)
 }
+// Stable instruction-class bits for whole-block interpreter fallback.
+fn bail_class(instr: &Instr) -> u64 {
+    match instr {
+        Instr::MovRegImm { .. } | Instr::MovRegReg { .. } | Instr::MovRegMem { .. }
+        | Instr::MovMemReg { .. } | Instr::MovMemImm { .. } | Instr::MovExtendReg { .. }
+        | Instr::MovExtendMem { .. } => 1 << 0,
+        Instr::XchgRegReg { .. } | Instr::XchgMemReg { .. } => 1 << 1,
+        Instr::NotReg { .. } | Instr::NotMem { .. } | Instr::NegReg { .. } | Instr::NegMem { .. } => 1 << 2,
+        Instr::IncDecReg { .. } | Instr::IncDecMem { .. } => 1 << 3,
+        Instr::CmovRegReg { .. } | Instr::CmovRegMem { .. } => 1 << 4,
+        Instr::SetccReg { .. } | Instr::SetccMem { .. } => 1 << 5,
+        Instr::ShiftReg { .. } | Instr::ShiftRegCl { .. } | Instr::ShiftMem { .. }
+        | Instr::ShiftMemCl { .. } => 1 << 6,
+        Instr::Cpuid => 1 << 7,
+        Instr::Rdtsc => 1 << 8,
+        Instr::XmmCopy { .. } | Instr::XmmLoad { .. } | Instr::XmmStore { .. }
+        | Instr::XmmXor { .. } | Instr::XmmXorMem { .. } => 1 << 9,
+        Instr::In { .. } | Instr::Out { .. } => 1 << 10,
+        Instr::Cli => 1 << 11,
+        Instr::PushFlags => 1 << 12,
+        Instr::CmpxchgReg { .. } | Instr::CmpxchgMem { .. } => 1 << 13,
+        Instr::BitTestReg { .. } | Instr::BitTestImm { .. } => 1 << 14,
+        Instr::ImulRegReg { .. } | Instr::ImulRegImm { .. } | Instr::ImulRegMem { .. } => 1 << 15,
+        Instr::Bswap { .. } => 1 << 16,
+        Instr::Lea { .. } => 1 << 17,
+        Instr::AddRegReg { .. } | Instr::AddRegImm { .. } => 1 << 18,
+        Instr::ArithRegReg { .. } | Instr::ArithRegImm { .. } | Instr::ArithRegMem { .. }
+        | Instr::ArithMemReg { .. } | Instr::ArithMemImm { .. } => 1 << 19,
+        Instr::PushReg { .. } | Instr::PopReg { .. } | Instr::PushImm { .. } => 1 << 20,
+        Instr::Ret { .. } => 1 << 23,
+        Instr::Jcc { .. } => 1 << 24,
+        Instr::Jmp { .. } | Instr::JmpReg { .. } | Instr::JmpMem { .. } => 1 << 25,
+        Instr::Call { .. } | Instr::CallReg { .. } | Instr::CallMem { .. } => 1 << 26,
+        Instr::Leave => 1 << 27,
+        Instr::Nop => 1 << 22,
+        Instr::Hlt => 1 << 28,
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_set_bail(mask: u64) { JIT64_BAIL = mask; }
+
+#[no_mangle]
+pub unsafe fn jit64_set_bail_rip(lo: u64, hi: u64) {
+    JIT64_BAIL_RIP_LO = lo;
+    JIT64_BAIL_RIP_HI = hi;
+}
+
+#[no_mangle]
+pub unsafe fn jit64_set_bail_link(lo: u64, hi: u64) {
+    JIT64_BAIL_LINK_LO = lo;
+    JIT64_BAIL_LINK_HI = hi;
+}
 
 pub fn compile_bytes(base: u64, bytes: &[u8]) -> Result<Vec<u8>, String> {
     let decoded = decode_block_with_rips(base, bytes)?;
+    let bail = unsafe { JIT64_BAIL };
+    if bail != 0 && decoded.instrs.iter().any(|i| bail_class(i) & bail != 0) {
+        return Err("bailed".into());
+    }
+    let bail_lo = unsafe { JIT64_BAIL_RIP_LO };
+    if bail_lo != 0 && base >= bail_lo && base < unsafe { JIT64_BAIL_RIP_HI } {
+        return Err("bailed rip".into());
+    }
+    let link_lo = unsafe { JIT64_BAIL_LINK_LO };
+    if link_lo != 0 {
+        let width = unsafe { JIT64_BAIL_LINK_HI }.wrapping_sub(link_lo);
+        if base.wrapping_sub(link_lo) & 0x1F_FFFF < width {
+            return Err("bailed link".into());
+        }
+    }
+    if decoded.instrs.is_empty() {
+        // Otherwise try_run returns true forever without advancing the
+        // instruction counter, starving timers and interrupts.
+        return Err("empty block".into());
+    }
     Ok(compile_block_with_rips(
         &decoded.instrs,
         &decoded.rips,
@@ -2805,23 +3121,98 @@ use std::collections::{HashMap, HashSet};
 
 const JIT64_THRESHOLD: u32 = 500; // interpreted runs before a block is compiled
 
+// Reserved for the 32-bit JIT: it asserts when the shared table runs out.
+const JIT64_MAX_BLOCKS: usize = 3000;
+
+// Evict a quarter of the cap per trim.
+const JIT64_EVICT_BATCH: usize = JIT64_MAX_BLOCKS / 4;
+
 const COMPILE_BUF_SIZE: usize = 65536;
 static mut COMPILE_BUF: [u8; COMPILE_BUF_SIZE] = [0; COMPILE_BUF_SIZE];
 static mut JIT64_MEMORY_FAULT: u8 = 0;
 // Lets tests and benchmarks run the same code with the JIT off.
 static mut JIT64_ENABLED: bool = true;
+// SSE2 codegen remains opt-in while boot validation is incomplete.
+static mut JIT64_SSE: bool = false;
 // Dispatch counters (diagnostics; see jit64_stat).
 static mut JIT64_RUN_HITS: u64 = 0;
 static mut JIT64_RUN_MISSES: u64 = 0;
 static mut JIT64_INTERP: u64 = 0;
 static mut JIT64_COMPILES: u64 = 0;
+
+// Bisect switch: classes of instructions whose blocks are left to the
+// interpreter (see jit64_set_bail).
+static mut JIT64_BAIL: u64 = 0;
+// Leave blocks in the RIP range [lo, hi) to the interpreter.
+static mut JIT64_BAIL_RIP_LO: u64 = 0;
+static mut JIT64_BAIL_RIP_HI: u64 = 0;
+// Match a link address modulo 2 MiB (KASLR slides the kernel
+// by a 2 MiB-aligned amount, so this matches modulo 2 MiB).
+static mut JIT64_BAIL_LINK_LO: u64 = 0;
+static mut JIT64_BAIL_LINK_HI: u64 = 0;
+// Synchronous delivery marks the active block so it exits at the next helper check.
+static mut IN_JIT_BLOCK: bool = false;
+
+// Set when an exception was delivered synchronously from inside a compiled
+// block (e.g. a #GP from an unprivileged port access). The block must stop
+// immediately: the delivery changed *rip and pushed a frame on the stack, so
+// letting the rest of the block run (and write its registers back) would
+// discard the exception and leak the frame.
+static mut EXCEPTION_IN_BLOCK: bool = false;
+
+pub unsafe fn note_exception_in_block() {
+    EXCEPTION_IN_BLOCK = true;
+}
+
+#[no_mangle]
+pub unsafe fn jit64_hlt() {
+    *crate::cpu::global_pointers::in_hlt = true;
+    // Parity with the interpreter's hlt: when interrupts are enabled the main
+    // loop runs the timers and delivers a due IRQ (so don't do it here, it is
+    // far too hot); when they are not, execution can never resume and the host
+    // has to be told, exactly like instr_F4 does.
+    if *crate::cpu::global_pointers::flags & crate::cpu::cpu::FLAG_INTERRUPT == 0 {
+        crate::cpu::cpu::cpu_event_halt();
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_clear_exception_flag() { EXCEPTION_IN_BLOCK = false; }
+
+#[no_mangle]
+pub unsafe fn jit64_exception_delivered() -> u32 {
+    let v = EXCEPTION_IN_BLOCK;
+    EXCEPTION_IN_BLOCK = false;
+    v as u32
+}
+
+#[no_mangle]
+pub unsafe fn jit64_in_block() -> u32 { IN_JIT_BLOCK as u32 }
+
 static mut JIT64_COMPILE_FAILS: u64 = 0;
 static mut JIT64_FAULTS: u64 = 0;
 static mut HOTNESS: *mut HashMap<u64, u32> = std::ptr::null_mut();
-// guest RIP -> wasm table index of the compiled block
-static mut BLOCKS: *mut HashMap<u64, u16> = std::ptr::null_mut();
+// Block-cap trim request; run from try_run, outside hotness borrows.
+static mut EVICT_PENDING: bool = false;
+// Compilation order for the clock hand; stale rips are skipped lazily.
+static mut ORDER: *mut Vec<u64> = std::ptr::null_mut();
+static mut HAND: usize = 0;
+static mut LAST_VALID_PAGE: u64 = u64::MAX;
+static mut LAST_VALID_PHYS: u32 = 0;
+#[derive(Copy, Clone)]
+struct BlockInfo {
+    index: u16,
+    // Physical page it was compiled from.
+    phys_page: u32,
+    // Second-chance bit for the clock eviction below.
+    used: bool,
+}
+
+static mut BLOCKS: *mut HashMap<u64, BlockInfo> = std::ptr::null_mut();
 // physical code page -> guest RIPs compiled from it
 static mut CODE_PAGES: *mut HashMap<u32, HashSet<u64>> = std::ptr::null_mut();
+// virtual code page -> guest RIPs compiled from it (INVLPG invalidation)
+static mut VIRT_PAGES: *mut HashMap<u64, HashSet<u64>> = std::ptr::null_mut();
 
 unsafe fn user_access() -> bool { *crate::cpu::global_pointers::cpl == 3 }
 
@@ -2832,7 +3223,7 @@ unsafe fn hotness() -> &'static mut HashMap<u64, u32> {
     &mut *HOTNESS
 }
 
-unsafe fn blocks() -> &'static mut HashMap<u64, u16> {
+unsafe fn blocks() -> &'static mut HashMap<u64, BlockInfo> {
     if BLOCKS.is_null() {
         BLOCKS = Box::into_raw(Box::new(HashMap::new()));
     }
@@ -2846,14 +3237,77 @@ unsafe fn code_pages() -> &'static mut HashMap<u32, HashSet<u64>> {
     &mut *CODE_PAGES
 }
 
+unsafe fn virt_pages() -> &'static mut HashMap<u64, HashSet<u64>> {
+    if VIRT_PAGES.is_null() {
+        VIRT_PAGES = Box::into_raw(Box::new(HashMap::new()));
+    }
+    &mut *VIRT_PAGES
+}
+
+unsafe fn order() -> &'static mut Vec<u64> {
+    if ORDER.is_null() {
+        ORDER = Box::into_raw(Box::new(Vec::new()));
+    }
+    &mut *ORDER
+}
+
+// Evict the least recently used blocks (clock/second chance)
+unsafe fn evict_some(count: usize) {
+    let mut freed = 0;
+    // Bounded: one full sweep may only clear `used` bits.
+    let mut scanned = 0;
+    let limit = order().len() * 2 + 16;
+    while freed < count && scanned < limit && !order().is_empty() {
+        if HAND >= order().len() {
+            HAND = 0;
+        }
+        let rip = order()[HAND];
+        HAND += 1;
+        scanned += 1;
+        match blocks().get_mut(&rip) {
+            None => continue,
+            Some(info) if info.used =>
+            {
+                info.used = false;
+                continue;
+            },
+            Some(_) => forget(rip),
+        }
+        freed += 1;
+    }
+}
+
+// Drop one block; it can be compiled again once hot.
+unsafe fn forget(rip: u64) {
+    if let Some(info) = blocks().remove(&rip) {
+        crate::jit::jit64_free_table_index(info.index);
+    }
+    hotness().remove(&rip);
+    if !VIRT_PAGES.is_null() {
+        if let Some(rips) = virt_pages().get_mut(&(rip >> 12)) {
+            rips.remove(&rip);
+        }
+    }
+}
+
 // Does nothing if the bytes cannot be decoded yet.
 unsafe fn compile_and_register(rip: u64) {
+    // At the cap: request a trim at the next dispatch (see evict_some).
+    if blocks().len() >= JIT64_MAX_BLOCKS {
+        EVICT_PENDING = true;
+    }
     JIT64_COMPILES += 1;
+    let phys_page = match crate::cpu::cpu::translate_address_64(rip, false, false) {
+        Ok(phys) => phys >> 12,
+        Err(()) => return,
+    };
     let page_end = (rip | 0xFFF) + 1;
     let mut bytes = Vec::new();
     let mut addr = rip;
     while addr < page_end {
-        match crate::cpu::cpu::translate_address_64(addr, false, user_access()) {
+        // Translating guest code isn't fetching it: don't inherit the last CPL
+        // (compiling a kernel block right after iretq to user mode used to fault).
+        match crate::cpu::cpu::translate_address_64(addr, false, false) {
             Ok(phys) => bytes.push(crate::cpu::memory::read8(phys) as u8),
             Err(()) => break,
         }
@@ -2877,7 +3331,11 @@ unsafe fn compile_and_register(rip: u64) {
     }
     let index = match crate::jit::jit64_allocate_table_index() {
         Some(index) => index,
-        None => return,
+        None => {
+            // No slot free: re-arm hotness so the block is retried later.
+            hotness().remove(&rip);
+            return;
+        },
     };
     let len = module.len();
     std::ptr::copy_nonoverlapping(
@@ -2890,27 +3348,74 @@ unsafe fn compile_and_register(rip: u64) {
         std::ptr::addr_of_mut!(COMPILE_BUF) as *mut u8 as u32,
         len as u32,
     );
-    blocks().insert(rip, index);
-    if let Ok(phys) = crate::cpu::cpu::translate_address_64(rip, false, user_access()) {
-        code_pages().entry(phys >> 12).or_default().insert(rip);
+    blocks().insert(rip, BlockInfo { index, phys_page, used: false });
+    order().push(rip);
+    // Compact the append-only order once stale entries dominate.
+    if order().len() > blocks().len() * 4 {
+        order().clear();
+        order().extend(blocks().keys().copied());
+        HAND = 0;
     }
+    virt_pages().entry(rip >> 12).or_default().insert(rip);
+    code_pages().entry(phys_page).or_default().insert(rip);
+    // Flag as code so a guest write invalidates the block (SMC).
+    crate::cpu::cpu::tlb_set_has_code(crate::page::Page::page_of(phys_page << 12), true);
+}
+
+// Physical page backing this guest page (one-entry cache).
+unsafe fn phys_page_of(rip: u64) -> Option<u32> {
+    let virt_page = rip >> 12;
+    if virt_page == LAST_VALID_PAGE {
+        return Some(LAST_VALID_PHYS);
+    }
+    // Between instructions: a faulting walk here would corrupt guest state.
+    match crate::cpu::cpu::translate_address_64_no_side_effects(rip) {
+        Ok(phys) =>
+        {
+            LAST_VALID_PAGE = virt_page;
+            LAST_VALID_PHYS = phys >> 12;
+            Some(LAST_VALID_PHYS)
+        },
+        Err(()) => None,
+    }
+}
+
+/// A TLB flush: stop trusting the cached translation.
+pub unsafe fn note_mapping_changed() {
+    LAST_VALID_PAGE = u64::MAX;
 }
 
 pub unsafe fn try_run(rip: u64) -> bool {
     if !JIT64_ENABLED {
         return false;
     }
-    let index = match blocks().get(&rip) {
-        Some(&index) => index,
+    if EVICT_PENDING {
+        EVICT_PENDING = false;
+        evict_some(JIT64_EVICT_BATCH);
+    }
+    let info = match blocks().get_mut(&rip) {
+        Some(info) =>
+        {
+            info.used = true;
+            *info
+        },
         None =>
         {
             JIT64_RUN_MISSES += 1;
             return false;
         },
     };
+    // Stale block (its RIP maps elsewhere now): drop it.
+    if phys_page_of(rip) != Some(info.phys_page) {
+        forget(rip);
+        JIT64_RUN_MISSES += 1;
+        return false;
+    }
     JIT64_RUN_HITS += 1;
-    let indirect = index as i32 + crate::cpu::cpu::WASM_TABLE_OFFSET as i32;
+    let indirect = info.index as i32 + crate::cpu::cpu::WASM_TABLE_OFFSET as i32;
+    IN_JIT_BLOCK = true;
     wasm::call_indirect1(indirect, 0);
+    IN_JIT_BLOCK = false;
     jit64_finish_fault();
     true
 }
@@ -2923,12 +3428,14 @@ pub unsafe fn note_interpreted(rip: u64) {
         return;
     }
     JIT64_INTERP += 1;
-    let count = hotness().entry(rip).or_insert(0);
-    *count += 1;
-    // Compile exactly once. Retrying on every interpretation of a block that
-    // cannot be decoded (e.g. an unsupported opcode) is far more expensive than
-    // just leaving it in the interpreter.
-    if *count == JIT64_THRESHOLD {
+    // End the hotness borrow before compile_and_register(): it touches the map.
+    let should_compile = {
+        let count = hotness().entry(rip).or_insert(0);
+        *count += 1;
+        // Compile once; retrying an undecodable block is expensive.
+        *count == JIT64_THRESHOLD
+    };
+    if should_compile {
         compile_and_register(rip);
     }
 }
@@ -2938,13 +3445,16 @@ pub unsafe fn clear_cache() {
         hotness().clear();
     }
     if !BLOCKS.is_null() {
-        let indices: Vec<u16> = blocks().drain().map(|(_, index)| index).collect();
+        let indices: Vec<u16> = blocks().drain().map(|(_, info)| info.index).collect();
         for index in indices {
             crate::jit::jit64_free_table_index(index);
         }
     }
     if !CODE_PAGES.is_null() {
         code_pages().clear();
+    }
+    if !VIRT_PAGES.is_null() {
+        virt_pages().clear();
     }
 }
 
@@ -2958,12 +3468,21 @@ pub unsafe fn invalidate_physical_page(page: u32) {
         None => return,
     };
     for rip in rips {
-        if let Some(index) = blocks().remove(&rip) {
-            crate::jit::jit64_free_table_index(index);
-        }
-        if !HOTNESS.is_null() {
-            hotness().remove(&rip);
-        }
+        forget(rip);
+    }
+}
+
+// INVLPG: drop this virtual page's blocks (each block is one page).
+pub unsafe fn invalidate_virtual_page(vaddr: u64) {
+    if VIRT_PAGES.is_null() {
+        return;
+    }
+    let rips = match virt_pages().remove(&(vaddr >> 12)) {
+        Some(rips) => rips,
+        None => return,
+    };
+    for rip in rips {
+        forget(rip);
     }
 }
 
@@ -2991,9 +3510,21 @@ pub unsafe fn jit64_stat(index: u32) -> u64 {
 pub unsafe fn jit64_set_enabled(enabled: u32) { JIT64_ENABLED = enabled != 0; }
 
 #[no_mangle]
+pub unsafe fn jit64_set_sse(enabled: u32) { JIT64_SSE = enabled != 0; }
+
+#[no_mangle]
 pub unsafe fn jit64_clear_cache() { clear_cache(); }
 
 // u64::MAX means translation faulted; the block returns immediately.
+// Debuggers must not use jit64_translate: its failure delivers a guest #PF.
+#[no_mangle]
+pub unsafe fn jit64_debug_translate(vaddr: u64) -> u64 {
+    match crate::cpu::cpu::translate_address_64_no_side_effects(vaddr) {
+        Ok(phys) => crate::cpu::memory::mem8 as u64 + phys as u64,
+        Err(()) => u64::MAX,
+    }
+}
+
 #[no_mangle]
 pub unsafe fn jit64_translate(vaddr: u64, for_writing: u32) -> u64 {
     match crate::cpu::cpu::translate_address_64_jit(vaddr, for_writing != 0, user_access()) {
@@ -3238,12 +3769,15 @@ pub unsafe fn jit64_finish_fault() {
 #[no_mangle]
 pub unsafe fn jit64_in(port: u64, width: u32) -> u64 {
     let port = port as i32;
-    if !crate::cpu::cpu::test_privileges_for_io(port, width as i32) {
+    // `width` is in bits, as everywhere else here (the decode uses
+    // operand_width). Matching on bytes silently turned `in al, dx` into a
+    // 32-bit read.
+    if !crate::cpu::cpu::test_privileges_for_io(port, (width / 8) as i32) {
         return 0;
     }
     match width {
-        1 => crate::cpu::cpu::io_port_read8(port) as u32 as u64,
-        2 => crate::cpu::cpu::io_port_read16(port) as u16 as u64,
+        8 => crate::cpu::cpu::io_port_read8(port) as u32 as u64,
+        16 => crate::cpu::cpu::io_port_read16(port) as u16 as u64,
         _ => crate::cpu::cpu::io_port_read32(port) as u32 as u64,
     }
 }
@@ -3251,13 +3785,22 @@ pub unsafe fn jit64_in(port: u64, width: u32) -> u64 {
 #[no_mangle]
 pub unsafe fn jit64_out(port: u64, value: u64, width: u32) {
     let port = port as i32;
-    if !crate::cpu::cpu::test_privileges_for_io(port, width as i32) {
+    if !crate::cpu::cpu::test_privileges_for_io(port, (width / 8) as i32) {
         return;
     }
     match width {
-        1 => crate::cpu::cpu::io_port_write8(port, value as i32),
-        2 => crate::cpu::cpu::io_port_write16(port, value as i32),
+        8 => crate::cpu::cpu::io_port_write8(port, value as i32),
+        16 => crate::cpu::cpu::io_port_write16(port, value as i32),
         _ => crate::cpu::cpu::io_port_write32(port, value as i32),
+    }
+}
+
+// Materialise the interpreter's pending lazy flags. No-op if none are pending.
+#[no_mangle]
+pub unsafe fn jit64_sync_flags() {
+    if *crate::cpu::global_pointers::flags_changed != 0 {
+        *crate::cpu::global_pointers::flags = crate::cpu::cpu::get_eflags();
+        *crate::cpu::global_pointers::flags_changed = 0;
     }
 }
 

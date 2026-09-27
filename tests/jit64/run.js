@@ -38,7 +38,12 @@ emulator.add_listener("emulator-loaded", () => {
     const view = new DataView(memory.buffer);
 
     const module = new WebAssembly.Module(bytes);
-    const instance = new WebAssembly.Instance(module, { e: { m: memory } });
+    const instance = new WebAssembly.Instance(module, { e: {
+        m: memory,
+        jit64_sync_flags: ex.jit64_sync_flags,
+        jit64_clear_exception_flag: ex.jit64_clear_exception_flag,
+        jit64_hlt: () => view.setUint8(IN_HLT, 1),
+    } });
     instance.exports.f(0);
 
     // mov rax,0; cmp rax,1 (CF=1); inc rax preserves CF; jc +2 -> target 21

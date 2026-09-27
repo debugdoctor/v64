@@ -1029,7 +1029,9 @@ CPU.prototype.init = function(settings, device_bus)
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
-    this.acpi_enabled[0] = +settings.acpi;
+    // ACPI is always advertised (see kernel.js), so route IRQs via the IO-APIC
+    // by default. cf. ACPI 6.5, 5.2.12 (MADT).
+    this.acpi_enabled[0] = settings.acpi === undefined ? 1 : +settings.acpi;
 
     this.reset_cpu();
 
@@ -1797,7 +1799,9 @@ CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, 
     ptr >>>= 0;
     len >>>= 0;
 
-    dbg_assert(wasm_table_index >= 0 && wasm_table_index < WASM_TABLE_SIZE);
+    dbg_assert(wasm_table_index >= 0 && wasm_table_index < WASM_TABLE_SIZE,
+        "JIT table index " + wasm_table_index + " >= WASM_TABLE_SIZE " + WASM_TABLE_SIZE +
+        ": the loaded JS (const.js) and v64.wasm are from different builds - hard-refresh the page");
 
     const code = new Uint8Array(this.wasm_memory.buffer, ptr, len);
 

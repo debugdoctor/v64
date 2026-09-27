@@ -20,7 +20,7 @@ pub const long_mode: *mut bool = 225 as *mut bool; // EFER.LMA
 pub const rip: *mut u64 = 232 as *mut u64;
 pub const previous_rip: *mut u64 = 240 as *mut u64;
 
-pub const exception_in_progress: *mut bool = 248 as *mut bool; // avoid recursing during delivery
+pub const exception_in_progress: *mut u8 = 248 as *mut u8; // 0 = none, 1 = delivering, 2 = delivering #DF
 
 pub const last_op_size: *mut i32 = 96 as *mut i32;
 pub const flags_changed: *mut i32 = 100 as *mut i32;
@@ -70,6 +70,26 @@ pub const fpu_stack_empty: *mut u8 = 816 as *mut u8;
 pub const mxcsr: *mut i32 = 824 as *mut i32;
 
 pub const reg_xmm: *mut reg128 = 832 as *mut reg128;
+
+// xmm8-15 exist only in long mode. reg_xmm holds only 8 entries; from entry 8
+// on it would run into current_tsc/reg_pdpte/fpu state/cr2/efer/star, so the
+// high half gets its own storage. Must stay 16-byte aligned: reg128 is 16 bytes
+// and an unaligned dereference trips Rust's misalignment check.
+#[repr(align(16))]
+struct XmmHigh([u64; 16]);
+
+static mut XMM_HIGH: XmmHigh = XmmHigh([0; 16]);
+
+#[inline]
+pub unsafe fn xmm_ptr(r: i32) -> *mut reg128 {
+    if r < 8 {
+        reg_xmm.offset(r as isize)
+    }
+    else {
+        (std::ptr::addr_of_mut!(XMM_HIGH.0) as *mut u64)
+            .add((r as usize - 8) * 2) as *mut reg128
+    }
+}
 pub const current_tsc: *mut u64 = 960 as *mut u64;
 
 pub const reg_pdpte: *mut u64 = 968 as *mut u64; // 4 64-bit entries
@@ -96,9 +116,17 @@ pub const kernel_gs_base: *mut u64 = 1120 as *mut u64;
 
 pub const tss_size_32: *mut bool = 1128 as *mut bool;
 
+// Full 64-bit TSS base in long mode: a 64-bit system descriptor carries
+// base[63:32] in its upper doubleword, and the kernel maps the TSS into the
+// KPTI cpu_entry_area (above 4 GiB). segment_offsets[TR] keeps the low 32 bits.
+pub static mut TSS_BASE: u64 = 0;
+
 // Full 64-bit IDT/GDT base in long mode; the *_offset fields keep the low 32 bits.
-pub const idtr_base: *mut u64 = 1240 as *mut u64;
-pub const gdtr_base: *mut u64 = 1248 as *mut u64;
+// Statics, not zero-page offsets: fpu_st (1152, 8x16-byte F80) covers
+// [1152, 1280), so the old 1240/1248 slots sat inside st(5)/st(6) and x87
+// writes clobbered the bases, breaking later interrupt delivery.
+pub static mut IDTR_BASE: u64 = 0;
+pub static mut GDTR_BASE: u64 = 0;
 
 pub const sse_scratch_register: *mut reg128 = 1136 as *mut reg128;
 
@@ -122,6 +150,11 @@ pub fn get_reg_mmx_offset(r: u32) -> u32 {
 pub fn get_reg_xmm_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);
     (unsafe { reg_xmm.offset(r as isize) }) as u32
+}
+
+// Also for xmm8-15, which live in XMM_HIGH (long mode).
+pub fn get_reg_xmm_addr(r: u8) -> u32 {
+    unsafe { xmm_ptr(r as i32) as u32 }
 }
 
 pub fn get_sreg_offset(s: u32) -> u32 {

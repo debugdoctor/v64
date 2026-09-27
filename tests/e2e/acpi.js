@@ -126,8 +126,21 @@ emulator.add_listener("emulator-loaded", () => {
     const DSDT = 0xF0300;
     assert.equal(read32(FADT), 0x50434146, "FADT signature \"FACP\"");
     assert.equal(read32(FADT + 0x28), DSDT, "FADT DSDT pointer");
-    assert.equal(read32(FADT + 0x70), 1 << 20, "FADT flags: hardware-reduced ACPI");
+    // A normal PC FADT. Declaring hardware-reduced ACPI (1 << 20) instead makes
+    // the kernel install null_legacy_pic, drop nr_legacy_irqs() to 0 and fail
+    // every request_irq() - which leaves the serial tty unusable.
+    assert.equal(read32(FADT + 0x70), 0, "FADT flags: not hardware-reduced");
+    assert.equal(read32(FADT + 0x6D) & 0xFFFF, 1, "FADT IA-PC boot arch: legacy devices");
+    assert.equal(read32(FADT + 0x30), 0, "FADT SMI_CMD: zero, so ACPI is already on");
+    assert.equal(ex.read8(FADT + 0x34), 0, "FADT ACPI_ENABLE");
+    assert.equal(ex.read8(FADT + 0x35), 0, "FADT ACPI_DISABLE");
+    assert.equal(read32(FADT + 0x38), 0xB000, "FADT PM1a_EVT_BLK");
+    assert.equal(read32(FADT + 0x40), 0xB004, "FADT PM1a_CNT_BLK");
+    assert.equal(read32(FADT + 0x4C), 0xB008, "FADT PM_TMR_BLK");
+    assert.equal(ex.read8(FADT + 0x58), 4, "FADT PM1_EVT_LEN");
+    assert.equal(ex.read8(FADT + 0x59), 2, "FADT PM1_CNT_LEN");
     assert.equal(read64(FADT + 0x8C), BigInt(DSDT), "FADT X_DSDT");
+    assert.equal(read64(FADT + 0xAC + 4), BigInt(0xB004), "FADT X_PM1a_CNT_BLK");
     assert.equal(read32(DSDT), 0x54445344, "DSDT signature");
 
     console.log("e2e acpi: test passed");

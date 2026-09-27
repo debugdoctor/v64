@@ -21,6 +21,8 @@ const PD = 0x12000;
 const PT = 0x13000;
 const ITERATIONS = 600;
 const CASES = +process.env.JIT64_DIFF_CASES || 40;
+// JIT64_DIFF_ONLY=n: use only the last n pool entries (the newest additions)
+const ONLY = +process.env.JIT64_DIFF_ONLY || 0;
 
 // Defined for every instruction in the pool.
 const FLAG_MASK = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7); // CF, PF, ZF, SF
@@ -81,7 +83,33 @@ const POOL = [
     [0x48, 0x0F, 0xB1, 0xCB], // cmpxchg rbx, rcx
     [0x0F, 0xB1, 0xC3], // cmpxchg ebx, eax
     [0x0F, 0xB0, 0xC3], // cmpxchg bl, al
+    [0xC0, 0xE3, 0x03], // shl bl, 3
+    [0xC0, 0xEB, 0x07], // shr bl, 7
+    [0xD0, 0xC8], // ror al, 1
+    [0xD2, 0xD0], // rcl al, cl
+    [0x48, 0x0F, 0xBC, 0xC3], // bsf rax, rbx
+    [0x48, 0x0F, 0xBD, 0xC3], // bsr rax, rbx
+    [0xF3, 0x0F, 0xBC, 0xC3], // rep bsf (TZCNT on a BMI1 CPU)
+    [0x0F, 0xBC, 0xC8], // bsf ecx, eax
+    [0x48, 0x98], // cdqe
+    [0x66, 0x98], // cbw
+    [0x48, 0x8C, 0xD8], // mov rax, ds
+    [0x41, 0x0F, 0xB6, 0x47, 0x08], // movzx eax, byte [r15+8]
+    [0xF3, 0x41, 0x0F, 0x6F, 0x07], // movdqu xmm0, [r15]
+    [0xF3, 0x41, 0x0F, 0x7F, 0x07], // movdqu [r15], xmm0
+    [0x66, 0x0F, 0x6F, 0xC8], // movdqa xmm1, xmm0
+    [0x66, 0x0F, 0xEF, 0xC1], // pxor xmm0, xmm1
+    [0x66, 0x41, 0x0F, 0xEF, 0x07], // pxor xmm0, [r15]
 ];
+if(ONLY)
+{
+    POOL.splice(0, Math.max(0, POOL.length - ONLY));
+}
+const SKIP = +process.env.JIT64_DIFF_SKIP || 0;
+if(SKIP)
+{
+    POOL.splice(POOL.length - SKIP, SKIP);
+}
 
 const emulator = new v64({
     autostart: false,
@@ -141,14 +169,14 @@ emulator.add_listener("emulator-loaded", () => {
             ? (BigInt(u32[32 + i]) << 32n) | BigInt(u32[16 + i])
             : ext[i - 8];
 
-    const build_program = random => {
+    const build_program = (random, iterations = ITERATIONS, bodyLimit = 0) => {
         const body = [];
-        const count = 12 + Math.floor(random() * 13);
+        const count = bodyLimit || 12 + Math.floor(random() * 13);
         for(let i = 0; i < count; i++)
         {
             body.push(...POOL[Math.floor(random() * POOL.length)]);
         }
-        const prefix = [0x41, 0xBC, ITERATIONS & 0xFF, ITERATIONS >> 8 & 0xFF, ITERATIONS >> 16 & 0xFF, ITERATIONS >> 24 & 0xFF];
+        const prefix = [0x41, 0xBC, iterations & 0xFF, iterations >> 8 & 0xFF, iterations >> 16 & 0xFF, iterations >> 24 & 0xFF];
         const jnz_at = prefix.length + body.length + 3; // + dec r12d
         const rel = prefix.length - (jnz_at + 6);
         const suffix = [
@@ -158,6 +186,70 @@ emulator.add_listener("emulator-loaded", () => {
         ];
         return prefix.concat(body, suffix);
     };
+
+    const wrap_body = (body, iterations = ITERATIONS) => {
+        const prefix = [0x41, 0xBC, iterations & 0xFF, iterations >> 8 & 0xFF, iterations >> 16 & 0xFF, iterations >> 24 & 0xFF];
+        const jnz_at = prefix.length + body.length + 3;
+        const rel = prefix.length - (jnz_at + 6);
+        const suffix = [
+            0x41, 0xFF, 0xCC, // dec r12d
+            0x0F, 0x85, rel & 0xFF, rel >> 8 & 0xFF, rel >> 16 & 0xFF, rel >> 24 & 0xFF,
+            0xF4, // hlt
+        ];
+        return prefix.concat(body, suffix);
+    };
+
+    // Fixed sequences the random pool only reaches by chance.
+    const FIXED = [
+        {
+            name: "cmpxchg + cmove + add [r15+16],rax + bt + imul",
+            body: [
+                0x48, 0x0F, 0x44, 0xC3, // cmove rax, rbx
+                0x48, 0x0F, 0xB1, 0xCB, // cmpxchg rbx, rcx
+                0x49, 0x01, 0x47, 0x10, // add [r15+16], rax
+                0x48, 0x0F, 0xA3, 0xD8, // bt rax, rbx
+                0x48, 0x0F, 0xAF, 0xC3, // imul rax, rbx
+            ],
+        },
+        {
+            name: "lock cmpxchg rax,rbx + add [r15+8],rax",
+            body: [
+                0xF0, 0x48, 0x0F, 0xB1, 0xD8, // lock cmpxchg rax, rbx
+                0x49, 0x01, 0x47, 0x08, // add [r15+8], rax
+            ],
+        },
+        {
+            name: "SSE2: movdqu/movdqa/pxor round-trip",
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07, // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0xEF, 0xC1, // pxor xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x07, // movdqu [r15], xmm0
+                0x66, 0x0F, 0x6F, 0xD0, // movdqa xmm2, xmm0
+                0x66, 0x41, 0x0F, 0xEF, 0x57, 0x10, // pxor xmm2, [r15+16]
+                0x66, 0x41, 0x0F, 0x7F, 0x57, 0x10, // movdqa [r15+16], xmm2
+            ],
+        },
+        {
+            name: "SSE2: xmm8-15 (REX.R/B) round-trip",
+            body: [
+                0xF3, 0x44, 0x0F, 0x6F, 0x07, // movdqu xmm8, [r15]
+                0xF3, 0x45, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm9, [r15+16]
+                0x66, 0x45, 0x0F, 0xEF, 0xC8, // pxor xmm9, xmm8
+                0x66, 0x45, 0x0F, 0x6F, 0xD1, // movdqa xmm10, xmm9
+                0xF3, 0x44, 0x0F, 0x7F, 0x07, // movdqu [r15], xmm8
+                0xF3, 0x45, 0x0F, 0x7F, 0x57, 0x10, // movdqu [r15+16], xmm10
+            ],
+        },
+        {
+            name: "cmpxchg ebx,eax + setcc + cmovne",
+            body: [
+                0x0F, 0xB1, 0xC3, // cmpxchg ebx, eax
+                0x0F, 0x94, 0xC0, // sete al
+                0x48, 0x0F, 0x45, 0xCA, // cmovne rcx, rdx
+            ],
+        },
+    ];
 
     const seed_regs = random => {
         const regs = new Array(16).fill(0n);
@@ -170,6 +262,7 @@ emulator.add_listener("emulator-loaded", () => {
 
     const run = (program, regs, memory, jitEnabled) => {
         ex.jit64_set_enabled(jitEnabled ? 1 : 0);
+        ex.jit64_set_sse(1); // exercises the SSE2 codegen
         ex.jit64_clear_cache();
         for(let i = 0; i < program.length; i++) ex.write8(BASE + i, program[i]);
         for(let i = 0; i < 16; i++) set_reg64(i, regs[i]);
@@ -197,6 +290,172 @@ emulator.add_listener("emulator-loaded", () => {
             memory: Array.from({ length: memory.length }, (_, i) => ex.read8(SCRATCH + i)),
         };
     };
+
+    // Run exactly n instructions with the given engine, for bisecting a
+    // mismatch down to the instruction that first diverges.
+    const step = (program, regs, memory, jitEnabled, n) => {
+        ex.jit64_set_enabled(jitEnabled ? 1 : 0);
+        ex.jit64_set_sse(1); // exercises the SSE2 codegen
+        ex.jit64_clear_cache();
+        for(let i = 0; i < program.length; i++) ex.write8(BASE + i, program[i]);
+        for(let i = 0; i < 16; i++) set_reg64(i, regs[i]);
+        set_reg64(12, 0n);
+        set_reg64(15, BigInt(SCRATCH));
+        for(let i = 0; i < memory.length; i++) ex.write8(SCRATCH + i, memory[i]);
+        cpu.instruction_pointer[0] = BASE;
+        cpu.flags[0] = 0x2;
+        cpu.in_hlt[0] = 0;
+        ex.enter_long_mode(PML4);
+        const before = cpu.instruction_pointer[0] >>> 0;
+        ex.run_exact_instructions(n);
+        return {
+            rip: cpu.instruction_pointer[0] >>> 0,
+            before,
+            regs: Array.from({ length: 16 }, (_, i) => reg64(i)),
+            flags: cpu.flags[0] >>> 0,
+            memory: Array.from({ length: memory.length }, (_, i) => ex.read8(SCRATCH + i)),
+        };
+    };
+
+    // Find the smallest loop count for which the two engines disagree. The
+    // count is a property of the program itself, so this is engine
+    // independent, unlike counting instructions (the JIT counts per block).
+    const localize = (seed, same_final) =>
+    {
+        for(let k = 1; k <= ITERATIONS; k++)
+        {
+            const random = rng(seed);
+            const program = build_program(random, k);
+            const regs = seed_regs(random);
+            const memory = Array.from({ length: 32 }, () => Math.floor(random() * 256));
+            const interpreted = run(program, regs, memory, false);
+            const compiled = run(program, regs, memory, true);
+            const problems = [];
+            if(!interpreted.halted) problems.push("interp did not halt");
+            if(!compiled.halted) problems.push("jit did not halt");
+            if(problems.length === 0)
+            {
+                for(let i = 0; i < 16; i++)
+                {
+                    // r12 is the loop counter, exclude it from the comparison
+                    if(i !== 12 && interpreted.regs[i] !== compiled.regs[i])
+                    {
+                        problems.push("r" + i + ": interp 0x" + interpreted.regs[i].toString(16) +
+                            " vs jit 0x" + compiled.regs[i].toString(16));
+                    }
+                }
+                if(interpreted.flags !== compiled.flags)
+                {
+                    problems.push("flags: interp 0x" + interpreted.flags.toString(16) +
+                        " vs jit 0x" + compiled.flags.toString(16));
+                }
+                for(let i = 0; i < memory.length; i++)
+                {
+                    if(interpreted.memory[i] !== compiled.memory[i])
+                    {
+                        problems.push("mem+" + i);
+                    }
+                }
+            }
+            if(problems.length)
+            {
+                console.log("  smallest diverging loop count = " + k + ": " + problems.join(", "));
+                // shrink the body: the smallest prefix of the body that still
+                // diverges ends with the offending instruction
+                const bodyCount = 12 + Math.floor(rng(seed)() * 13);
+                let last = bodyCount;
+                for(let m = 1; m <= bodyCount; m++)
+                {
+                    const r3 = rng(seed);
+                    const p3 = build_program(r3, ITERATIONS, m);
+                    const regs3 = seed_regs(r3);
+                    const mem3 = Array.from({ length: 32 }, () => Math.floor(r3() * 256));
+                    const a3 = run(p3, regs3, mem3, false);
+                    const b3 = run(p3, regs3, mem3, true);
+                    const differ = !a3.halted || !b3.halted ||
+                        a3.flags !== b3.flags ||
+                        a3.regs.some((v, i) => i !== 12 && v !== b3.regs[i]) ||
+                        a3.memory.some((v, i) => v !== b3.memory[i]);
+                    if(differ)
+                    {
+                        last = m;
+                        console.log("    minimal diverging body = first " + m + " instruction(s)" +
+                            " of " + bodyCount);
+                        console.log("      bytes: [" + p3.slice(6, 6 + 40).join(", ") + "]");
+                        break;
+                    }
+                }
+                return k;
+            }
+        }
+        console.log("  (no diverging loop count up to " + ITERATIONS + ")");
+        return -1;
+    };
+
+    let fixed_failures = 0;
+    for(const test of FIXED)
+    {
+        const program = wrap_body(test.body);
+        const random = rng(12345);
+        const regs = seed_regs(random);
+        const memory = Array.from({ length: 32 }, () => Math.floor(random() * 256));
+        const interpreted = run(program, regs, memory, false);
+        const compiled = run(program, regs, memory, true);
+        const differ = !interpreted.halted || !compiled.halted ||
+            interpreted.flags !== compiled.flags ||
+            interpreted.regs.some((v, i) => v !== compiled.regs[i]) ||
+            interpreted.memory.some((v, i) => v !== compiled.memory[i]);
+        if(differ)
+        {
+            fixed_failures++;
+            console.log("FAIL fixed: " + test.name);
+            for(let i = 0; i < 16; i++)
+            {
+                if(interpreted.regs[i] !== compiled.regs[i])
+                {
+                    console.log("    r" + i + ": interp 0x" + interpreted.regs[i].toString(16) +
+                        " vs jit 0x" + compiled.regs[i].toString(16));
+                }
+            }
+            console.log("    flags: interp 0x" + interpreted.flags.toString(16) +
+                " vs jit 0x" + compiled.flags.toString(16));
+            // shrink: which prefix of the sequence already diverges?
+            const lens = [4, 8, 12, 16, 20];
+            for(const len of lens)
+            {
+                if(len > test.body.length)
+                {
+                    continue;
+                }
+                const p2 = wrap_body(test.body.slice(0, len));
+                const a2 = run(p2, regs, memory, false);
+                const b2 = run(p2, regs, memory, true);
+                const d2 = !a2.halted || !b2.halted ||
+                    a2.regs.some((v, i) => v !== b2.regs[i]) ||
+                    a2.memory.some((v, i) => v !== b2.memory[i]);
+                console.log("    first " + len + " byte(s): " + (d2 ? "DIVERGES" : "ok"));
+                if(d2)
+                {
+                    for(let i = 0; i < 16; i++)
+                    {
+                        if(a2.regs[i] !== b2.regs[i])
+                        {
+                            console.log("      r" + i + ": interp 0x" + a2.regs[i].toString(16) +
+                                " vs jit 0x" + b2.regs[i].toString(16));
+                        }
+                    }
+                    break;
+                }
+            }
+            for(let i = 0; i < memory.length; i++)
+            {
+                if(interpreted.memory[i] !== compiled.memory[i])
+                {
+                    console.log("    mem+" + i + ": interp " + interpreted.memory[i] + " vs jit " + compiled.memory[i]);
+                }
+            }
+        }
+    }
 
     let compiled_any = false;
     let mismatches = 0;
@@ -241,6 +500,7 @@ emulator.add_listener("emulator-loaded", () => {
             console.log("FAIL seed " + seed + ": " + problems[0]);
             for(const problem of problems.slice(1)) console.log("     " + problem);
             console.log("     program: [" + program.join(", ") + "]");
+            localize(seed);
         }
     }
 

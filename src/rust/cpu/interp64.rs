@@ -39,6 +39,7 @@ const MSR_STAR: i32 = 0xC0000081u32 as i32;
 const MSR_LSTAR: i32 = 0xC0000082u32 as i32;
 const MSR_SFMASK: i32 = 0xC0000084u32 as i32;
 const MSR_FS_BASE: i32 = 0xC0000100u32 as i32;
+const MSR_TSC_DEADLINE: i32 = 0x6E0;
 const MSR_GS_BASE: i32 = 0xC0000101u32 as i32;
 const MSR_KERNEL_GS_BASE: i32 = 0xC0000102u32 as i32;
 
@@ -105,6 +106,8 @@ struct Prefixes {
 impl Prefixes {
     fn has_rex(&self) -> bool { self.rex != 0 }
 
+    fn has_rex_w(&self) -> bool { self.rex & prefix::REX_W != 0 }
+
     fn operand_size(&self) -> OpSize {
         if self.rex & prefix::REX_W != 0 {
             OpSize::S64
@@ -133,17 +136,35 @@ unsafe fn fetch8() -> OrPageFault<u8> {
 }
 
 unsafe fn fetch16() -> OrPageFault<u16> {
-    let phys = translate_address_64(*rip, false, *cpl == 3)?;
-    let value = memory::read16(phys) as u16;
-    *rip = (*rip).wrapping_add(2);
-    Ok(value)
+    let address = *rip;
+    // Don't fetch past the page end: the next physical page is not the next
+    // virtual one. cf. Intel SDM Vol. 1, 3.2.1 (words don't straddle pages).
+    if (address as usize & 0xFFF) + 2 <= 0x1000 {
+        let phys = translate_address_64(address, false, *cpl == 3)?;
+        let value = memory::read16(phys) as u16;
+        *rip = address.wrapping_add(2);
+        Ok(value)
+    }
+    else {
+        let low = fetch8()? as u16;
+        let high = fetch8()? as u16;
+        Ok(low | high << 8)
+    }
 }
 
 unsafe fn fetch32() -> OrPageFault<u32> {
-    let phys = translate_address_64(*rip, false, *cpl == 3)?;
-    let value = memory::read32s(phys) as u32;
-    *rip = (*rip).wrapping_add(4);
-    Ok(value)
+    let address = *rip;
+    if (address as usize & 0xFFF) + 4 <= 0x1000 {
+        let phys = translate_address_64(address, false, *cpl == 3)?;
+        let value = memory::read32s(phys) as u32;
+        *rip = address.wrapping_add(4);
+        Ok(value)
+    }
+    else {
+        let low = fetch16()? as u32;
+        let high = fetch16()? as u32;
+        Ok(low | high << 16)
+    }
 }
 
 unsafe fn fetch64() -> OrPageFault<u64> {
@@ -261,21 +282,28 @@ unsafe fn msr_read(index: i32) -> Option<u64> {
         MSR_FS_BASE => Some(*fs_base),
         MSR_GS_BASE => Some(*gs_base),
         MSR_KERNEL_GS_BASE => Some(*kernel_gs_base),
-        // IA32_APIC_BASE: the base is fixed, only the enable bit changes
-        0x1B => Some(APIC_MEM_ADDRESS as u64 | if *apic_enabled { 0x800 } else { 0 }),
+        // IA32_APIC_BASE: the base is fixed; the enable bit changes and this
+        // single CPU is the bootstrap processor (bit 8).
+        0x1B => Some(
+            APIC_MEM_ADDRESS as u64 | 0x100 | if *apic_enabled { 0x800 } else { 0 }
+        ),
         _ => None,
     }
 }
 
 unsafe fn msr_write(index: i32, value: u64) -> bool {
     match index {
-        MSR_EFER => *efer = value | EFER_LMA,
+        MSR_EFER => {
+            *efer = value | EFER_LMA
+        },
         MSR_STAR => *star = value,
         MSR_LSTAR => *lstar = value,
         MSR_SFMASK => *sfmask = value,
         MSR_FS_BASE => *fs_base = value,
         MSR_GS_BASE => *gs_base = value,
         MSR_KERNEL_GS_BASE => *kernel_gs_base = value,
+        // IA32_TSC_DEADLINE: arms the local APIC's TSC-deadline one-shot timer
+        MSR_TSC_DEADLINE => crate::cpu::apic::set_tsc_deadline(value),
         _ => return false,
     }
     true
@@ -294,14 +322,32 @@ unsafe fn set_zf(value: bool) {
 // Load TR from its GDT descriptor so the IST path can find the TSS.
 unsafe fn load_tss(selector: u16) {
     let index = (selector >> 3) as u32;
-    let base = (*gdtr_offset as u32).wrapping_add(index * 8);
+    // The GDT can sit above 4 GiB (KPTI cpu_entry_area), so translate the full base.
+    let base = if GDTR_BASE != 0
+    {
+        match crate::cpu::cpu::translate_address_system_read64(GDTR_BASE + index as u64 * 8)
+        {
+            Ok(phys) => phys,
+            Err(_) => return,
+        }
+    }
+    else
+    {
+        (*gdtr_offset as u32).wrapping_add(index * 8)
+    };
     let low = memory::read32s(base) as u32;
     let high = memory::read32s(base + 4) as u32;
-    let seg_base = (low >> 16 & 0xFFFF) | (high & 0xFF) << 16 | (high >> 24 & 0xFF) << 24;
+    // base[63:32] lives in the descriptor's upper doubleword; the kernel puts
+    // the TSS in the KPTI cpu_entry_area, so the base does not fit in 32 bits.
+    let seg_base = ((low >> 16 & 0xFFFF) as u64)
+        | (((high & 0xFF) as u64) << 16)
+        | (((high >> 24 & 0xFF) as u64) << 24)
+        | ((memory::read32s(base + 8) as u32 as u64) << 32);
     let limit = (low & 0xFFFF) | (high >> 16 & 0xF) << 16;
     *segment_offsets.offset(6) = seg_base as i32;
     *segment_limits.offset(6) = limit;
     *tss_size_32 = false;
+    TSS_BASE = seg_base;
 }
 
 unsafe fn selector_valid(selector: u16) -> bool {
@@ -491,8 +537,8 @@ enum AluOp {
 
 // ---- SSE / SSE2 ----
 
-unsafe fn xmm_get(r: u8) -> reg128 { *reg_xmm.offset(r as isize) }
-unsafe fn xmm_set(r: u8, value: reg128) { *reg_xmm.offset(r as isize) = value; }
+unsafe fn xmm_get(r: u8) -> reg128 { *xmm_ptr(r as i32) }
+unsafe fn xmm_set(r: u8, value: reg128) { *xmm_ptr(r as i32) = value; }
 
 unsafe fn mem_read128(address: u64) -> OrPageFault<reg128> {
     let low = mem_read(address, OpSize::S64)?;
@@ -514,9 +560,811 @@ unsafe fn sse_read(operand: Operand) -> OrPageFault<reg128> {
 }
 
 // Returns true if `opcode` was an SSE instruction.
+// SSE2 packed integer, lane-wise (0F D0-0xFF and part of 0x60-0x7F).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/paddb
+unsafe fn sse_int(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let mut dst = xmm_get(modrm.reg);
+    match opcode {
+        // 8-bit lanes
+        0xFC => for i in 0..16 { dst.u8[i] = dst.u8[i].wrapping_add(src.u8[i]); },
+        0xF8 => for i in 0..16 { dst.u8[i] = dst.u8[i].wrapping_sub(src.u8[i]); },
+        0xEC => for i in 0..16 { dst.i8[i] = dst.i8[i].saturating_add(src.i8[i]); },
+        0xE8 => for i in 0..16 { dst.i8[i] = dst.i8[i].saturating_sub(src.i8[i]); },
+        0xDC => for i in 0..16 { dst.u8[i] = dst.u8[i].saturating_add(src.u8[i]); },
+        0xD8 => for i in 0..16 { dst.u8[i] = dst.u8[i].saturating_sub(src.u8[i]); },
+        0x74 => for i in 0..16 { dst.u8[i] = if dst.u8[i] == src.u8[i] { 0xFF } else { 0 }; },
+        0x64 => for i in 0..16 { dst.u8[i] = if dst.i8[i] > src.i8[i] { 0xFF } else { 0 }; },
+        0xDA => for i in 0..16 { dst.u8[i] = dst.u8[i].min(src.u8[i]); },
+        0xDE => for i in 0..16 { dst.u8[i] = dst.u8[i].max(src.u8[i]); },
+
+        // 16-bit lanes
+        0xFD => for i in 0..8 { dst.u16[i] = dst.u16[i].wrapping_add(src.u16[i]); },
+        0xF9 => for i in 0..8 { dst.u16[i] = dst.u16[i].wrapping_sub(src.u16[i]); },
+        0xED => for i in 0..8 { dst.i16[i] = dst.i16[i].saturating_add(src.i16[i]); },
+        0xE9 => for i in 0..8 { dst.i16[i] = dst.i16[i].saturating_sub(src.i16[i]); },
+        0xDD => for i in 0..8 { dst.u16[i] = dst.u16[i].saturating_add(src.u16[i]); },
+        0xD9 => for i in 0..8 { dst.u16[i] = dst.u16[i].saturating_sub(src.u16[i]); },
+        0x75 => for i in 0..8 { dst.u16[i] = if dst.u16[i] == src.u16[i] { 0xFFFF } else { 0 }; },
+        0x65 => for i in 0..8 { dst.u16[i] = if dst.i16[i] > src.i16[i] { 0xFFFF } else { 0 }; },
+        0xEA => for i in 0..8 { dst.i16[i] = dst.i16[i].min(src.i16[i]); },
+        0xEE => for i in 0..8 { dst.i16[i] = dst.i16[i].max(src.i16[i]); },
+        0xD5 => for i in 0..8 { dst.u16[i] = dst.u16[i].wrapping_mul(src.u16[i]); },
+        0xE5 => for i in 0..8 { dst.u16[i] = ((dst.i16[i] as i32 * src.i16[i] as i32) >> 16) as u16; },
+        0xE4 => for i in 0..8 { dst.u16[i] = ((dst.u16[i] as u32 * src.u16[i] as u32) >> 16) as u16; },
+        0xF5 => for i in 0..4 {
+            dst.i32[i] = (dst.i16[i * 2] as i32 * src.i16[i * 2] as i32)
+                .wrapping_add(dst.i16[i * 2 + 1] as i32 * src.i16[i * 2 + 1] as i32);
+        },
+
+        // 32-bit lanes
+        0xFE => for i in 0..4 { dst.u32[i] = dst.u32[i].wrapping_add(src.u32[i]); },
+        0xFA => for i in 0..4 { dst.u32[i] = dst.u32[i].wrapping_sub(src.u32[i]); },
+        0x76 => for i in 0..4 { dst.u32[i] = if dst.u32[i] == src.u32[i] { !0 } else { 0 }; },
+        0x66 => for i in 0..4 { dst.u32[i] = if dst.i32[i] > src.i32[i] { !0 } else { 0 }; },
+
+        // 64-bit lanes and bitwise
+        0xD4 => for i in 0..2 { dst.u64[i] = dst.u64[i].wrapping_add(src.u64[i]); },
+        0xFB => for i in 0..2 { dst.u64[i] = dst.u64[i].wrapping_sub(src.u64[i]); },
+        0xDB => for i in 0..2 { dst.u64[i] &= src.u64[i]; },
+        0xDF => for i in 0..2 { dst.u64[i] = !dst.u64[i] & src.u64[i]; },
+        0xEB => for i in 0..2 { dst.u64[i] |= src.u64[i]; },
+        0xEF => for i in 0..2 { dst.u64[i] ^= src.u64[i]; },
+
+        // unpack low/high
+        0x60 => { let mut r = dst; for i in 0..8 { r.u16[i] = dst.u8[i] as u16 | (src.u8[i] as u16) << 8; } dst = r; },
+        0x68 => { let mut r = dst; for i in 0..8 { r.u16[i] = dst.u8[i + 8] as u16 | (src.u8[i + 8] as u16) << 8; } dst = r; },
+        0x61 => { let mut r = dst; for i in 0..4 { r.u32[i] = dst.u16[i] as u32 | (src.u16[i] as u32) << 16; } dst = r; },
+        0x69 => { let mut r = dst; for i in 0..4 { r.u32[i] = dst.u16[i + 4] as u32 | (src.u16[i + 4] as u32) << 16; } dst = r; },
+        0x62 => { let mut r = dst; for i in 0..2 { r.u64[i] = dst.u32[i] as u64 | (src.u32[i] as u64) << 32; } dst = r; },
+        0x6A => { let mut r = dst; for i in 0..2 { r.u64[i] = dst.u32[i + 2] as u64 | (src.u32[i + 2] as u64) << 32; } dst = r; },
+        0x6C => { dst.u64[1] = src.u64[0]; },
+        0x6D => { dst.u64[0] = dst.u64[1]; dst.u64[1] = src.u64[1]; },
+
+        // pack with signed/unsigned saturation
+        0x63 => { let mut r = dst; for i in 0..8 {
+            r.i8[i] = dst.i16[i].clamp(-128, 127) as i8;
+            r.i8[i + 8] = src.i16[i].clamp(-128, 127) as i8;
+        } dst = r; },
+        0x6B => { let mut r = dst; for i in 0..4 {
+            r.i16[i] = dst.i32[i].clamp(-32768, 32767) as i16;
+            r.i16[i + 4] = src.i32[i].clamp(-32768, 32767) as i16;
+        } dst = r; },
+        0x67 => { let mut r = dst; for i in 0..8 {
+            r.u8[i] = dst.i16[i].clamp(0, 255) as u8;
+            r.u8[i + 8] = src.i16[i].clamp(0, 255) as u8;
+        } dst = r; },
+
+        // shifts by the count in the other operand
+        0xD1 => for i in 0..8 { dst.u16[i] = sse_shift(dst.u16[i] as u64, src.u64[0], 16, 0) as u16; },
+        0xD2 => for i in 0..4 { dst.u32[i] = sse_shift(dst.u32[i] as u64, src.u64[0], 32, 0) as u32; },
+        0xD3 => for i in 0..2 { dst.u64[i] = sse_shift(dst.u64[i], src.u64[0], 64, 0); },
+        0xE1 => for i in 0..8 { dst.u16[i] = sse_shift(dst.i16[i] as i64 as u64, src.u64[0], 16, 1) as u16; },
+        0xE2 => for i in 0..4 { dst.u32[i] = sse_shift(dst.i32[i] as i64 as u64, src.u64[0], 32, 1) as u32; },
+        0xF1 => for i in 0..8 { dst.u16[i] = sse_shift(dst.u16[i] as u64, src.u64[0], 16, 2) as u16; },
+        0xF2 => for i in 0..4 { dst.u32[i] = sse_shift(dst.u32[i] as u64, src.u64[0], 32, 2) as u32; },
+        0xF3 => for i in 0..2 { dst.u64[i] = sse_shift(dst.u64[i], src.u64[0], 64, 2); },
+
+        // sum of absolute differences
+        0xF6 => {
+            let mut total = 0u64;
+            for i in 0..8 {
+                total += (dst.u8[i].abs_diff(src.u8[i]) as u64)
+                    + (dst.u8[i + 8].abs_diff(src.u8[i + 8]) as u64);
+            }
+            dst.u64[0] = total;
+            dst.u64[1] = 0;
+        },
+
+        _ => crate::cpu::cpu::trigger_ud(),
+    }
+    xmm_set(modrm.reg, dst);
+    Ok(())
+}
+
+// kind: 0 logical right, 1 arithmetic right, 2 left; the count is per lane.
+fn sse_shift(value: u64, count: u64, width: u32, kind: u8) -> u64 {
+    let count = count as u32;
+    let mask = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+    if count >= width {
+        return match kind {
+            1 => if value >> (width - 1) & 1 != 0 { mask } else { 0 },
+            2 => 0,
+            _ => 0,
+        };
+    }
+    match kind {
+        1 => {
+            // Sign-extend the lane from bit `width - 1` first: a plain 64-bit
+            // shift would shift in zeros.
+            // cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/psrad
+            let align = 64 - width;
+            (((value << align) as i64 >> align) >> count) as u64 & mask
+        },
+        2 => value << count & mask,
+        _ => value >> count,
+    }
+}
+
+// PSLLW/D/Q, PSRLW/D/Q, PSRAW/D and PSRLDQ/PSLLDQ with an immediate count
+// (0F 71/72/73). cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/psllw
+unsafe fn sse_shift_imm(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let count = fetch8()? as u64;
+    let group = modrm.reg & 7;
+    let mut dst = sse_read(operand)?;
+    let (width, kind) = match (opcode, group) {
+        (0x71, 2) => (16, 0), // PSRLW
+        (0x71, 4) => (16, 1), // PSRAW
+        (0x71, 6) => (16, 2), // PSLLW
+        (0x72, 2) => (32, 0), // PSRLD
+        (0x72, 4) => (32, 1), // PSRAD
+        (0x72, 6) => (32, 2), // PSLLD
+        (0x73, 2) => (64, 0), // PSRLQ
+        (0x73, 6) => (64, 2), // PSLLQ
+        // PSRLDQ (/3) / PSLLDQ (/7) shift the whole 128-bit operand by imm8
+        // bytes (>= 16 clears it). cf. https://www.felixcloutier.com/x86/psrldq
+        (0x73, 3) | (0x73, 7) => {
+            let bits = (count.min(16) * 8) as u32;
+            let v = dst.u64[0] as u128 | (dst.u64[1] as u128) << 64;
+            let r = if bits >= 128 {
+                0
+            }
+            else if group == 3 {
+                v >> bits
+            }
+            else {
+                v << bits
+            };
+            dst.u64[0] = r as u64;
+            dst.u64[1] = (r >> 64) as u64;
+            return sse_shift_imm_store(operand, dst);
+        },
+        _ => {
+            crate::cpu::cpu::trigger_ud();
+            return Ok(());
+        },
+    };
+    let lanes = 128 / width;
+    for i in 0..lanes {
+        let shift = (i * width) as u32;
+        let mask = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
+        let value = dst.u64[(shift / 64) as usize] >> (shift % 64) & mask;
+        let result = sse_shift(value, count, width, kind);
+        let index = (shift / 64) as usize;
+        dst.u64[index] = dst.u64[index] & !(mask << (shift % 64)) | (result << (shift % 64));
+    }
+    sse_shift_imm_store(operand, dst)
+}
+
+unsafe fn sse_shift_imm_store(operand: Operand, value: reg128) -> OrPageFault<()> {
+    match operand {
+        Operand::Reg(r) => xmm_set(r, value),
+        Operand::Mem(address) => mem_write128(address, value)?,
+    }
+    Ok(())
+}
+
+// CVTPS2PD/CVTPD2PS/CVTSS2SD/CVTSD2SS (0F 5A) and CVTDQ2PS/CVTPS2DQ/CVTTPS2DQ
+// (0F 5B).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/cvtps2pd
+unsafe fn sse_convert(width: u8, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let mut dst = xmm_get(modrm.reg);
+    if width == 0x5A {
+        if pfx.f3 {
+            dst.f64[0] = src.f32[0] as f64;
+        }
+        else if pfx.f2 {
+            dst.f32[0] = src.f64[0] as f32;
+        }
+        else if pfx.p66 {
+            for i in 0..2 {
+                dst.f32[i] = src.f64[i] as f32;
+            }
+            dst.u64[1] = 0;
+        }
+        else {
+            for i in 0..2 {
+                dst.f64[i] = src.f32[i] as f64;
+            }
+        }
+    }
+    else if pfx.f3 {
+        for i in 0..4 {
+            dst.i32[i] = if src.f32[i].is_nan() { i32::MIN } else { src.f32[i].trunc() as i32 };
+        }
+    }
+    else if pfx.p66 {
+        for i in 0..4 {
+            dst.i32[i] = src.f32[i] as i32;
+        }
+    }
+    else {
+        for i in 0..4 {
+            dst.f32[i] = src.i32[i] as f32;
+        }
+    }
+    xmm_set(modrm.reg, dst);
+    Ok(())
+}
+
+// CVTSI2SS/SD (0F 2A), CVTTSS2SI/SD (0F 2C) and CVTSS2SI/SD (0F 2D).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/cvtsi2ss
+unsafe fn sse_cvt_int(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let mut dst = xmm_get(modrm.reg);
+    if opcode == 0x2A {
+        let source = read_operand(operand, size_from_rex(pfx), pfx.has_rex())?;
+        if pfx.f2 {
+            dst.f64[0] = if pfx.has_rex_w() { source as i64 as f64 } else { source as u32 as i32 as f64 };
+        }
+        else {
+            dst.f32[0] = if pfx.has_rex_w() { source as i64 as f32 } else { source as u32 as i32 as f32 };
+        }
+        xmm_set(modrm.reg, dst);
+    }
+    else {
+        let src = sse_read(operand)?;
+        let truncate = opcode == 0x2C;
+        let value = if pfx.f2 {
+            if truncate { src.f64[0].trunc() } else { src.f64[0].round() }
+        }
+        else if truncate {
+            src.f32[0].trunc() as f64
+        }
+        else {
+            src.f32[0].round() as f64
+        };
+        let mask = if pfx.has_rex_w() { u64::MAX } else { 0xFFFF_FFFF };
+        let bits = if value.is_nan() {
+            0x8000_0000_0000_0000
+        }
+        else if value <= i64::MIN as f64 {
+            0x8000_0000_0000_0000
+        }
+        else if value >= i64::MAX as f64 {
+            0x7FFF_FFFF_FFFF_FFFF
+        }
+        else {
+            value as i64 as u64
+        };
+        write_reg64(modrm.reg as i32, bits & mask);
+    }
+    Ok(())
+}
+
+fn size_from_rex(pfx: &Prefixes) -> OpSize {
+    if pfx.has_rex_w() { OpSize::S64 } else { OpSize::S32 }
+}
+
+// RSQRTPS/RSQRTSS (0F 52) and RCPPS/RCPSS (0F 53).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/rsqrtps
+unsafe fn sse_rsqrt_rcp(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let mut dst = xmm_get(modrm.reg);
+    let compute = |x: f32| if opcode == 0x52 { 1.0 / x.sqrt() } else { 1.0 / x };
+    if pfx.f3 {
+        dst.f32[0] = compute(src.f32[0]);
+    }
+    else {
+        for i in 0..4 {
+            dst.f32[i] = compute(src.f32[i]);
+        }
+    }
+    xmm_set(modrm.reg, dst);
+    Ok(())
+}
+
+// --- three-byte escapes (0F 38 / 0F 3A) ----------------------------------
+
+// SSSE3 (66 0F 38 00-0B, 1C-1E), MOVBE (F0/F1) and ADCX/ADOX (F6).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/pshufb and adcx
+unsafe fn run_0f38(pfx: &Prefixes) -> OrPageFault<()> {
+    let opcode = fetch8()?;
+
+    // MOVBE r, m / MOVBE m, r (no 66/F2/F3)
+    if !pfx.p66 && !pfx.f2 && !pfx.f3 && (opcode == 0xF0 || opcode == 0xF1) {
+        let (modrm, operand) = decode_operand(pfx)?;
+        let width = if pfx.has_rex_w() { OpSize::S64 } else { OpSize::S32 };
+        let swap = |value: u64| match width {
+            OpSize::S64 => value.swap_bytes(),
+            _ => (value as u32).swap_bytes() as u64,
+        };
+        if opcode == 0xF0 {
+            let Operand::Mem(address) = operand else {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(());
+            };
+            let value = swap(mem_read(address, width)?);
+            write_reg(modrm.reg, width, pfx.has_rex(), value);
+        }
+        else {
+            let value = read_reg(modrm.reg, width, pfx.has_rex());
+            probe_operand_write(operand, width)?;
+            write_operand(operand, width, pfx.has_rex(), swap(value))?;
+        }
+        return Ok(());
+    }
+
+    // ADCX (66) / ADOX (F3): add with carry, updating only one flag
+    if (pfx.p66 || pfx.f3) && opcode == 0xF6 {
+        let (modrm, operand) = decode_operand(pfx)?;
+        let width = if pfx.has_rex_w() { OpSize::S64 } else { OpSize::S32 };
+        let source = read_operand(operand, width, pfx.has_rex())? & width.mask();
+        let destination = read_reg(modrm.reg, width, pfx.has_rex()) & width.mask();
+        let carry = if pfx.p66 {
+            *flags as u32 & FLAG_CF != 0
+        }
+        else {
+            *flags as u32 & FLAG_OF != 0
+        };
+        let (sum, first) = destination.overflowing_add(source);
+        let (sum, second) = sum.overflowing_add(carry as u64);
+        write_reg(modrm.reg, width, pfx.has_rex(), sum & width.mask());
+        let carry_out = (first || second) as i32;
+        if pfx.p66 {
+            *flags = (*flags & !(FLAG_CF as i32)) | carry_out * FLAG_CF as i32;
+        }
+        else {
+            *flags = (*flags & !(FLAG_OF as i32)) | carry_out * FLAG_OF as i32;
+        }
+        *flags_changed = 0;
+        return Ok(());
+    }
+
+    // SSSE3
+    if pfx.p66 {
+        let (modrm, operand) = decode_operand(pfx)?;
+        let src = sse_read(operand)?;
+        let dst = xmm_get(modrm.reg);
+        let mut result = dst;
+        match opcode {
+            // PSHUFB
+            0x00 => for i in 0..16 {
+                result.u8[i] = if src.u8[i] & 0x80 != 0 { 0 } else { dst.u8[src.u8[i] as usize & 15] };
+            },
+            // PHADDW / PHADDD / PHADDSW
+            0x01 => for i in 0..4 {
+                result.u16[i] = dst.u16[i * 2].wrapping_add(dst.u16[i * 2 + 1]);
+                result.u16[i + 4] = src.u16[i * 2].wrapping_add(src.u16[i * 2 + 1]);
+            },
+            0x02 => for i in 0..2 {
+                result.u32[i] = dst.u32[i * 2].wrapping_add(dst.u32[i * 2 + 1]);
+                result.u32[i + 2] = src.u32[i * 2].wrapping_add(src.u32[i * 2 + 1]);
+            },
+            0x03 => for i in 0..4 {
+                result.i16[i] = dst.i16[i * 2].saturating_add(dst.i16[i * 2 + 1]);
+                result.i16[i + 4] = src.i16[i * 2].saturating_add(src.i16[i * 2 + 1]);
+            },
+            // PMADDUBSW
+            0x04 => for i in 0..8 {
+                let low = dst.u8[i * 2] as i32 * src.i8[i * 2] as i32;
+                let high = dst.u8[i * 2 + 1] as i32 * src.i8[i * 2 + 1] as i32;
+                result.i16[i] = (low + high).clamp(-32768, 32767) as i16;
+            },
+            // PHSUBW / PHSUBD / PHSUBSW
+            0x05 => for i in 0..4 {
+                result.u16[i] = dst.u16[i * 2].wrapping_sub(dst.u16[i * 2 + 1]);
+                result.u16[i + 4] = src.u16[i * 2].wrapping_sub(src.u16[i * 2 + 1]);
+            },
+            0x06 => for i in 0..2 {
+                result.u32[i] = dst.u32[i * 2].wrapping_sub(dst.u32[i * 2 + 1]);
+                result.u32[i + 2] = src.u32[i * 2].wrapping_sub(src.u32[i * 2 + 1]);
+            },
+            0x07 => for i in 0..4 {
+                result.i16[i] = dst.i16[i * 2].saturating_sub(dst.i16[i * 2 + 1]);
+                result.i16[i + 4] = src.i16[i * 2].saturating_sub(src.i16[i * 2 + 1]);
+            },
+            // PSIGNB / PSIGNW / PSIGND
+            0x08 => for i in 0..16 {
+                result.i8[i] = if src.i8[i] == 0 { 0 } else if src.i8[i] < 0 { dst.i8[i].wrapping_neg() } else { dst.i8[i] };
+            },
+            0x09 => for i in 0..8 {
+                result.i16[i] = if src.i16[i] == 0 { 0 } else if src.i16[i] < 0 { dst.i16[i].wrapping_neg() } else { dst.i16[i] };
+            },
+            0x0A => for i in 0..4 {
+                result.i32[i] = if src.i32[i] == 0 { 0 } else if src.i32[i] < 0 { dst.i32[i].wrapping_neg() } else { dst.i32[i] };
+            },
+            // PMULHRSW
+            0x0B => for i in 0..8 {
+                let product = dst.i16[i] as i32 * src.i16[i] as i32;
+                result.i16[i] = ((product + 0x4000) >> 15).clamp(-32768, 32767) as i16;
+            },
+            // PABSB / PABSW / PABSD
+            0x1C => for i in 0..16 { result.u8[i] = dst.i8[i].unsigned_abs(); },
+            0x1D => for i in 0..8 { result.u16[i] = dst.i16[i].unsigned_abs(); },
+            0x1E => for i in 0..4 { result.u32[i] = dst.i32[i].unsigned_abs(); },
+            _ => {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(());
+            },
+        }
+        xmm_set(modrm.reg, result);
+        return Ok(());
+    }
+
+    crate::cpu::cpu::trigger_ud();
+    Ok(())
+}
+
+// PALIGNR (66 0F 3A 0F).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/palignr
+unsafe fn run_0f3a(pfx: &Prefixes) -> OrPageFault<()> {
+    let opcode = fetch8()?;
+    if pfx.p66 && opcode == 0x0F {
+        let (modrm, operand) = decode_operand(pfx)?;
+        let src = sse_read(operand)?;
+        let dst = xmm_get(modrm.reg);
+        let shift = fetch8()? as usize & 0x1F;
+        let mut temp = [0u8; 32];
+        temp[..16].copy_from_slice(&src.u8);
+        temp[16..].copy_from_slice(&dst.u8);
+        let mut result = reg128 { u64: [0, 0] };
+        for i in 0..16 {
+            result.u8[i] = if shift + i < 32 { temp[shift + i] } else { 0 };
+        }
+        xmm_set(modrm.reg, result);
+        return Ok(());
+    }
+    crate::cpu::cpu::trigger_ud();
+    Ok(())
+}
+
+// The base of a segment selector's descriptor, from the GDT (the only table
+// we model).
+unsafe fn segment_base(selector: u16) -> u64 {
+    let index = (selector >> 3) as u64;
+    if selector & !7 == 0 || selector >> 2 & 1 != 0 {
+        return 0;
+    }
+    let descriptor = match mem_read(GDTR_BASE + index * 8, OpSize::S64) {
+        Ok(value) => value,
+        Err(_) => return 0,
+    };
+    (descriptor >> 16 & 0xFFFF) | (descriptor >> 32 & 0xFF) << 16 | (descriptor >> 56 & 0xFF) << 24
+}
+
+// LSS/LFS/LGS: load a far pointer (offset then selector) into a register and
+// the matching segment.
+unsafe fn load_far(segment: i32, size: OpSize, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let Operand::Mem(address) = operand else {
+        crate::cpu::cpu::trigger_ud();
+        return Ok(());
+    };
+    let bytes = (size.bits() / 8) as u64;
+    let offset = mem_read(address, size)? & size.mask();
+    let selector = mem_read(address + bytes, OpSize::S16)? as u16;
+    if selector & !7 == 0 {
+        crate::cpu::cpu::trigger_ud();
+        return Ok(());
+    }
+    write_reg(modrm.reg, size, pfx.has_rex(), offset);
+    *sreg.offset(segment as isize) = selector;
+    // In long mode FS/GS base comes from the MSR (WRFSBASE/arch_prctl), not the
+    // descriptor. cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/pop
+    if !*long_mode
+    {
+        let base = segment_base(selector);
+        match segment {
+            4 => *fs_base = base,
+            5 => *gs_base = base,
+            _ => {},
+        }
+    }
+    Ok(())
+}
+
+// PUSH/POP FS and GS (0F A0/A1/A8/A9).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/push
+unsafe fn push_segment(segment: i32) -> OrPageFault<()> {
+    let value = *sreg.offset(segment as isize) as u64;
+    push64(value)
+}
+
+unsafe fn pop_segment(segment: i32) -> OrPageFault<()> {
+    let selector = pop64()? as u16;
+    *sreg.offset(segment as isize) = selector;
+    // In long mode FS/GS base comes from the MSR (WRFSBASE/arch_prctl), not the
+    // descriptor. cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/pop
+    if !*long_mode
+    {
+        let base = segment_base(selector);
+        match segment {
+            4 => *fs_base = base,
+            5 => *gs_base = base,
+            _ => {},
+        }
+    }
+    Ok(())
+}
+
+// --- SSE/SSE2/SSSE3 and x87 ------------------------------------------------
+// Semantics follow the Intel SDM, Vol. 2 (instruction set reference):
+//   https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+// with the AMD64 Architecture Programmer's Manual as a cross-check for the
+// 64-bit specific parts:
+//   https://docs.amd.com/v/u/en-US/40332_4.10_APM_Vol1-5
+// The x87 register forms are delegated to the 32-bit interpreter this project
+// inherited from v86, which already had a complete x87 implementation:
+//   https://github.com/copy/v86 - thanks to its authors.
+
+// SSE arithmetic, PS/PD/SS/SD forms.
+// cf. Intel SDM Vol. 2 (https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
+unsafe fn sse_arith32(opcode: u8, a: f32, b: f32) -> f32 {
+    match opcode {
+        0x51 => a.sqrt(),
+        0x58 => a + b,
+        0x59 => a * b,
+        0x5C => a - b,
+        0x5D => a.min(b),
+        0x5E => a / b,
+        _ => a.max(b),
+    }
+}
+
+unsafe fn sse_arith64(opcode: u8, a: f64, b: f64) -> f64 {
+    match opcode {
+        0x51 => a.sqrt(),
+        0x58 => a + b,
+        0x59 => a * b,
+        0x5C => a - b,
+        0x5D => a.min(b),
+        0x5E => a / b,
+        _ => a.max(b),
+    }
+}
+
+unsafe fn sse_arith(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let mut dst = xmm_get(modrm.reg);
+    if pfx.f3 {
+        dst.f32[0] = sse_arith32(opcode, dst.f32[0], src.f32[0]);
+    }
+    else if pfx.f2 {
+        dst.f64[0] = sse_arith64(opcode, dst.f64[0], src.f64[0]);
+    }
+    else if pfx.p66 {
+        for i in 0..2 {
+            dst.f64[i] = sse_arith64(opcode, dst.f64[i], src.f64[i]);
+        }
+    }
+    else {
+        for i in 0..4 {
+            dst.f32[i] = sse_arith32(opcode, dst.f32[i], src.f32[i]);
+        }
+    }
+    xmm_set(modrm.reg, dst);
+    Ok(())
+}
+
+// ANDPS/ANDNPS/ORPS/XORPS (0F 54-57), bitwise over the whole register.
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/andps
+unsafe fn sse_logic(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let mut dst = xmm_get(modrm.reg);
+    for i in 0..2 {
+        dst.u64[i] = match opcode {
+            0x54 => dst.u64[i] & src.u64[i],
+            0x55 => !dst.u64[i] & src.u64[i],
+            0x56 => dst.u64[i] | src.u64[i],
+            _ => dst.u64[i] ^ src.u64[i],
+        };
+    }
+    xmm_set(modrm.reg, dst);
+    Ok(())
+}
+
+// CMPPS/CMPPD/CMPSS/CMPSD (0F C2).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/cmpps
+unsafe fn sse_compare(pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let mut dst = xmm_get(modrm.reg);
+    let predicate = fetch8()? as u8 & 7;
+    if pfx.f3 {
+        dst.f32[0] = if sse_compare_f32(predicate, dst.f32[0], src.f32[0]) { f32::from_bits(!0) } else { 0.0 };
+    }
+    else if pfx.f2 {
+        dst.f64[0] = if sse_compare_f64(predicate, dst.f64[0], src.f64[0]) { f64::from_bits(!0) } else { 0.0 };
+    }
+    else if pfx.p66 {
+        for i in 0..2 {
+            dst.f64[i] = if sse_compare_f64(predicate, dst.f64[i], src.f64[i]) { f64::from_bits(!0) } else { 0.0 };
+        }
+    }
+    else {
+        for i in 0..4 {
+            dst.f32[i] = if sse_compare_f32(predicate, dst.f32[i], src.f32[i]) { f32::from_bits(!0) } else { 0.0 };
+        }
+    }
+    xmm_set(modrm.reg, dst);
+    Ok(())
+}
+
+fn sse_compare_f32(predicate: u8, a: f32, b: f32) -> bool {
+    match predicate {
+        0 => a == b,             // EQ
+        1 => a < b,              // LT
+        2 => a <= b,             // LE
+        3 => a.is_nan() || b.is_nan(), // UNORD
+        4 => !(a == b),          // NEQ
+        5 => !(a < b),           // NLT
+        6 => !(a <= b),          // NLE
+        _ => !(a.is_nan() || b.is_nan()), // ORD
+    }
+}
+
+fn sse_compare_f64(predicate: u8, a: f64, b: f64) -> bool {
+    match predicate {
+        0 => a == b,
+        1 => a < b,
+        2 => a <= b,
+        3 => a.is_nan() || b.is_nan(),
+        4 => !(a == b),
+        5 => !(a < b),
+        6 => !(a <= b),
+        _ => !(a.is_nan() || b.is_nan()),
+    }
+}
+
+// UCOMISS/UCOMISD and COMISS/COMISD (0F 2E/2F).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/ucomiss
+unsafe fn sse_ucomi(signalling: bool, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let dst = xmm_get(modrm.reg);
+    let unordered;
+    let less;
+    let equal;
+    if pfx.p66 || pfx.f2 {
+        let a = dst.f64[0];
+        let b = src.f64[0];
+        unordered = a.is_nan() || b.is_nan();
+        less = a < b;
+        equal = a == b;
+    }
+    else {
+        let a = dst.f32[0];
+        let b = src.f32[0];
+        unordered = a.is_nan() || b.is_nan();
+        less = a < b;
+        equal = a == b;
+    }
+    let _ = signalling;
+    *flags &= !((FLAG_CF | FLAG_PF | FLAG_ZF | FLAG_OF | FLAG_SF | FLAG_AF) as i32);
+    if unordered {
+        *flags |= (FLAG_CF | FLAG_PF | FLAG_ZF) as i32;
+    }
+    else if less {
+        *flags |= FLAG_CF as i32;
+    }
+    else if equal {
+        *flags |= FLAG_ZF as i32;
+    }
+    *flags_changed = 0;
+    Ok(())
+}
+
+// MOVMSKPS/MOVMSKPD (0F 50).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/movmskps
+unsafe fn sse_movmsk(pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let Operand::Reg(src) = operand else {
+        crate::cpu::cpu::trigger_ud();
+        return Ok(());
+    };
+    let value = xmm_get(src);
+    let mask = if pfx.p66 {
+        (value.f64[0].to_bits() >> 63) as u64 | (value.f64[1].to_bits() >> 63) << 1
+    }
+    else {
+        let mut m = 0u64;
+        for i in 0..4 {
+            m |= ((value.f32[i].to_bits() >> 31) as u64) << i;
+        }
+        m
+    };
+    write_reg(modrm.reg, OpSize::S32, pfx.has_rex(), mask);
+    Ok(())
+}
+
+// SHUFPS/SHUFPD (0F C6).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/shufps
+unsafe fn sse_shuf(pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let dst = xmm_get(modrm.reg);
+    let control = fetch8()? as u8;
+    let mut result = dst;
+    if pfx.p66 {
+        result.f64[0] = dst.f64[(control & 1) as usize];
+        result.f64[1] = src.f64[((control >> 1) & 1) as usize];
+    }
+    else {
+        for i in 0..2 {
+            result.f32[i] = dst.f32[((control >> (i * 2)) & 3) as usize];
+            result.f32[i + 2] = src.f32[((control >> (i * 2 + 4)) & 3) as usize];
+        }
+    }
+    xmm_set(modrm.reg, result);
+    Ok(())
+}
+
+// PSHUFD/PSHUFHW/PSHUFLW (0F 70).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/pshufd
+unsafe fn sse_pshuf(pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let control = fetch8()? as u8;
+    let mut result = src;
+    if pfx.f3 {
+        for i in 0..4 {
+            result.u16[i] = src.u16[((control >> (i * 2)) & 3) as usize];
+        }
+    }
+    else if pfx.f2 {
+        for i in 0..4 {
+            result.u16[i + 4] = src.u16[4 + ((control >> (i * 2)) & 3) as usize];
+        }
+    }
+    else {
+        for i in 0..4 {
+            result.u32[i] = src.u32[((control >> (i * 2)) & 3) as usize];
+        }
+    }
+    xmm_set(modrm.reg, result);
+    Ok(())
+}
+
 unsafe fn run_sse(opcode: u8, pfx: &Prefixes) -> OrPageFault<bool> {
     let size = pfx.operand_size();
     match opcode {
+        // MOVSS/MOVSD xmm, xmm/m32|m64 (F3/F2 0F 10): register form keeps the
+        // upper lanes, memory form clears them.
+        // cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/movss
+        0x10 if pfx.f3 || pfx.f2 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let mut dst = xmm_get(modrm.reg);
+            match (pfx.f3, operand) {
+                (true, Operand::Reg(src)) => dst.u32[0] = xmm_get(src).u32[0],
+                (true, Operand::Mem(address)) => {
+                    dst = reg128 { u32: [mem_read(address, OpSize::S32)? as u32, 0, 0, 0] };
+                },
+                (false, Operand::Reg(src)) => dst.u64[0] = xmm_get(src).u64[0],
+                (false, Operand::Mem(address)) => {
+                    dst = reg128 { u64: [mem_read(address, OpSize::S64)?, 0] };
+                },
+            }
+            xmm_set(modrm.reg, dst);
+        },
+
+        // MOVSS xmm/m32, xmm (F3 0F 11) and MOVSD xmm/m64, xmm (F2 0F 11)
+        0x11 if pfx.f3 || pfx.f2 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let value = xmm_get(modrm.reg);
+            match (pfx.f3, operand) {
+                (true, Operand::Reg(r)) => {
+                    let mut dst = xmm_get(r);
+                    dst.u32[0] = value.u32[0];
+                    xmm_set(r, dst);
+                },
+                (true, Operand::Mem(address)) => mem_write(address, OpSize::S32, value.u32[0] as u64)?,
+                (false, Operand::Reg(r)) => {
+                    let mut dst = xmm_get(r);
+                    dst.u64[0] = value.u64[0];
+                    xmm_set(r, dst);
+                },
+                (false, Operand::Mem(address)) => mem_write(address, OpSize::S64, value.u64[0])?,
+            }
+        },
+
         // MOVAPS/MOVUPS/MOVAPD/MOVUPD xmm, xmm/m128 (0F 10/28)
         0x10 | 0x28 if !pfx.f2 && !pfx.f3 => {
             let (modrm, operand) = decode_operand(pfx)?;
@@ -637,11 +1485,22 @@ unsafe fn run_sse(opcode: u8, pfx: &Prefixes) -> OrPageFault<bool> {
             crate::cpu::cpu::write_mmx_reg64(modrm.reg as i32, value);
         },
 
-        // MMX MOVD r/m32, mm (0F 7E, no 66)
-        0x7E if !pfx.p66 => {
+        // MMX MOVD r/m32, mm (0F 7E, no 66/F3)
+        0x7E if !pfx.p66 && !pfx.f3 => {
             let (modrm, operand) = decode_operand(pfx)?;
             let value = crate::cpu::cpu::read_mmx64s(modrm.reg as i32);
             write_operand(operand, OpSize::S32, pfx.has_rex(), value)?;
+        },
+
+        // MOVQ xmm, xmm/m64 (F3 0F 7E): SSE2 quadword load, upper 64 bits cleared.
+        // cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/movq
+        0x7E if pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let value = match operand {
+                Operand::Reg(r) => xmm_get(r).u64[0],
+                Operand::Mem(address) => mem_read(address, OpSize::S64)?,
+            };
+            xmm_set(modrm.reg, reg128 { u64: [value, 0] });
         },
 
         // MOVD/MOVQ xmm, r/m (66 0F 6E)
@@ -673,19 +1532,6 @@ unsafe fn run_sse(opcode: u8, pfx: &Prefixes) -> OrPageFault<bool> {
                 Operand::Reg(r) => xmm_set(r, value),
                 Operand::Mem(address) => mem_write128(address, value)?,
             }
-        },
-
-        // MOVMSKPS r32, xmm (0F 50)
-        0x50 => {
-            let (modrm, operand) = decode_operand(pfx)?;
-            let value = sse_read(operand)?;
-            let mut mask = 0u64;
-            for i in 0..4 {
-                if value.u32[i] & 0x8000_0000 != 0 {
-                    mask |= 1 << i;
-                }
-            }
-            write_reg(modrm.reg, OpSize::S32, pfx.has_rex(), mask);
         },
 
         // ADDSS (F3 0F 58) / ADDSD (F2 0F 58)
@@ -775,27 +1621,236 @@ unsafe fn run_sse(opcode: u8, pfx: &Prefixes) -> OrPageFault<bool> {
             xmm_set(modrm.reg, result);
         },
 
-        // Group 14 shifts: PSRD (0x72 /2), PSLD (0x72 /6)
-        0x72 if pfx.p66 => {
-            let (modrm, operand) = decode_operand_with_trailing(pfx, 1)?;
-            let count = fetch8()? as u32 & 31;
-            let value = sse_read(operand)?;
-            let mut result = value;
-            match modrm.reg & 7 {
-                2 => {
-                    for i in 0..4 { result.u32[i] >>= count; }
-                },
-                6 => {
-                    for i in 0..4 { result.u32[i] = result.u32[i].wrapping_shl(count); }
-                },
-                _ => {
-                    crate::cpu::cpu::trigger_ud();
-                    return Ok(true);
-                },
+        // SQRTPS/PD/SS/SD, ADDPS/PD/SS/SD, MULPS..., SUBPS..., MINPS...,
+        // DIVPS..., MAXPS... (0F 51/58/59/5C/5D/5E/5F)
+        0x51 | 0x58 | 0x59 | 0x5C | 0x5D | 0x5E | 0x5F => sse_arith(opcode, pfx)?,
+
+        // ANDPS/PD, ANDNPS/PD, ORPS/PD, XORPS/PD (0F 54-57)
+        0x54 | 0x55 | 0x56 | 0x57 => sse_logic(opcode, pfx)?,
+
+        // CMPPS/PD/SS/SD (0F C2)
+        0xC2 => sse_compare(pfx)?,
+
+        // UCOMISS/SD (0F 2E) and COMISS/SD (0F 2F)
+        0x2E => sse_ucomi(false, pfx)?,
+        0x2F => sse_ucomi(true, pfx)?,
+
+        // MOVMSKPS/MOVMSKPD (0F 50)
+        0x50 => sse_movmsk(pfx)?,
+
+        // SHUFPS/SHUFPD (0F C6)
+        0xC6 => sse_shuf(pfx)?,
+
+        // PSHUFD/PSHUFHW/PSHUFLW (0F 70)
+        0x70 => sse_pshuf(pfx)?,
+
+        // SSE2 packed integer (0F D0-0xFF and 0x60-0x7F)
+        0x60 | 0x61 | 0x62 | 0x63 | 0x64 | 0x65 | 0x66 | 0x67 | 0x68 | 0x69 | 0x6A
+        | 0x6B | 0x6C | 0x6D | 0x74 | 0x75 | 0x76
+        | 0xD1 | 0xD2 | 0xD3 | 0xD4 | 0xD5 | 0xD8 | 0xD9 | 0xDA | 0xDB | 0xDC | 0xDD
+        | 0xDE | 0xDF | 0xE1 | 0xE2 | 0xE4 | 0xE5 | 0xE8 | 0xE9 | 0xEA | 0xEB | 0xEC
+        | 0xED | 0xEE | 0xEF | 0xF1 | 0xF2 | 0xF3 | 0xF5 | 0xF6 | 0xF8 | 0xF9 | 0xFA
+        | 0xFB | 0xFC | 0xFD | 0xFE if pfx.p66 => sse_int(opcode, pfx)?,
+
+        // PSLLW/D/Q, PSRLW/D/Q, PSRAW/D with an immediate (0F 71/72/73)
+        0x71 | 0x72 | 0x73 if pfx.p66 => sse_shift_imm(opcode, pfx)?,
+
+        // CVTPS2PD/CVTPD2PS/CVTSS2SD/CVTSD2SS (0F 5A),
+        // CVTDQ2PS/CVTPS2DQ/CVTTPS2DQ (0F 5B)
+        0x5A => sse_convert(0x5A, pfx)?,
+        0x5B => sse_convert(0x5B, pfx)?,
+
+        // CVTSI2SS/SD (0F 2A), CVTTSS2SI/SD (0F 2C), CVTSS2SI/SD (0F 2D)
+        0x2A if !pfx.p66 => sse_cvt_int(0x2A, pfx)?,
+        0x2C | 0x2D => sse_cvt_int(opcode, pfx)?,
+
+        // RSQRTPS/RSQRTSS (0F 52), RCPPS/RCPSS (0F 53)
+        0x52 | 0x53 => sse_rsqrt_rcp(opcode, pfx)?,
+
+        // MOVNTPS/MOVNTPD (0F 2B), a plain store here; cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/movntps
+        0x2B if !pfx.f2 && !pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let Operand::Mem(address) = operand else {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(true);
+            };
+            mem_write128(address, xmm_get(modrm.reg))?;
+        },
+
+        // MOVDDUP (F2 0F 12) / MOVSLDUP (F3 0F 12), SSE3.
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/movddup
+        0x12 if pfx.f2 || pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let src = sse_read(operand)?;
+            let mut dst = src;
+            if pfx.f2 {
+                dst.u64[0] = src.u64[0];
+                dst.u64[1] = src.u64[0];
             }
+            else {
+                dst.u64[0] = src.u32[0] as u64 | (src.u32[0] as u64) << 32;
+                dst.u64[1] = src.u32[1] as u64 | (src.u32[1] as u64) << 32;
+            }
+            xmm_set(modrm.reg, dst);
+        },
+
+        // MOVSHDUP (F3 0F 16)
+        0x16 if pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let src = sse_read(operand)?;
+            let mut dst = reg128 { u64: [0, 0] };
+            dst.u64[0] = src.u32[1] as u64 | (src.u32[1] as u64) << 32;
+            dst.u64[1] = src.u32[3] as u64 | (src.u32[3] as u64) << 32;
+            xmm_set(modrm.reg, dst);
+        },
+
+        // HADDPS/HADDPD (F2/66 0F 7C), HSUBPS/HSUBPD (F2/66 0F 7D), SSE3.
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/haddps
+        0x7C | 0x7D if pfx.f2 || pfx.p66 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let src = sse_read(operand)?;
+            let dst = xmm_get(modrm.reg);
+            let mut result = dst;
+            if pfx.p66 {
+                let a = src.f64[0];
+                let b = src.f64[1];
+                result.f64[0] = if opcode == 0x7C { dst.f64[0] + dst.f64[1] } else { dst.f64[0] - dst.f64[1] };
+                result.f64[1] = if opcode == 0x7C { a + b } else { a - b };
+            }
+            else {
+                result.f32[0] = if opcode == 0x7C { dst.f32[0] + dst.f32[1] } else { dst.f32[0] - dst.f32[1] };
+                result.f32[1] = if opcode == 0x7C { dst.f32[2] + dst.f32[3] } else { dst.f32[2] - dst.f32[3] };
+                result.f32[2] = if opcode == 0x7C { src.f32[0] + src.f32[1] } else { src.f32[0] - src.f32[1] };
+                result.f32[3] = if opcode == 0x7C { src.f32[2] + src.f32[3] } else { src.f32[2] - src.f32[3] };
+            }
+            xmm_set(modrm.reg, result);
+        },
+
+        // PINSRW (66 0F C4); cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/pinsrw
+        0xC4 if pfx.p66 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let value = read_operand(operand, size, pfx.has_rex())? as u16;
+            let index = fetch8()? as usize & 7;
+            let mut dst = xmm_get(modrm.reg);
+            dst.u16[index] = value;
+            xmm_set(modrm.reg, dst);
+        },
+
+        // PEXTRW (66 0F C5); cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/pextrw
+        0xC5 if pfx.p66 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let Operand::Reg(src) = operand else {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(true);
+            };
+            let index = fetch8()? as usize & 7;
+            let value = xmm_get(src).u16[index] as u64;
+            write_reg(modrm.reg, OpSize::S32, pfx.has_rex(), value);
+        },
+
+        // MOVQ xmm/m64, xmm (66 0F D6) and PMOVMSKB (66 0F D7).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/pmovmskb
+        0xD6 if pfx.p66 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let value = xmm_get(modrm.reg);
             match operand {
-                Operand::Reg(r) => xmm_set(r, result),
-                Operand::Mem(address) => mem_write128(address, result)?,
+                Operand::Reg(r) => {
+                    let mut result = xmm_get(r);
+                    result.u64[0] = value.u64[0];
+                    xmm_set(r, result);
+                },
+                Operand::Mem(address) => mem_write(address, OpSize::S64, value.u64[0])?,
+            }
+        },
+        0xD7 if pfx.p66 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let Operand::Reg(src) = operand else {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(true);
+            };
+            let value = xmm_get(src);
+            let mut mask = 0u64;
+            for i in 0..16 {
+                mask |= ((value.u8[i] >> 7) as u64) << i;
+            }
+            write_reg(modrm.reg, OpSize::S32, pfx.has_rex(), mask);
+        },
+
+        // PAVGB (66 0F E0) / PAVGW (66 0F E3).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/pavgb
+        0xE0 | 0xE3 if pfx.p66 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let src = sse_read(operand)?;
+            let mut dst = xmm_get(modrm.reg);
+            if opcode == 0xE0 {
+                for i in 0..16 {
+                    dst.u8[i] = ((dst.u8[i] as u16 + src.u8[i] as u16 + 1) / 2) as u8;
+                }
+            }
+            else {
+                for i in 0..8 {
+                    dst.u16[i] = ((dst.u16[i] as u32 + src.u16[i] as u32 + 1) / 2) as u16;
+                }
+            }
+            xmm_set(modrm.reg, dst);
+        },
+
+        // CVTTPD2DQ (66 0F E6) / CVTDQ2PD (F3 0F E6).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/cvttpd2dq
+        0xE6 if pfx.p66 || pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let src = sse_read(operand)?;
+            let mut dst = xmm_get(modrm.reg);
+            if pfx.p66 {
+                for i in 0..2 {
+                    dst.i32[i] = if src.f64[i].is_nan() { i32::MIN } else { src.f64[i].trunc() as i32 };
+                }
+                dst.u64[1] = 0;
+            }
+            else {
+                for i in 0..2 {
+                    dst.f64[i] = src.i32[i] as f64;
+                }
+            }
+            xmm_set(modrm.reg, dst);
+        },
+
+        // MOVNTDQ (66 0F E7)
+        0xE7 if pfx.p66 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let Operand::Mem(address) = operand else {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(true);
+            };
+            mem_write128(address, xmm_get(modrm.reg))?;
+        },
+
+        // LDDQU (F2 0F F0), SSE3; cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/lddqu
+        0xF0 if pfx.f2 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let value = sse_read(operand)?;
+            xmm_set(modrm.reg, value);
+        },
+
+        // MASKMOVDQU (66 0F F7); cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/maskmovdqu
+        0xF7 if pfx.p66 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let Operand::Reg(src) = operand else {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(true);
+            };
+            let value = xmm_get(modrm.reg);
+            let mask = xmm_get(src);
+            let address = read_reg64(RDI as i32);
+            for i in 0..16 {
+                if mask.u8[i] & 0x80 != 0 {
+                    mem_write(address + i as u64, OpSize::S8, value.u8[i] as u64)?;
+                }
             }
         },
 
@@ -1395,6 +2450,13 @@ unsafe fn pop64() -> OrPageFault<u64> {
     Ok(value)
 }
 
+unsafe fn pop_size(size: OpSize) -> OrPageFault<u64> {
+    let rsp = read_reg64(RSP as i32);
+    let value = mem_read(rsp, size)?;
+    write_reg64(RSP as i32, rsp.wrapping_add(size.bits() as u64 / 8));
+    Ok(value)
+}
+
 unsafe fn condition(code: u8) -> bool {
     let f = *flags as u32;
     let cf = f & FLAG_CF != 0;
@@ -1454,6 +2516,7 @@ unsafe fn x87_store_m80(address: u64, value: F80) -> OrPageFault<()> {
 }
 
 // FIST/FISTP round per the control word; FISTTP truncates.
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/fist
 unsafe fn x87_store_int(address: u64, value: F80, size: OpSize, truncate: bool) -> OrPageFault<()> {
     let converted = match (size, truncate) {
         (OpSize::S16, false) => fpu_convert_to_i16(value) as u16 as u64,
@@ -1475,7 +2538,8 @@ unsafe fn x87_load_int(address: u64, size: OpSize) -> OrPageFault<F80> {
     })
 }
 
-// FNSTENV, in the protected-mode layouts the 32-bit implementation uses.
+// FNSTENV, in the protected-mode layouts the 32-bit implementation uses
+// (see crate::cpu::fpu::fpu_fstenv16/32), per Intel SDM Vol. 2: FNSTENV.
 unsafe fn x87_store_env(address: u64, sixteen: bool) -> OrPageFault<()> {
     if sixteen {
         mem_write(address, OpSize::S16, *fpu_control_word as u64)?;
@@ -1604,7 +2668,9 @@ unsafe fn x87(pfx: &Prefixes, opcode: u8) -> OrPageFault<()> {
             fpu_pop();
         },
         (0xD9, 4) => x87_load_env(address, sixteen)?,
-        (0xD9, 5) => *fpu_control_word = mem_read(address, OpSize::S16)? as u16,
+        // FLDCW: must go through set_control_word so the softfloat rounding
+        // mode and precision follow the loaded control word (FISTP etc. read it)
+        (0xD9, 5) => set_control_word(mem_read(address, OpSize::S16)? as u16),
         (0xD9, 6) => x87_store_env(address, sixteen)?,
         (0xD9, 7) => mem_write(address, OpSize::S16, *fpu_control_word as u64)?,
 
@@ -1807,6 +2873,11 @@ pub unsafe fn enter_long_mode(cr3: u32) {
     *long_mode = true;
     *efer |= EFER_LME | EFER_LMA;
     *cr |= crate::cpu::cpu::CR0_PG; // CR0.PG
+    // Firmware enables the local APIC (APICBASE.EN) before the kernel runs and
+    // Linux assumes it already is: it never writes APICBASE itself. v64 has no
+    // firmware, so do it here - otherwise the LAPIC is dead, no IOAPIC
+    // interrupt is ever delivered and the serial transmitter never runs.
+    *apic_enabled = true;
     crate::cpu::cpu::full_clear_tlb();
 }
 
@@ -2109,6 +3180,7 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
         },
 
         // LOOPNE/LOOPE/LOOP/JRCXZ (0xE0-0xE3); the counter is RCX or ECX.
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/loop
         0xE0 | 0xE1 | 0xE2 | 0xE3 => {
             let displacement = fetch8()? as i8 as i64;
             let counter_mask = if pfx.addrsize_32 { 0xFFFF_FFFFu64 } else { u64::MAX };
@@ -2233,8 +3305,17 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
         // address and the CS selector are popped as 64-bit values.
         0xCB | 0xCA => {
             let adjustment = if opcode == 0xCA { fetch16()? as u64 } else { 0 };
-            let new_rip = pop64()?;
-            let new_cs = pop64()?;
+            // A far return pops 64-bit RIP/CS in 64-bit code, 32/16-bit only in
+            // compatibility mode. cf. Intel SDM Vol. 2, RET.
+            let compat = *is_32 && size != OpSize::S64;
+            let (new_rip, new_cs) = if compat
+            {
+                (pop_size(size)? & size.mask(), pop_size(size)? & size.mask())
+            }
+            else
+            {
+                (pop64()?, pop64()?)
+            };
             *sreg.offset(1) = new_cs as u16; // CS
             *cpl = new_cs as u8 & 3;
             *rip = new_rip;
@@ -2359,7 +3440,8 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             }
         },
 
-        // ENTER imm16, imm8: build a stack frame
+        // ENTER imm16, imm8; cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/enter
         0xC8 => {
             let alloc = fetch16()? as u64;
             let nesting = fetch8()? & 0x1F;
@@ -2391,7 +3473,8 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             write_reg64(RBP as i32, value);
         },
 
-        // XLAT (0xD7): AL = [RBX + AL] (BX with a 32-bit address size)
+        // XLAT (0xD7); cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/xlat
         0xD7 => {
             let mut base = read_reg64((RBX | (pfx.rex & prefix::REX_B) << 3) as i32);
             if pfx.addrsize_32 {
@@ -2503,7 +3586,8 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
         // FWAIT (0x9B): no pending x87 exceptions are modelled
         0x9B => {},
 
-        // SAHF (0x9E) / LAHF (0x9F): AH <-> SF ZF 0 AF 0 PF 1 CF
+        // SAHF (0x9E) / LAHF (0x9F): AH <-> SF ZF 0 AF 0 PF 1 CF.
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/lahf
         0x9E => {
             let mask = FLAG_CF | FLAG_PF | FLAG_AF | FLAG_ZF | FLAG_SF;
             let ah = (read_reg64(RAX as i32) >> 8) as u32 & 0xFF;
@@ -2528,29 +3612,6 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             else {
                 let value = read_reg(RAX, acc_size, false);
                 mem_write(address, acc_size, value)?;
-            }
-        },
-
-        // MOVSB (0xA4) / REP MOVSB
-        0xA4 => {
-            let count = if pfx.f3 { read_reg64(RCX as i32) } else { 1 };
-            let direction = *flags & (1 << 10) != 0;
-            for _ in 0..count {
-                let source = read_reg64(RSI as i32);
-                let value = mem_read(source, OpSize::S8)?;
-                let destination = read_reg64(RDI as i32);
-                mem_write(destination, OpSize::S8, value)?;
-                if direction {
-                    write_reg64(RSI as i32, source.wrapping_sub(1));
-                    write_reg64(RDI as i32, destination.wrapping_sub(1));
-                }
-                else {
-                    write_reg64(RSI as i32, source.wrapping_add(1));
-                    write_reg64(RDI as i32, destination.wrapping_add(1));
-                }
-            }
-            if pfx.f3 {
-                write_reg64(RCX as i32, 0);
             }
         },
 
@@ -2581,13 +3642,14 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
         },
 
         // LAR/LSL (0F 02/03); only the GDT is modelled, else ZF is cleared.
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/lar
         0x02 | 0x03 => {
             let (modrm, operand) = decode_operand(&pfx)?;
             let selector = read_operand(operand, OpSize::S16, pfx.has_rex())? as u16;
             let index = (selector >> 3) as u64;
             let in_ldt = selector >> 2 & 1 != 0;
             let descriptor = if selector & !7 != 0 && !in_ldt {
-                mem_read(*crate::cpu::global_pointers::gdtr_base + index * 8, OpSize::S64)?
+                mem_read(GDTR_BASE + index * 8, OpSize::S64)?
             }
             else {
                 0
@@ -2619,6 +3681,111 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
 
         // FEMMS (0F 0E): no-op, MMX state is not modelled
         0x0E => {},
+
+        // SHLD/SHRD r/m, r, imm8 or CL.
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/shld
+        0xA4 | 0xA5 | 0xAC | 0xAD => {
+            let (modrm, operand) = decode_operand(&pfx)?;
+            let bits = size.bits();
+            let count = if opcode & 1 == 0 {
+                fetch8()? as u32
+            }
+            else {
+                read_reg(RCX, OpSize::S8, false) as u32
+            } & 0x3F;
+            let count = count % bits;
+            let value = read_operand(operand, size, pfx.has_rex())? & size.mask();
+            let source = read_reg(modrm.reg, size, pfx.has_rex()) & size.mask();
+            let result = if count == 0 {
+                value
+            }
+            else if opcode & 0x08 == 0 {
+                (value << count | source >> (bits - count)) & size.mask()
+            }
+            else {
+                (value >> count | source << (bits - count)) & size.mask()
+            };
+            if count != 0 {
+                let carry = if opcode & 0x08 == 0 {
+                    value >> (bits - count) & 1
+                }
+                else {
+                    value >> (count - 1) & 1
+                };
+                *flags &= !(FLAG_CF as i32);
+                *flags |= (carry as i32) * FLAG_CF as i32;
+            }
+            probe_operand_write(operand, size)?;
+            write_operand(operand, size, pfx.has_rex(), result)?;
+        },
+
+        // Three-byte escapes
+        0x38 => run_0f38(&pfx)?,
+        0x3A => run_0f3a(&pfx)?,
+
+        // EMMS (0F 77): MMX state is not modelled
+        0x77 => {},
+
+        // PUSH/POP FS (0F A0/A1) and GS (0F A8/A9)
+        0xA0 => push_segment(4)?,
+        0xA1 => pop_segment(4)?,
+        0xA8 => push_segment(5)?,
+        0xA9 => pop_segment(5)?,
+
+        // MOVNTI (0F C3), a plain store here; cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/movnti
+        0xC3 => {
+            let (modrm, operand) = decode_operand(&pfx)?;
+            let value = read_reg64(modrm.reg as i32);
+            probe_operand_write(operand, size)?;
+            write_operand(operand, size, pfx.has_rex(), value)?;
+        },
+
+        // LSS/LFS/LGS (0F B2/B4/B5).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/lss
+        0xB2 => load_far(2, size, &pfx)?,
+        0xB4 => load_far(4, size, &pfx)?,
+        0xB5 => load_far(5, size, &pfx)?,
+
+        // RDPMC (0F 33); cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/rdpmc
+        0x33 => {
+            if *cpl != 0 && *cr.offset(4) & (1 << 8) == 0 {
+                crate::cpu::cpu::trigger_gp(0);
+                return Ok(());
+            }
+            let tsc = read_tsc();
+            write_reg(RAX, OpSize::S32, false, tsc & 0xFFFF_FFFF);
+            write_reg(RDX, OpSize::S32, false, tsc >> 32);
+        },
+
+        // SYSENTER/SYSEXIT (0F 34/35).
+// cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/sysenter
+        0x34 => {
+            *sreg.offset(1) = *sysenter_cs as u16 & !3;
+            *sreg.offset(2) = *sysenter_cs as u16 + 8;
+            *cpl = 0;
+            write_reg64(RSP as i32, *sysenter_esp as u32 as u64);
+            *rip = *sysenter_eip as u32 as u64;
+        },
+        0x35 => {
+            *sreg.offset(1) = *sysenter_cs as u16 + 16 | 3;
+            *sreg.offset(2) = *sysenter_cs as u16 + 24 | 3;
+            *cpl = 3;
+            write_reg64(RSP as i32, read_reg64(RCX as i32));
+            *rip = read_reg64(RDX as i32);
+        },
+
+        // MOV DR/TR (0F 21/23/24/26); cf. Intel SDM Vol. 2:
+// https://www.felixcloutier.com/x86/mov-1
+        0x24 | 0x26 => {
+            let modrm = decode_modrm(&pfx)?;
+            if modrm.mod_bits != 3 {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(());
+            }
+            *dreg.offset((modrm.reg & 7) as isize) = read_reg64(modrm.rm as i32) as u32 as i32;
+        },
 
         // PREFETCHT0/T1/T2/NTA (0F 18 /0../3) and PREFETCHW (0F 0D /0,/1).
         // No architectural effect: only the operand has to be decoded, and
@@ -2669,9 +3836,13 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                         }
                     }
                 },
-                6 if modrm.mod_bits == 3 => {
-                    // RDRAND r
-                    let random = crate::cpu::cpu::js::get_rand_int() as u32 as u64;
+                6 | 7 if modrm.mod_bits == 3 => {
+                    // RDRAND r (0F C7 /6) and RDSEED r (0F C7 /7). Both set CF
+                    // to report success and clear OF, SF, ZF, AF and PF.
+                    // cf. Intel SDM Vol. 2, RDRAND and RDSEED
+                    let low = crate::cpu::cpu::js::get_rand_int() as u32 as u64;
+                    let high = crate::cpu::cpu::js::get_rand_int() as u32 as u64;
+                    let random = if size == OpSize::S64 { low | high << 32 } else { low };
                     write_reg(modrm.rm, size, pfx.has_rex(), random);
                     *flags &= !(FLAG_CF as i32 | FLAG_OF as i32);
                     *flags |= FLAG_CF as i32;
@@ -2810,54 +3981,6 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
             }
         },
 
-        // SHLD/SHRD r/m, r, imm8 (0F A4/0F AC) or CL (0F A5/0F AD)
-        0xA4 | 0xA5 | 0xAC | 0xAD => {
-            let shld = opcode == 0xA4 || opcode == 0xA5;
-            let trailing = if opcode == 0xA4 || opcode == 0xAC { 1 } else { 0 };
-            let (modrm, operand) = decode_operand_with_trailing(pfx, trailing)?;
-            let size = if size == OpSize::S8 { OpSize::S32 } else { size };
-            let has_rex = pfx.has_rex();
-            let count = if trailing != 0 {
-                fetch8()? as u32
-            }
-            else {
-                read_reg64(RCX as i32) as u32 & 0xFF
-            } & if size == OpSize::S64 { 63 } else { 31 };
-            if count == 0 {
-                return Ok(());
-            }
-            let dst = read_operand(operand, size, has_rex)? & size.mask();
-            let src = read_reg(modrm.reg, size, has_rex) & size.mask();
-            probe_operand_write(operand, size)?;
-            let bits = size.bits();
-            let sign = size.sign_bit();
-            let (result, cf) = if shld {
-                let result = (dst << count | src >> (bits - count)) & size.mask();
-                (result, dst >> (bits - count) & 1 != 0)
-            }
-            else {
-                let result = (dst >> count | src << (bits - count)) & size.mask();
-                (result, dst >> (count - 1) & 1 != 0)
-            };
-            set_logic_flags(result, size);
-            *flags &= !(FLAG_CF | FLAG_OF) as i32;
-            if cf {
-                *flags |= FLAG_CF as i32;
-            }
-            // OF is only defined for a count of one
-            if count == 1
-                && if shld {
-                    (result & sign != 0) ^ cf
-                }
-                else {
-                    (dst & sign != 0) ^ cf
-                }
-            {
-                *flags |= FLAG_OF as i32;
-            }
-            write_operand(operand, size, has_rex, result)?;
-        },
-
         // CPUID (0F A2)
         0xA2 => {
             crate::cpu::instructions_0f::instr_0FA2();
@@ -2942,13 +4065,13 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                     // SGDT
                     0 => {
                         mem_write(address, OpSize::S16, *gdtr_size as u32 as u64)?;
-                        let base = if *gdtr_base != 0 { *gdtr_base } else { *gdtr_offset as u32 as u64 };
+                        let base = if GDTR_BASE != 0 { GDTR_BASE } else { *gdtr_offset as u32 as u64 };
                         mem_write(address + 2, OpSize::S64, base)?;
                     },
                     // SIDT
                     1 => {
                         mem_write(address, OpSize::S16, *idtr_size as u32 as u64)?;
-                        let base = if *idtr_base != 0 { *idtr_base } else { *idtr_offset as u32 as u64 };
+                        let base = if IDTR_BASE != 0 { IDTR_BASE } else { *idtr_offset as u32 as u64 };
                         mem_write(address + 2, OpSize::S64, base)?;
                     },
                     // LGDT
@@ -2956,14 +4079,14 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                         *gdtr_size = mem_read(address, OpSize::S16)? as i32;
                         let base = mem_read(address + 2, OpSize::S64)?;
                         *gdtr_offset = base as u32 as i32;
-                        *gdtr_base = base;
+                        GDTR_BASE = base;
                     },
                     // LIDT
                     3 => {
                         *idtr_size = mem_read(address, OpSize::S16)? as i32;
                         let base = mem_read(address + 2, OpSize::S64)?;
                         *idtr_offset = base as u32 as i32;
-                        *idtr_base = base;
+                        IDTR_BASE = base;
                     },
                     // SMSW
                     4 => {
@@ -3040,14 +4163,28 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                             mem_write(address + i, OpSize::S8, 0)?;
                         }
                         mem_write(address, OpSize::S16, *fpu_control_word as u64)?;
-                        mem_write(address + 2, OpSize::S16, *fpu_status_word as u64)?;
+                        mem_write(address + 2, OpSize::S16, fpu_load_status_word() as u64)?;
+                        mem_write(address + 4, OpSize::S16, (!*fpu_stack_empty & 0xFF) as u64)?;
+                        mem_write(address + 6, OpSize::S16, *fpu_opcode as u64)?;
+                        mem_write(address + 8, OpSize::S32, *fpu_ip as u32 as u64)?;
+                        mem_write(address + 12, OpSize::S16, *fpu_ip_selector as u64)?;
+                        mem_write(address + 16, OpSize::S32, *fpu_dp as u32 as u64)?;
+                        mem_write(address + 20, OpSize::S16, *fpu_dp_selector as u64)?;
                         mem_write(address + 24, OpSize::S32, *mxcsr as u32 as u64)?;
                         // MXCSR_MASK: the bits of MXCSR that may be set. Real CPUs
                         // report 0xffff; leaving it zero makes the kernel (which
                         // derives mxcsr_feature_mask from it) consider its own
                         // MXCSR value invalid and WARN on every context switch.
                         mem_write(address + 28, OpSize::S32, 0xFFFF)?;
+                        // ST0..ST7 in stack order, as 80-bit extended values
                         for i in 0..8u64 {
+                            let reg_index = (i as i32 + *fpu_stack_ptr as i32) & 7;
+                            let st = *fpu_st.offset(reg_index as isize);
+                            mem_write(address + 32 + i * 16, OpSize::S64, st.mantissa)?;
+                            mem_write(address + 32 + i * 16 + 8, OpSize::S16, st.sign_exponent as u64)?;
+                        }
+                        // Long mode has all 16 XMM registers
+                        for i in 0..16u64 {
                             let x = xmm_get(i as u8);
                             mem_write(address + 160 + i * 16, OpSize::S64, x.u64[0])?;
                             mem_write(address + 160 + i * 16 + 8, OpSize::S64, x.u64[1])?;
@@ -3064,10 +4201,22 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                             crate::cpu::cpu::trigger_ud();
                             return Ok(());
                         };
-                        *fpu_control_word = mem_read(address, OpSize::S16)? as u16;
-                        *fpu_status_word = mem_read(address + 2, OpSize::S16)? as u16;
+                        set_control_word(mem_read(address, OpSize::S16)? as u16);
+                        fpu_set_status_word(mem_read(address + 2, OpSize::S16)? as u16);
+                        *fpu_stack_empty = !mem_read(address + 4, OpSize::S8)? as u8;
+                        *fpu_opcode = mem_read(address + 6, OpSize::S16)? as i32;
+                        *fpu_ip = mem_read(address + 8, OpSize::S32)? as i32;
+                        *fpu_ip_selector = mem_read(address + 12, OpSize::S16)? as i32;
+                        *fpu_dp = mem_read(address + 16, OpSize::S32)? as i32;
+                        *fpu_dp_selector = mem_read(address + 20, OpSize::S16)? as i32;
                         *mxcsr = mem_read(address + 24, OpSize::S32)? as u32 as i32;
                         for i in 0..8u64 {
+                            let reg_index = (i as i32 + *fpu_stack_ptr as i32) & 7;
+                            let mantissa = mem_read(address + 32 + i * 16, OpSize::S64)?;
+                            let sign_exponent = mem_read(address + 32 + i * 16 + 8, OpSize::S16)? as u16;
+                            *fpu_st.offset(reg_index as isize) = F80 { mantissa, sign_exponent };
+                        }
+                        for i in 0..16u64 {
                             let low = mem_read(address + 160 + i * 16, OpSize::S64)?;
                             let high = mem_read(address + 160 + i * 16 + 8, OpSize::S64)?;
                             xmm_set(i as u8, reg128 { u64: [low, high] });
@@ -3109,7 +4258,9 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
             set_cpl_segments(cs, 0);
         },
 
-        // SYSRET (0F 07)
+        // SYSRET: CS = STAR[63:48]+16 for a 64-bit operand size (__USER_CS), else
+        // STAR[63:48] (compat, RIP = ECX); SS = STAR[63:48]+8, RPL 3.
+        // cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/sysret
         0x07 => {
             if *efer & EFER_SCE == 0 {
                 crate::cpu::cpu::trigger_ud();
@@ -3117,9 +4268,21 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
             }
             let target = read_reg64(RCX as i32);
             *flags = read_reg64(R11 as i32) as u32 as i32;
-            let cs = (*star >> 48 & 0xFFFF) as u16 | 3;
-            set_cpl_segments(cs, 3);
-            *rip = target;
+            let star_user = (*star >> 48 & 0xFFFF) as u16;
+            let (cs, ss, new_rip) = if pfx.has_rex_w() {
+                (star_user.wrapping_add(16), star_user.wrapping_add(8), target)
+            }
+            else {
+                (star_user, star_user.wrapping_add(8), target & 0xFFFF_FFFF)
+            };
+            *sreg.offset(CS as isize) = cs | 3;
+            *sreg.offset(SS as isize) = ss | 3;
+            *segment_offsets.offset(CS as isize) = 0;
+            *segment_offsets.offset(SS as isize) = 0;
+            *segment_is_null.offset(CS as isize) = false;
+            *segment_is_null.offset(SS as isize) = false;
+            *cpl = 3;
+            *rip = new_rip;
         },
 
         // WRMSR (0F 30)
@@ -3207,6 +4370,8 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                     src.trailing_zeros() as u64
                 }
                 else {
+                    // src is already masked to the operand size, so this is the
+                    // index of its highest set bit
                     63 - src.leading_zeros() as u64
                 };
                 write_reg(modrm.reg, size, pfx.has_rex(), result);

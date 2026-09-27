@@ -297,10 +297,10 @@ export function IDEController(cpu, bus, ide_config)
     const has_secondary = ide_config && ide_config[1][0];
     if(has_primary || has_secondary)
     {
-        if(has_primary)
-        {
-            this.primary = new IDEChannel(this, 0, ide_config[0], 0x1F0, 0x3F6, 14);
-        }
+        // A PIIX3 has two channels; an undecoded port reads 0xFF (BSY) and libata
+        // hangs. cf. 82371SB datasheet (IDE I/O decode), ATA/ATAPI-6, 7.15.
+        this.primary = new IDEChannel(this, 0,
+            ide_config && ide_config[0] || [undefined, undefined], 0x1F0, 0x3F6, 14);
         if(has_secondary)
         {
             this.secondary = new IDEChannel(this, 1, ide_config[1], 0x170, 0x376, 15);
@@ -332,8 +332,9 @@ export function IDEController(cpu, bus, ide_config)
             0x43, 0x10, 0xD4, 0x82,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, interrupt_line, 0x01, 0x00, 0x00,
-            // 0x40
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // 0x40: bit 7 of 0x41/0x43 enables each channel.
+            // cf. Linux drivers/ata/ata_piix.c (piix_enable_bits), 82371SB datasheet
+            0x00, 0x80, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -399,6 +400,10 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
 
     /** @type {number} */
     this.device_control_reg = ATA_CR_NIEN;
+
+    // Preserve pending INTRQ while nIEN masks the interrupt line.
+    /** @type {boolean} */
+    this.irq_pending = false;
 
     /** @type {number} */
     this.prdt_addr = 0;
@@ -492,6 +497,7 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
         {
             dbg_log(`${this.current_interface.name}: read Status register: ${h(status, 2)} (lower IRQ ${this.irq})`, LOG_DISK);
         }
+        this.irq_pending = false;
         this.cpu.device_lower_irq(this.irq);
         return status;
     });
@@ -591,13 +597,16 @@ function IDEChannel(controller, channel_nr, channel_config, command_base, contro
         {
             dbg_log(this.current_interface.name + ": write Command register", LOG_DISK);
         }
-        this.current_interface.status_reg &= ~(ATA_SR_ERR|ATA_SR_DF);
-        this.current_interface.ata_command(data);
+        // Clear the previous INTRQ before a synchronous command can complete.
         if(LOG_DETAILS & LOG_DETAIL_IRQ)
         {
             dbg_log(this.current_interface.name + ": lower IRQ " + this.irq, LOG_DISK);
         }
+        this.irq_pending = false;
         this.cpu.device_lower_irq(this.irq);
+
+        this.current_interface.status_reg &= ~(ATA_SR_ERR|ATA_SR_DF);
+        this.current_interface.ata_command(data);
     });
 
     //
@@ -654,10 +663,21 @@ IDEChannel.prototype.write_control = function(data)
     {
         dbg_log(`${this.current_interface.name}: soft reset via control port (lower IRQ ${this.irq})`, LOG_DISK);
         this.cpu.device_lower_irq(this.irq);
+        this.irq_pending = false;
         this.master.device_reset();
         this.slave.device_reset();
     }
     this.device_control_reg = data;
+
+    // Gate the pending interrupt line with nIEN.
+    if((data & ATA_CR_NIEN) === 0 && this.irq_pending)
+    {
+        this.cpu.device_raise_irq(this.irq);
+    }
+    else if(data & ATA_CR_NIEN)
+    {
+        this.cpu.device_lower_irq(this.irq);
+    }
 };
 
 IDEChannel.prototype.dma_read_addr = function()
@@ -769,13 +789,15 @@ IDEChannel.prototype.dma_write_command8 = function(value)
 
 IDEChannel.prototype.push_irq = function()
 {
+    this.irq_pending = true;
+    this.dma_status |= 4;
+
     if((this.device_control_reg & ATA_CR_NIEN) === 0)
     {
         if(LOG_DETAILS & LOG_DETAIL_IRQ)
         {
             dbg_log(this.current_interface.name + ": push IRQ " + this.irq, LOG_DISK);
         }
-        this.dma_status |= 4;
         this.cpu.device_raise_irq(this.irq);
     }
 };
@@ -796,6 +818,7 @@ IDEChannel.prototype.get_state = function()
     state[10] = this.dma_status;
     state[11] = this.current_interface === this.master;
     state[12] = this.dma_command;
+    state[13] = this.irq_pending;
     return state;
 };
 
@@ -814,6 +837,7 @@ IDEChannel.prototype.set_state = function(state)
     this.dma_status = state[10];
     this.current_interface = state[11] ? this.master : this.slave;
     this.dma_command = state[12];
+    this.irq_pending = state[13] || false;
 };
 
 /**
@@ -937,6 +961,14 @@ function IDEInterface(channel, interface_nr, buffer, is_cd)
     if(this.drive_connected)
     {
         dbg_log(`${this.name}: ${this.is_atapi ? "ATAPI CD-ROM" : "ATA HD"} device ready`, LOG_DISK);
+    }
+
+    // ATAPI power-on signature (sc 1, ll 1, lm 0x14, lh 0xEB); drivers probe it
+    // before resetting. cf. ATA/ATAPI-6, 9.1.
+    this.device_reset();
+    if(this.is_atapi)
+    {
+        this.status_reg = ATA_SR_DRDY|ATA_SR_DSC;
     }
 
     Object.seal(this);
@@ -1745,15 +1777,15 @@ IDEInterface.prototype.atapi_handle = function()
 
     this.sector_count_reg = this.sector_count_reg & ~7 | 2;
 
-    if((this.status_reg & ATA_SR_BSY) === 0)
-    {
-        this.push_irq();
-    }
-
     if((this.status_reg & ATA_SR_BSY) === 0 && this.data_length === 0)
     {
         this.sector_count_reg |= 1;
         this.status_reg &= ~ATA_SR_DRQ;
+    }
+
+    if((this.status_reg & ATA_SR_BSY) === 0)
+    {
+        this.push_irq();
     }
 
     if(DEBUG && do_dbg_log)

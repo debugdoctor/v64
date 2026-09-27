@@ -1,0 +1,193 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Alpine Linux 3.24 - live ISO (v64)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+    body { background: #101014; color: #d8d8d8; font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0; padding: 16px; }
+    h1 { font-size: 16px; font-weight: 600; margin: 0 0 6px; }
+    #hint { color: #8f8f96; font-size: 13px; margin-bottom: 12px; max-width: 900px; }
+    #hint code { color: #c8c8d0; }
+    #screen_container { background: #000; display: inline-block; padding: 6px; border-radius: 4px; }
+    #screen_container > div { white-space: pre; font: 14px/14px "DejaVu Sans Mono", Menlo, monospace; color: #ccc; }
+    canvas { display: block; }
+    #stats { color: #8f8f96; font: 12px/1.8 monospace; margin-top: 8px; }
+    button { font: 12px monospace; margin-right: 6px; }
+</style>
+
+<h1>Alpine Linux 3.24.2 - live ISO</h1>
+<div id="hint">
+    BIOS (bochs-bios.bin) &rarr; El Torito &rarr; ISOLINUX &rarr; Linux 6.18.52-0-virt &rarr; OpenRC &rarr; <code>localhost login:</code>
+    (log in as <code>root</code>, no password). Boots <code>tests/images/alpine-virt-3.24.2-x86_64.iso</code>.
+    Keep this tab in the foreground: a background tab is throttled to ~1 Hz, which drops the emulator to a crawl.
+    The ISO on disk is untouched; the boot entry is patched in memory to show the kernel log.
+    <code>?jit64=0</code> runs the interpreter instead, <code>?screen=none</code> hides the screen.
+</div>
+
+<div>
+    <button id="pause">Pause</button>
+    <button id="reset">Reset</button>
+    <button id="save">Save state</button>
+    <button id="restore">Restore state</button>
+</div>
+
+<div id="screen_container">
+    <div id="screen"></div>
+    <canvas id="vga" style="display: none"></canvas>
+</div>
+<input id="state_file" type="file" style="display: none">
+
+<div id="stats"></div>
+
+<script>globalThis.DEBUG = false; // release behaviour: no JS dbg_assert/dbg_log</script>
+<script type="module">
+import { v64 } from "../src/browser/starter.js";
+import { dump_file } from "../src/lib.js";
+
+const args = new URLSearchParams(location.search);
+const show_screen = args.get("screen") !== "none";
+const ISO_URL = "../tests/images/alpine-virt-3.24.2-x86_64.iso";
+
+const BOOT_ENTRY = "APPEND modules=loop,squashfs,sd-mod,usb-storage quiet";
+// sr-mod: load the CD driver up front. console=tty0: kernel log on the screen.
+const BOOT_ENTRY_PATCHED = "APPEND modules=loop,squashfs,sr-mod console=tty0";
+
+// Pad to the original length: the ISO9660 record fixes the file's size.
+async function load_patched_iso()
+{
+    const bytes = new Uint8Array(await (await fetch(ISO_URL)).arrayBuffer());
+    const entry = new TextEncoder().encode(BOOT_ENTRY);
+    let at = -1;
+
+    for(let from = 0; (from = bytes.indexOf(entry[0], from)) !== -1 && from < bytes.length - entry.length; from++)
+    {
+        let match = true;
+        for(let i = 1; i < entry.length; i++)
+        {
+            if(bytes[from + i] !== entry[i])
+            {
+                match = false;
+                break;
+            }
+        }
+        if(match)
+        {
+            at = from;
+            break;
+        }
+    }
+
+    if(at === -1)
+    {
+        console.warn("boot entry not found, booting the ISO unmodified");
+    }
+    else
+    {
+        bytes.set(new TextEncoder().encode(BOOT_ENTRY_PATCHED.padEnd(entry.length)), at);
+    }
+
+    return bytes.buffer;
+}
+
+const emulator = new v64({
+    wasm_path: "../build/v64.wasm",
+    memory_size: 1024 * 1024 * 1024,
+    vga_memory_size: 8 * 1024 * 1024,
+    screen_container: show_screen ? document.getElementById("screen_container") : undefined,
+    bios: { url: "../bios/bochs-bios.bin" },
+    vga_bios: { url: "../bios/bochs-vgabios.bin" },
+    cdrom: { buffer: await load_patched_iso() },
+    boot_order: 0x213, // CD / floppy / hard disk
+    log_level: 0,      // else every RTC/PCI access goes through console.log
+    autostart: true,
+});
+
+// ?sse=1 enables the experimental SSE2 codegen (jit64); off by default.
+if(args.get("sse") === "1")
+{
+    emulator.add_listener("emulator-loaded", function()
+    {
+        emulator.v86.cpu.wm.exports.jit64_set_sse(1);
+    });
+}
+
+// ?jit64=0 falls back to the interpreter.
+if(args.get("jit64") === "0")
+{
+    emulator.add_listener("emulator-loaded", function()
+    {
+        emulator.v86.cpu.wm.exports.jit64_set_enabled(0);
+    });
+}
+
+window.emulator = emulator;
+
+let booted = false;
+emulator.add_listener("emulator-loaded", function()
+{
+    booted = true;
+});
+
+document.getElementById("pause").onclick = function()
+{
+    if(emulator.is_running())
+    {
+        emulator.stop();
+        this.textContent = "Run";
+    }
+    else
+    {
+        emulator.run();
+        this.textContent = "Pause";
+    }
+};
+
+document.getElementById("reset").onclick = function()
+{
+    emulator.restart();
+};
+
+document.getElementById("save").onclick = async function()
+{
+    dump_file(await emulator.save_state(), "alpine-v64-state.bin");
+};
+
+document.getElementById("restore").onclick = function()
+{
+    document.getElementById("state_file").click();
+};
+
+document.getElementById("state_file").onchange = async function()
+{
+    const file = this.files[0];
+    if(!file) return;
+    const was_running = emulator.is_running();
+    if(was_running) await emulator.stop();
+    try
+    {
+        await emulator.restore_state(await file.arrayBuffer());
+    }
+    catch(err)
+    {
+        alert("Restore failed (the configuration must match the saved one):\n" + err);
+    }
+    if(was_running) emulator.run();
+    this.value = "";
+};
+
+const stats = document.getElementById("stats");
+let last_count = 0;
+let last_time = Date.now();
+
+setInterval(function()
+{
+    const now = Date.now();
+    const count = emulator.get_instruction_counter();
+    const mips = Math.round((count - last_count) / (now - last_time) / 1000);
+    last_count = count;
+    last_time = now;
+
+    stats.textContent =
+        (booted ? (emulator.is_running() ? "running" : "paused") : "loading images") +
+        " - " + mips + " mIPS - " + Math.round(count / 1e6) + " M instructions";
+}, 1000);
+</script>

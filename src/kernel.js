@@ -46,9 +46,12 @@ const ACPI_MADT_ADDRESS = 0xF0100;
 const ACPI_HPET_ADDRESS = 0xF0200;
 const ACPI_DSDT_ADDRESS = 0xF0300;
 const ACPI_FADT_ADDRESS = 0xF0400;
-const ACPI_SPCR_ADDRESS = 0xF0500;
+const ACPI_SPCR_ADDRESS = 0xF0600;
 const APIC_MEM_ADDRESS = 0xFEE00000;
 const IOAPIC_MEM_ADDRESS = 0xFEC00000;
+const PM1A_EVT_BLK = 0xB000;
+const PM1A_CNT_BLK = 0xB004;
+const PM_TMR_BLK = 0xB008;
 
 const LINUX_BOOT_HDR_TYPE_OF_LOADER_NOT_ASSIGNED = 0xFF;
 
@@ -110,6 +113,14 @@ function build_acpi_tables(mem8)
     madt.push(1, 12, 0, 0);            // I/O APIC
     push32(IOAPIC_MEM_ADDRESS);
     push32(0);                         // GSI base
+    for(let irq = 0; irq < 16; irq++)
+    {
+        // Interrupt Source Override: ISA IRQ -> the GSI with the same number,
+        // edge-triggered and active-high, like real firmware declares them.
+        madt.push(2, 10, 0, irq);
+        push32(irq);
+        madt.push(0, 0);
+    }
     table(ACPI_MADT_ADDRESS, "APIC", 5, madt);
 
     // HPET table, pointing at the emulated timer at 0xFED00000.
@@ -124,26 +135,57 @@ function build_acpi_tables(mem8)
     hpet.push(0);           // page protection
     table(ACPI_HPET_ADDRESS, "HPET", 1, hpet);
 
-    // A minimal DSDT (empty AML) and a FADT that declares hardware-reduced
-    // ACPI, which needs no SMI/SCI/PM blocks. Linux requires both to use ACPI.
-    table(ACPI_DSDT_ADDRESS, "DSDT", 2, []);
+    // DSDT with a PCI root bridge (PNP0A03); Linux only enumerates buses that
+    // ACPI describes. PkgLength: <= 0x3F is one byte, else (low nibble | 0x40) >> 4.
+    // cf. ACPI 6.5, 6.5 Device Configuration
+    // https://uefi.org/specs/ACPI/6.5/06_Device_Configuration.html
+    const dsdt = [
+        0x10, 0x49, 0x09, 0x5c, 0x5f, 0x53, 0x42, 0x5f, 0x5b, 0x82, 0x40, 0x09,
+        0x50, 0x43, 0x49, 0x30, 0x08, 0x5f, 0x48, 0x49, 0x44, 0x0d, 0x50, 0x4e,
+        0x50, 0x30, 0x41, 0x30, 0x33, 0x00, 0x08, 0x5f, 0x55, 0x49, 0x44, 0x00,
+        0x08, 0x5f, 0x42, 0x42, 0x4e, 0x00, 0x08, 0x5f, 0x43, 0x52, 0x53, 0x11,
+        0x4a, 0x04, 0x0a, 0x46, 0x88, 0x0d, 0x00, 0x02, 0x0c, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x87, 0x17, 0x00, 0x01,
+        0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x87, 0x17,
+        0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xff, 0xff, 0xff, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+        0x79, 0x00, 0x08, 0x5f, 0x50, 0x52, 0x54, 0x12, 0x1a, 0x02, 0x12, 0x0b,
+        0x04, 0x0c, 0xff, 0xff, 0x1e, 0x00, 0x00, 0x00, 0x0a, 0x0e, 0x12, 0x0b,
+        0x04, 0x0c, 0xff, 0xff, 0x1e, 0x00, 0x01, 0x00, 0x0a, 0x0f,
+    ];
+    table(ACPI_DSDT_ADDRESS, "DSDT", 2, dsdt);
 
-    const fadt = new Array(208).fill(0);
-    const set16 = (offset, value) => { fadt[offset - 36] = value & 0xFF; fadt[offset - 36 + 1] = value >> 8 & 0xFF; };
-    const set32 = (offset, value) => {
-        fadt[offset - 36] = value & 0xFF;
-        fadt[offset - 36 + 1] = value >> 8 & 0xFF;
-        fadt[offset - 36 + 2] = value >> 16 & 0xFF;
-        fadt[offset - 36 + 3] = value >> 24 & 0xFF;
-    };
+    const fadt = new Array(0x114 - 36).fill(0);
+    const set8 = (offset, value) => { fadt[offset - 36] = value & 0xFF; };
+    const set16 = (offset, value) => { set8(offset, value); set8(offset + 1, value >> 8); };
+    const set32 = (offset, value) => { for(let i = 0; i < 4; i++) set8(offset + i, value >> i * 8); };
     /** @param {number} offset @param {bigint} value */
     const set64 = (offset, value) => {
         for(let i = 0; i < 8; i++) fadt[offset - 36 + i] = Number(value >> BigInt(i * 8) & 0xFFn);
     };
+    const set_gas = (offset, width, address, access) => {
+        set8(offset, 1);          // System I/O
+        set8(offset + 1, width);
+        set8(offset + 2, 0);
+        set8(offset + 3, access); // 1 = byte, 2 = word, 3 = dword
+        set64(offset + 4, BigInt(address));
+    };
     set32(0x28, ACPI_DSDT_ADDRESS);          // DSDT
     set16(0x2E, 9);                          // SCI interrupt
-    set32(0x70, 1 << 20);                    // flags: HW_REDUCED_ACPI
+    set8(0x34, 0);                           // ACPI_ENABLE
+    set8(0x35, 0);                           // ACPI_DISABLE
+    set32(0x38, PM1A_EVT_BLK);               // PM1a_EVT_BLK
+    set32(0x40, PM1A_CNT_BLK);               // PM1a_CNT_BLK
+    set32(0x4C, PM_TMR_BLK);                 // PM_TMR_BLK
+    set8(0x58, 4);                           // PM1_EVT_LEN
+    set8(0x59, 2);                           // PM1_CNT_LEN
+    set8(0x5B, 4);                           // PM_TMR_LEN
+    set16(0x6D, 1);                          // IA-PC Boot Arch: LEGACY_DEVICES
     set64(0x8C, BigInt(ACPI_DSDT_ADDRESS));  // X_DSDT
+    set_gas(0x94, 32, PM1A_EVT_BLK, 3);      // X_PM1a_EVT_BLK
+    set_gas(0xAC, 16, PM1A_CNT_BLK, 2);      // X_PM1a_CNT_BLK
+    set_gas(0xD0, 32, PM_TMR_BLK, 3);        // X_PM_TMR_BLK
     table(ACPI_FADT_ADDRESS, "FACP", 6, fadt);
 
     // SPCR: the 16550 UART at 0x3F8, so the kernel binds ttyS0 as a real console

@@ -69,7 +69,7 @@ impl FunctionType {
     pub const LAST: FunctionType = FunctionType::FN4_I32_I64_I64_I32_RET;
 }
 
-pub const WASM_MODULE_ARGUMENT_COUNT: u8 = 1;
+pub const WASM_MODULE_ARGUMENT_COUNT: u16 = 1;
 
 pub struct WasmBuilder {
     output: Vec<u8>,
@@ -91,22 +91,28 @@ pub struct WasmBuilder {
 
     free_locals_i32: Vec<WasmLocal>,
     free_locals_i64: Vec<WasmLocalI64>,
-    local_count: u8,
+    // Locals freed while inside a structured block are not handed out again
+    // until that block ends: a local freed in one branch may still be live in
+    // the other one, and reusing it there would clobber the value.
+    pending_free_i32: Vec<WasmLocal>,
+    pending_free_i64: Vec<WasmLocalI64>,
+    pending_free_marks: Vec<(usize, usize)>,
+    local_count: u16,
     pub arg_local_initial_state: WasmLocal,
 }
 
 #[derive(Eq, PartialEq)]
-pub struct WasmLocal(u8);
+pub struct WasmLocal(u16);
 impl WasmLocal {
-    pub fn idx(&self) -> u8 { self.0 }
+    pub fn idx(&self) -> u16 { self.0 }
     /// Unsafe: Can result in multiple free's. Should only be used for locals that are used during
     /// the whole module (for example, registers)
     pub fn unsafe_clone(&self) -> WasmLocal { WasmLocal(self.0) }
 }
 
-pub struct WasmLocalI64(u8);
+pub struct WasmLocalI64(u16);
 impl WasmLocalI64 {
-    pub fn idx(&self) -> u8 { self.0 }
+    pub fn idx(&self) -> u16 { self.0 }
     /// Unsafe: Can result in multiple free's. Should only be used for locals that are used during
     /// the whole module.
     pub fn unsafe_clone(&self) -> WasmLocalI64 { WasmLocalI64(self.0) }
@@ -140,6 +146,9 @@ impl WasmBuilder {
 
             free_locals_i32: Vec::with_capacity(8),
             free_locals_i64: Vec::with_capacity(8),
+            pending_free_i32: Vec::new(),
+            pending_free_i64: Vec::new(),
+            pending_free_marks: Vec::new(),
             local_count: 0,
             arg_local_initial_state: WasmLocal(0),
         };
@@ -170,6 +179,9 @@ impl WasmBuilder {
         self.instruction_body.clear();
         self.free_locals_i32.clear();
         self.free_locals_i64.clear();
+        self.pending_free_i32.clear();
+        self.pending_free_i64.clear();
+        self.pending_free_marks.clear();
         self.local_count = 0;
 
         dbg_assert!(self.label_to_depth.is_empty());
@@ -204,7 +216,9 @@ impl WasmBuilder {
         self.output.push(0);
 
         dbg_assert!(
-            self.local_count as usize == self.free_locals_i32.len() + self.free_locals_i64.len(),
+            self.local_count as usize == self.free_locals_i32.len() + self.free_locals_i64.len()
+                && self.pending_free_i32.is_empty()
+                && self.pending_free_i64.is_empty(),
             "All locals should have been freed"
         );
 
@@ -221,7 +235,7 @@ impl WasmBuilder {
                 op::TYPE_I32
             }
         });
-        let mut groups = vec![];
+        let mut groups: Vec<(u8, u32)> = vec![];
         for local_type in locals {
             if let Some(last) = groups.last_mut() {
                 let (last_type, last_count) = *last;
@@ -232,11 +246,9 @@ impl WasmBuilder {
             }
             groups.push((local_type, 1));
         }
-        dbg_assert!(groups.len() < 128);
-        self.output.push(groups.len().safe_to_u8());
+        write_leb_u32(&mut self.output, groups.len() as u32);
         for (local_type, count) in groups {
-            dbg_assert!(count < 128);
-            self.output.push(count);
+            write_leb_u32(&mut self.output, count);
             self.output.push(local_type);
         }
 
@@ -573,6 +585,8 @@ impl WasmBuilder {
     pub fn get_output_len(&self) -> u32 { self.output.len() as u32 }
 
     fn open_block(&mut self) -> Label {
+        self.pending_free_marks
+            .push((self.pending_free_i32.len(), self.pending_free_i64.len()));
         let label = self.next_label;
         self.next_label = self.next_label.next();
         self.label_to_depth
@@ -584,6 +598,18 @@ impl WasmBuilder {
         let label = self.label_stack.pop().unwrap();
         let old_depth = self.label_to_depth.remove(&label).unwrap();
         dbg_assert!(self.label_to_depth.len() + 1 == old_depth);
+        // the block is closed, so locals freed inside it can be reused now
+        let (mark_i32, mark_i64) = self.pending_free_marks.pop().unwrap();
+        while self.pending_free_i32.len() > mark_i32
+        {
+            let local = self.pending_free_i32.pop().unwrap();
+            self.free_locals_i32.push(local);
+        }
+        while self.pending_free_i64.len() > mark_i64
+        {
+            let local = self.pending_free_i64.pop().unwrap();
+            self.free_locals_i64.push(local);
+        }
     }
 
     #[must_use = "local allocated but not used"]
@@ -602,34 +628,41 @@ impl WasmBuilder {
             (WASM_MODULE_ARGUMENT_COUNT..self.local_count + WASM_MODULE_ARGUMENT_COUNT)
                 .contains(&local.0)
         );
-        self.free_locals_i32.push(local)
+        if self.label_stack.is_empty()
+        {
+            self.free_locals_i32.push(local);
+        }
+        else
+        {
+            self.pending_free_i32.push(local);
+        }
     }
 
     #[must_use = "local allocated but not used"]
     pub fn set_new_local(&mut self) -> WasmLocal {
         let local = self.alloc_local();
         self.instruction_body.push(op::OP_SETLOCAL);
-        self.instruction_body.push(local.idx());
+        write_leb_u32(&mut self.instruction_body, local.idx() as u32);
         local
     }
     #[must_use = "local allocated but not used"]
     pub fn tee_new_local(&mut self) -> WasmLocal {
         let local = self.alloc_local();
         self.instruction_body.push(op::OP_TEELOCAL);
-        self.instruction_body.push(local.idx());
+        write_leb_u32(&mut self.instruction_body, local.idx() as u32);
         local
     }
     pub fn set_local(&mut self, local: &WasmLocal) {
         self.instruction_body.push(op::OP_SETLOCAL);
-        self.instruction_body.push(local.idx());
+        write_leb_u32(&mut self.instruction_body, local.idx() as u32);
     }
     pub fn tee_local(&mut self, local: &WasmLocal) {
         self.instruction_body.push(op::OP_TEELOCAL);
-        self.instruction_body.push(local.idx());
+        write_leb_u32(&mut self.instruction_body, local.idx() as u32);
     }
     pub fn get_local(&mut self, local: &WasmLocal) {
         self.instruction_body.push(op::OP_GETLOCAL);
-        self.instruction_body.push(local.idx());
+        write_leb_u32(&mut self.instruction_body, local.idx() as u32);
     }
 
     #[must_use = "local allocated but not used"]
@@ -648,29 +681,36 @@ impl WasmBuilder {
             (WASM_MODULE_ARGUMENT_COUNT..self.local_count + WASM_MODULE_ARGUMENT_COUNT)
                 .contains(&local.0)
         );
-        self.free_locals_i64.push(local)
+        if self.label_stack.is_empty()
+        {
+            self.free_locals_i64.push(local);
+        }
+        else
+        {
+            self.pending_free_i64.push(local);
+        }
     }
     #[must_use = "local allocated but not used"]
     pub fn set_new_local_i64(&mut self) -> WasmLocalI64 {
         let local = self.alloc_local_i64();
         self.instruction_body.push(op::OP_SETLOCAL);
-        self.instruction_body.push(local.idx());
+        write_leb_u32(&mut self.instruction_body, local.idx() as u32);
         local
     }
     #[must_use = "local allocated but not used"]
     pub fn tee_new_local_i64(&mut self) -> WasmLocalI64 {
         let local = self.alloc_local_i64();
         self.instruction_body.push(op::OP_TEELOCAL);
-        self.instruction_body.push(local.idx());
+        write_leb_u32(&mut self.instruction_body, local.idx() as u32);
         local
     }
     pub fn get_local_i64(&mut self, local: &WasmLocalI64) {
         self.instruction_body.push(op::OP_GETLOCAL);
-        self.instruction_body.push(local.idx());
+        write_leb_u32(&mut self.instruction_body, local.idx() as u32);
     }
     pub fn set_local_i64(&mut self, local: &WasmLocalI64) {
         self.instruction_body.push(op::OP_SETLOCAL);
-        self.instruction_body.push(local.idx());
+        write_leb_u32(&mut self.instruction_body, local.idx() as u32);
     }
 
     pub fn const_i32(&mut self, v: i32) {

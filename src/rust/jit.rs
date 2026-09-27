@@ -80,7 +80,7 @@ pub const JIT_THRESHOLD: u32 = 200 * 1000;
 pub const BRTABLE_CUTOFF: usize = 10;
 
 // needs to be synced to const.js
-pub const WASM_TABLE_SIZE: u32 = 900;
+pub const WASM_TABLE_SIZE: u32 = 4096;
 
 pub const CHECK_JIT_STATE_INVARIANTS: bool = false;
 

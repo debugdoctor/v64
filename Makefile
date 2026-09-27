@@ -366,11 +366,16 @@ rust-test: $(RUST_FILES)
 jit64-tests: build/v64-debug.wasm
 	node tests/jit64/run.js
 	node tests/jit64/longmode.js
+	node tests/jit64/addressing.js
+	node tests/jit64/controlflow.js
+	node tests/jit64/debug-probe.js
+	node tests/ide-interrupts.js
 	node tests/jit64/e2e.js
 	node tests/jit64/benchmark.js
 
 interp64-tests: build/v64-debug.wasm
 	node tests/interp64/run.js
+	node tests/interp64/code_page_boundary.js
 
 boot64-tests: build/v64-debug.wasm
 	node tests/boot64/run.js

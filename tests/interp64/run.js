@@ -584,6 +584,48 @@ emulator.add_listener("emulator-loaded", () => {
         assert.equal(cpu.flags[0] >>> 0, flags_before, "SYSRET restores RFLAGS");
     }
 
+    // PSRAD/PSRAW shift arithmetically within each lane; GCC widens int -> long
+    // with `movd`/`psrad $31`/`punpckldq`. cf. Intel SDM Vol. 2, PSRAD.
+    {
+        const runShift = (bytes, input) =>
+        {
+            for(let i = 0; i < 16; i++)
+            {
+                ex.write8(SCRATCH + i, i < 4 ? input >> (i * 8) & 0xFF : 0);
+            }
+            load([
+                0x48, 0xB8, SCRATCH & 0xFF, SCRATCH >> 8 & 0xFF, SCRATCH >> 16 & 0xFF, SCRATCH >> 24 & 0xFF,
+                0, 0, 0, 0,
+                ...bytes,
+                0xF4,
+            ], 3);
+            let got = 0;
+            for(let i = 0; i < 4; i++)
+            {
+                got |= ex.read8(SCRATCH + i) << (i * 8);
+            }
+            return got >>> 0;
+        };
+
+        const cases = [
+            ["psrad $31 (0x80000000)", [0x66, 0x0F, 0x72, 0x20, 0x1F], 0x80000000, 0xFFFFFFFF],
+            ["psrad $31 (0xffffffff)", [0x66, 0x0F, 0x72, 0x20, 0x1F], 0xFFFFFFFF, 0xFFFFFFFF],
+            ["psrad $31 (positive)", [0x66, 0x0F, 0x72, 0x20, 0x1F], 0x7FFFFFFF, 0x00000000],
+            ["psrad $4  (0x80000000)", [0x66, 0x0F, 0x72, 0x20, 0x04], 0x80000000, 0xF8000000],
+            ["psrad $32 (>=width)", [0x66, 0x0F, 0x72, 0x20, 0x20], 0x80000000, 0xFFFFFFFF],
+            ["psrad $32 (positive)", [0x66, 0x0F, 0x72, 0x20, 0x20], 0x7FFFFFFF, 0x00000000],
+            ["psrld $31", [0x66, 0x0F, 0x72, 0x10, 0x1F], 0x80000000, 0x00000001],
+            ["pslld $4", [0x66, 0x0F, 0x72, 0x30, 0x04], 0x00000001, 0x00000010],
+            ["psraw $31 (two words)", [0x66, 0x0F, 0x71, 0x20, 0x1F], 0x80008000, 0xFFFFFFFF],
+            ["psrlw $4", [0x66, 0x0F, 0x71, 0x10, 0x04], 0x00000080, 0x00000008],
+            ["psllw $4", [0x66, 0x0F, 0x71, 0x30, 0x04], 0x00000001, 0x00000010],
+        ];
+        for(const [name, bytes, input, want] of cases)
+        {
+            assert.equal(runShift(bytes, input), want >>> 0, name);
+        }
+    }
+
     console.log("interp64: all tests passed");
     process.exit(0);
 });
