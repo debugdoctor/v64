@@ -10,6 +10,14 @@ use crate::cpu::cpu::{
     write_reg64, APIC_MEM_ADDRESS, CR4_TSD, CS, FLAG_CARRY, FLAG_INTERRUPT, SS,
 };
 use crate::cpu::global_pointers::*;
+use crate::cpu::fpu::{
+    f32_to_f80, f64_to_f80, f80_to_f32, f80_to_f64, fpu_convert_to_i16, fpu_convert_to_i32,
+    fpu_convert_to_i64, fpu_fadd, fpu_fcom, fpu_fcomp, fpu_fdiv, fpu_fdivr, fpu_fmul, fpu_pop,
+    fpu_push, fpu_fsub, fpu_fsubr, fpu_get_st0, fpu_truncate_to_i16, fpu_truncate_to_i32,
+    fpu_finit, fpu_load_status_word, fpu_load_tag_word, fpu_set_status_word, fpu_set_tag_word,
+    fpu_truncate_to_i64, i32_to_f80, i64_to_f80, set_control_word,
+};
+use crate::softfloat::F80;
 use crate::cpu::memory;
 use crate::paging::OrPageFault;
 use crate::prefix;
@@ -526,6 +534,82 @@ unsafe fn run_sse(opcode: u8, pfx: &Prefixes) -> OrPageFault<bool> {
             }
         },
 
+        // MOVLPS/MOVLPD xmm, m64 (0F 12), MOVHLPS xmm, xmm (0F 12 mod=3)
+        0x12 if !pfx.f2 && !pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let mut dst = xmm_get(modrm.reg);
+            match operand {
+                Operand::Reg(src) => {
+                    if pfx.p66 {
+                        crate::cpu::cpu::trigger_ud();
+                        return Ok(true);
+                    }
+                    dst.u64[0] = xmm_get(src).u64[1];
+                },
+                Operand::Mem(address) => {
+                    dst.u64[0] = mem_read(address, OpSize::S64)?;
+                },
+            }
+            xmm_set(modrm.reg, dst);
+        },
+
+        // MOVLPS/MOVLPD m64, xmm (0F 13)
+        0x13 if !pfx.f2 && !pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let Operand::Mem(address) = operand else {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(true);
+            };
+            let value = xmm_get(modrm.reg);
+            mem_write(address, OpSize::S64, value.u64[0])?;
+        },
+
+        // UNPCKLPS/UNPCKLPD (0F 14) / UNPCKHPS/UNPCKHPD (0F 15)
+        0x14 | 0x15 if !pfx.f2 && !pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let src = sse_read(operand)?;
+            let dst = xmm_get(modrm.reg);
+            let mut result = dst;
+            if opcode == 0x14 {
+                result.u64[1] = src.u64[0];
+            }
+            else {
+                result.u64[0] = dst.u64[1];
+                result.u64[1] = src.u64[1];
+            }
+            xmm_set(modrm.reg, result);
+        },
+
+        // MOVHPS/MOVHPD xmm, m64 (0F 16), MOVLHPS xmm, xmm (0F 16 mod=3)
+        0x16 if !pfx.f2 && !pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let mut dst = xmm_get(modrm.reg);
+            match operand {
+                Operand::Reg(src) => {
+                    if pfx.p66 {
+                        crate::cpu::cpu::trigger_ud();
+                        return Ok(true);
+                    }
+                    dst.u64[1] = xmm_get(src).u64[0];
+                },
+                Operand::Mem(address) => {
+                    dst.u64[1] = mem_read(address, OpSize::S64)?;
+                },
+            }
+            xmm_set(modrm.reg, dst);
+        },
+
+        // MOVHPS/MOVHPD m64, xmm (0F 17)
+        0x17 if !pfx.f2 && !pfx.f3 => {
+            let (modrm, operand) = decode_operand(pfx)?;
+            let Operand::Mem(address) = operand else {
+                crate::cpu::cpu::trigger_ud();
+                return Ok(true);
+            };
+            let value = xmm_get(modrm.reg);
+            mem_write(address, OpSize::S64, value.u64[1])?;
+        },
+
         // ADDSUBPS (F2 0F D0)
         0xD0 if pfx.f2 => {
             let (modrm, operand) = decode_operand(pfx)?;
@@ -543,19 +627,6 @@ unsafe fn run_sse(opcode: u8, pfx: &Prefixes) -> OrPageFault<bool> {
             let (modrm, operand) = decode_operand(pfx)?;
             let value = read_operand(operand, size, pfx.has_rex())? & size.mask();
             write_reg(modrm.reg, size, pfx.has_rex(), value.count_ones() as u64);
-        },
-
-        // RDRAND r (0F C7 /6)
-        0xC7 => {
-            let modrm = decode_modrm(pfx)?;
-            if modrm.reg & 7 != 6 || modrm.mod_bits != 3 {
-                return Ok(false);
-            }
-            let random = crate::cpu::cpu::js::get_rand_int() as u32 as u64;
-            write_reg(modrm.rm, size, pfx.has_rex(), random);
-            *flags &= !(FLAG_CF as i32 | FLAG_OF as i32);
-            *flags |= FLAG_CF as i32;
-            *flags_changed = 0;
         },
 
         // MMX MOVD mm, r/m32 (0F 6E, no 66)
@@ -1177,6 +1248,14 @@ unsafe fn bit_test(
     op: u8,
 ) -> OrPageFault<()> {
     let has_rex = pfx.has_rex();
+    // the index spans the whole string: bt [mem],100 addresses dword 3.
+    let operand = if let Operand::Mem(address) = operand {
+        let bits = size.bits() as u64;
+        Operand::Mem(address.wrapping_add(index / bits * (bits / 8)))
+    }
+    else {
+        operand
+    };
     let value = read_operand(operand, size, has_rex)? & size.mask();
     let bit = index as u32 & (size.bits() - 1);
     let old = value >> bit & 1 != 0;
@@ -1342,6 +1421,354 @@ unsafe fn condition(code: u8) -> bool {
         0xE => zf || sf != of,  // LE
         0xF => !zf && sf == of, // G
         _ => unreachable!(),
+    }
+}
+
+// --- x87 ------------------------------------------------------------------
+
+unsafe fn x87_load_f32(address: u64) -> OrPageFault<F80> {
+    Ok(f32_to_f80(mem_read(address, OpSize::S32)? as u32 as i32))
+}
+
+unsafe fn x87_load_f64(address: u64) -> OrPageFault<F80> {
+    Ok(f64_to_f80(mem_read(address, OpSize::S64)?))
+}
+
+unsafe fn x87_load_m80(address: u64) -> OrPageFault<F80> {
+    let mantissa = mem_read(address, OpSize::S64)?;
+    let sign_exponent = mem_read(address + 8, OpSize::S16)? as u16;
+    Ok(F80 { mantissa, sign_exponent })
+}
+
+unsafe fn x87_store_f32(address: u64, value: F80) -> OrPageFault<()> {
+    mem_write(address, OpSize::S32, f80_to_f32(value) as u32 as u64)
+}
+
+unsafe fn x87_store_f64(address: u64, value: F80) -> OrPageFault<()> {
+    mem_write(address, OpSize::S64, f80_to_f64(value))
+}
+
+unsafe fn x87_store_m80(address: u64, value: F80) -> OrPageFault<()> {
+    mem_write(address, OpSize::S64, value.mantissa)?;
+    mem_write(address + 8, OpSize::S16, value.sign_exponent as u64)
+}
+
+// FIST/FISTP round per the control word; FISTTP truncates.
+unsafe fn x87_store_int(address: u64, value: F80, size: OpSize, truncate: bool) -> OrPageFault<()> {
+    let converted = match (size, truncate) {
+        (OpSize::S16, false) => fpu_convert_to_i16(value) as u16 as u64,
+        (OpSize::S16, true) => fpu_truncate_to_i16(value) as u16 as u64,
+        (OpSize::S32, false) => fpu_convert_to_i32(value) as u32 as u64,
+        (OpSize::S32, true) => fpu_truncate_to_i32(value) as u32 as u64,
+        (_, false) => fpu_convert_to_i64(value) as u64,
+        (_, true) => fpu_truncate_to_i64(value) as u64,
+    };
+    mem_write(address, size, converted)
+}
+
+unsafe fn x87_load_int(address: u64, size: OpSize) -> OrPageFault<F80> {
+    let value = mem_read(address, size)? & size.mask();
+    Ok(match size {
+        OpSize::S16 => i32_to_f80(value as u16 as i16 as i32),
+        OpSize::S32 => i32_to_f80(value as u32 as i32),
+        _ => i64_to_f80(value as i64),
+    })
+}
+
+// FNSTENV, in the protected-mode layouts the 32-bit implementation uses.
+unsafe fn x87_store_env(address: u64, sixteen: bool) -> OrPageFault<()> {
+    if sixteen {
+        mem_write(address, OpSize::S16, *fpu_control_word as u64)?;
+        mem_write(address + 2, OpSize::S16, fpu_load_status_word() as u64)?;
+        mem_write(address + 4, OpSize::S16, fpu_load_tag_word() as u64)?;
+        mem_write(address + 6, OpSize::S16, *fpu_ip as u32 as u64 & 0xFFFF)?;
+        mem_write(address + 8, OpSize::S16, *fpu_ip_selector as u32 as u64 & 0xFFFF)?;
+        mem_write(address + 10, OpSize::S16, *fpu_dp as u32 as u64 & 0xFFFF)?;
+        mem_write(address + 12, OpSize::S16, *fpu_dp_selector as u32 as u64 & 0xFFFF)?;
+    }
+    else {
+        mem_write(address, OpSize::S32, 0xFFFF_0000 | *fpu_control_word as u32 as u64)?;
+        mem_write(address + 4, OpSize::S32, 0xFFFF_0000 | fpu_load_status_word() as u64)?;
+        mem_write(address + 8, OpSize::S32, 0xFFFF_0000 | fpu_load_tag_word() as u64)?;
+        mem_write(address + 12, OpSize::S32, *fpu_ip as u32 as u64)?;
+        mem_write(address + 16, OpSize::S16, *fpu_ip_selector as u32 as u64 & 0xFFFF)?;
+        mem_write(address + 18, OpSize::S16, *fpu_opcode as u32 as u64 & 0xFFFF)?;
+        mem_write(address + 20, OpSize::S32, *fpu_dp as u32 as u64)?;
+        mem_write(address + 24, OpSize::S32, 0xFFFF_0000 | *fpu_dp_selector as u32 as u64)?;
+    }
+    Ok(())
+}
+
+unsafe fn x87_load_env(address: u64, sixteen: bool) -> OrPageFault<()> {
+    if sixteen {
+        set_control_word(mem_read(address, OpSize::S16)? as u16);
+        fpu_set_status_word(mem_read(address + 2, OpSize::S16)? as u16);
+        fpu_set_tag_word(mem_read(address + 4, OpSize::S16)? as i32);
+        *fpu_ip = mem_read(address + 6, OpSize::S16)? as i32;
+        *fpu_ip_selector = mem_read(address + 8, OpSize::S16)? as i32;
+        *fpu_dp = mem_read(address + 10, OpSize::S16)? as i32;
+        *fpu_dp_selector = mem_read(address + 12, OpSize::S16)? as i32;
+    }
+    else {
+        set_control_word(mem_read(address, OpSize::S32)? as u32 as u16);
+        fpu_set_status_word(mem_read(address + 4, OpSize::S32)? as u32 as u16);
+        fpu_set_tag_word(mem_read(address + 8, OpSize::S32)? as u32 as u16 as i32);
+        *fpu_ip = mem_read(address + 12, OpSize::S32)? as u32 as i32;
+        *fpu_ip_selector = mem_read(address + 16, OpSize::S16)? as i32;
+        *fpu_opcode = mem_read(address + 18, OpSize::S16)? as i32;
+        *fpu_dp = mem_read(address + 20, OpSize::S32)? as u32 as i32;
+        *fpu_dp_selector = mem_read(address + 24, OpSize::S32)? as u32 as u16 as i32;
+    }
+    Ok(())
+}
+
+// FNSAVE/FRSTOR: environment, then eight 10-byte registers in physical order.
+unsafe fn x87_save_state(address: u64, sixteen: bool) -> OrPageFault<()> {
+    x87_store_env(address, sixteen)?;
+    let mut offset = if sixteen { 14 } else { 28 };
+    for i in 0..8u64 {
+        let physical = (*fpu_stack_ptr as u64 + i) & 7;
+        x87_store_m80(address + offset, *fpu_st.offset(physical as isize))?;
+        offset += 10;
+    }
+    fpu_finit();
+    Ok(())
+}
+
+unsafe fn x87_restore_state(address: u64, sixteen: bool) -> OrPageFault<()> {
+    x87_load_env(address, sixteen)?;
+    let mut offset = if sixteen { 14 } else { 28 };
+    for i in 0..8u64 {
+        let value = x87_load_m80(address + offset)?;
+        let physical = (*fpu_stack_ptr as u64 + i) & 7;
+        *fpu_st.offset(physical as isize) = value;
+        offset += 10;
+    }
+    Ok(())
+}
+
+// FBLD/FBSTP: signed packed BCD, 9 digits plus a sign byte.
+unsafe fn x87_load_bcd(address: u64) -> OrPageFault<F80> {
+    let mut value: u64 = 0;
+    for i in (0..9u64).rev() {
+        let byte = mem_read(address + i, OpSize::S8)? & 0xFF;
+        value = value.wrapping_mul(100).wrapping_add((byte >> 4) * 10 + (byte & 0xF));
+    }
+    let mut result = i64_to_f80(value as i64);
+    if mem_read(address + 9, OpSize::S8)? & 0x80 != 0 {
+        result.sign_exponent ^= 0x8000;
+    }
+    Ok(result)
+}
+
+unsafe fn x87_store_bcd(address: u64, value: F80) -> OrPageFault<()> {
+    let converted = fpu_convert_to_i64(value);
+    let mut magnitude = converted.unsigned_abs();
+    for i in 0..9u64 {
+        let low = (magnitude % 10) as u64;
+        magnitude /= 10;
+        let high = (magnitude % 10) as u64;
+        magnitude /= 10;
+        mem_write(address + i, OpSize::S8, (high << 4) | low)?;
+    }
+    let sign = if converted < 0 { 0x80 } else { 0 };
+    mem_write(address + 9, OpSize::S8, sign)
+}
+
+unsafe fn x87(pfx: &Prefixes, opcode: u8) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let reg = (modrm.reg & 7) as i32;
+    let st = (modrm.rm & 7) as i32;
+    let sixteen = pfx.opsize_16;
+    if let Operand::Reg(_) = operand {
+        x87_reg(opcode, reg, st, sixteen);
+        return Ok(());
+    }
+    let Operand::Mem(address) = operand else { unreachable!() };
+    match (opcode, reg) {
+        // D8: arithmetic with an m32real
+        (0xD8, 0) => fpu_fadd(0, x87_load_f32(address)?),
+        (0xD8, 1) => fpu_fmul(0, x87_load_f32(address)?),
+        (0xD8, 2) => fpu_fcom(x87_load_f32(address)?),
+        (0xD8, 3) => fpu_fcomp(x87_load_f32(address)?),
+        (0xD8, 4) => fpu_fsub(0, x87_load_f32(address)?),
+        (0xD8, 5) => fpu_fsubr(0, x87_load_f32(address)?),
+        (0xD8, 6) => fpu_fdiv(0, x87_load_f32(address)?),
+        (0xD8, 7) => fpu_fdivr(0, x87_load_f32(address)?),
+
+        // D9: load/store m32real and the control word
+        (0xD9, 0) => fpu_push(x87_load_f32(address)?),
+        (0xD9, 2) => x87_store_f32(address, fpu_get_st0())?,
+        (0xD9, 3) => {
+            x87_store_f32(address, fpu_get_st0())?;
+            fpu_pop();
+        },
+        (0xD9, 4) => x87_load_env(address, sixteen)?,
+        (0xD9, 5) => *fpu_control_word = mem_read(address, OpSize::S16)? as u16,
+        (0xD9, 6) => x87_store_env(address, sixteen)?,
+        (0xD9, 7) => mem_write(address, OpSize::S16, *fpu_control_word as u64)?,
+
+        // DA: arithmetic with an m32int (register forms are FCMOV)
+        (0xDA, 0) => fpu_fadd(0, x87_load_int(address, OpSize::S32)?),
+        (0xDA, 1) => fpu_fmul(0, x87_load_int(address, OpSize::S32)?),
+        (0xDA, 2) => fpu_fcom(x87_load_int(address, OpSize::S32)?),
+        (0xDA, 3) => fpu_fcomp(x87_load_int(address, OpSize::S32)?),
+        (0xDA, 4) => fpu_fsub(0, x87_load_int(address, OpSize::S32)?),
+        (0xDA, 5) => fpu_fsubr(0, x87_load_int(address, OpSize::S32)?),
+        (0xDA, 6) => fpu_fdiv(0, x87_load_int(address, OpSize::S32)?),
+        (0xDA, 7) => fpu_fdivr(0, x87_load_int(address, OpSize::S32)?),
+
+        // DB: integer loads/stores, m80real
+        (0xDB, 0) => fpu_push(x87_load_int(address, OpSize::S32)?),
+        (0xDB, 1) => {
+            x87_store_int(address, fpu_get_st0(), OpSize::S32, true)?;
+            fpu_pop();
+        },
+        (0xDB, 2) => x87_store_int(address, fpu_get_st0(), OpSize::S32, false)?,
+        (0xDB, 3) => {
+            x87_store_int(address, fpu_get_st0(), OpSize::S32, false)?;
+            fpu_pop();
+        },
+        (0xDB, 5) => fpu_push(x87_load_m80(address)?),
+        (0xDB, 7) => {
+            x87_store_m80(address, fpu_get_st0())?;
+            fpu_pop();
+        },
+
+        // DC: arithmetic with an m64real
+        (0xDC, 0) => fpu_fadd(0, x87_load_f64(address)?),
+        (0xDC, 1) => fpu_fmul(0, x87_load_f64(address)?),
+        (0xDC, 2) => fpu_fcom(x87_load_f64(address)?),
+        (0xDC, 3) => fpu_fcomp(x87_load_f64(address)?),
+        (0xDC, 4) => fpu_fsub(0, x87_load_f64(address)?),
+        (0xDC, 5) => fpu_fsubr(0, x87_load_f64(address)?),
+        (0xDC, 6) => fpu_fdiv(0, x87_load_f64(address)?),
+        (0xDC, 7) => fpu_fdivr(0, x87_load_f64(address)?),
+
+        // DD: m64real loads/stores, status word
+        (0xDD, 0) => fpu_push(x87_load_f64(address)?),
+        (0xDD, 1) => {
+            x87_store_int(address, fpu_get_st0(), OpSize::S64, true)?;
+            fpu_pop();
+        },
+        (0xDD, 2) => x87_store_f64(address, fpu_get_st0())?,
+        (0xDD, 3) => {
+            x87_store_f64(address, fpu_get_st0())?;
+            fpu_pop();
+        },
+        (0xDD, 4) => x87_restore_state(address, sixteen)?,
+        (0xDD, 6) => x87_save_state(address, sixteen)?,
+        (0xDD, 7) => mem_write(address, OpSize::S16, *fpu_status_word as u64)?,
+
+        // DE: arithmetic with an m16int
+        (0xDE, 0) => fpu_fadd(0, x87_load_int(address, OpSize::S16)?),
+        (0xDE, 1) => fpu_fmul(0, x87_load_int(address, OpSize::S16)?),
+        (0xDE, 2) => fpu_fcom(x87_load_int(address, OpSize::S16)?),
+        (0xDE, 3) => fpu_fcomp(x87_load_int(address, OpSize::S16)?),
+        (0xDE, 4) => fpu_fsub(0, x87_load_int(address, OpSize::S16)?),
+        (0xDE, 5) => fpu_fsubr(0, x87_load_int(address, OpSize::S16)?),
+        (0xDE, 6) => fpu_fdiv(0, x87_load_int(address, OpSize::S16)?),
+        (0xDE, 7) => fpu_fdivr(0, x87_load_int(address, OpSize::S16)?),
+
+        // DF: integer loads/stores, all widths
+        (0xDF, 0) => fpu_push(x87_load_int(address, OpSize::S16)?),
+        (0xDF, 1) => {
+            x87_store_int(address, fpu_get_st0(), OpSize::S16, true)?;
+            fpu_pop();
+        },
+        (0xDF, 2) => x87_store_int(address, fpu_get_st0(), OpSize::S16, false)?,
+        (0xDF, 3) => {
+            x87_store_int(address, fpu_get_st0(), OpSize::S16, false)?;
+            fpu_pop();
+        },
+        (0xDF, 4) => fpu_push(x87_load_bcd(address)?),
+        (0xDF, 5) => fpu_push(x87_load_int(address, OpSize::S64)?),
+        (0xDF, 6) => {
+            x87_store_bcd(address, fpu_get_st0())?;
+            fpu_pop();
+        },
+        (0xDF, 7) => {
+            x87_store_int(address, fpu_get_st0(), OpSize::S64, false)?;
+            fpu_pop();
+        },
+
+        // Invalid x87 encodings
+        _ => {
+            dbg_log!("#ud interp64: x87 opcode {:02x} reg {}", opcode, reg);
+            crate::cpu::cpu::trigger_ud();
+        },
+    }
+    Ok(())
+}
+
+unsafe fn x87_reg(opcode: u8, reg: i32, st: i32, sixteen: bool) {
+    use crate::cpu::instructions as x87_32;
+    match (opcode, reg) {
+        (0xD8, 0) => x87_32::instr_D8_0_reg(st),
+        (0xD8, 1) => x87_32::instr_D8_1_reg(st),
+        (0xD8, 2) => x87_32::instr_D8_2_reg(st),
+        (0xD8, 3) => x87_32::instr_D8_3_reg(st),
+        (0xD8, 4) => x87_32::instr_D8_4_reg(st),
+        (0xD8, 5) => x87_32::instr_D8_5_reg(st),
+        (0xD8, 6) => x87_32::instr_D8_6_reg(st),
+        (0xD8, 7) => x87_32::instr_D8_7_reg(st),
+        (0xD9, 0) => if sixteen { x87_32::instr16_D9_0_reg(st) } else { x87_32::instr32_D9_0_reg(st) },
+        (0xD9, 1) => if sixteen { x87_32::instr16_D9_1_reg(st) } else { x87_32::instr32_D9_1_reg(st) },
+        (0xD9, 2) => if sixteen { x87_32::instr16_D9_2_reg(st) } else { x87_32::instr32_D9_2_reg(st) },
+        (0xD9, 3) => if sixteen { x87_32::instr16_D9_3_reg(st) } else { x87_32::instr32_D9_3_reg(st) },
+        (0xD9, 4) => if sixteen { x87_32::instr16_D9_4_reg(st) } else { x87_32::instr32_D9_4_reg(st) },
+        (0xD9, 5) => if sixteen { x87_32::instr16_D9_5_reg(st) } else { x87_32::instr32_D9_5_reg(st) },
+        (0xD9, 6) => if sixteen { x87_32::instr16_D9_6_reg(st) } else { x87_32::instr32_D9_6_reg(st) },
+        (0xD9, 7) => if sixteen { x87_32::instr16_D9_7_reg(st) } else { x87_32::instr32_D9_7_reg(st) },
+        (0xDA, 0) => x87_32::instr_DA_0_reg(st),
+        (0xDA, 1) => x87_32::instr_DA_1_reg(st),
+        (0xDA, 2) => x87_32::instr_DA_2_reg(st),
+        (0xDA, 3) => x87_32::instr_DA_3_reg(st),
+        (0xDA, 4) => x87_32::instr_DA_4_reg(st),
+        (0xDA, 5) => x87_32::instr_DA_5_reg(st),
+        (0xDA, 6) => x87_32::instr_DA_6_reg(st),
+        (0xDA, 7) => x87_32::instr_DA_7_reg(st),
+        (0xDB, 0) => x87_32::instr_DB_0_reg(st),
+        (0xDB, 1) => x87_32::instr_DB_1_reg(st),
+        (0xDB, 2) => x87_32::instr_DB_2_reg(st),
+        (0xDB, 3) => x87_32::instr_DB_3_reg(st),
+        (0xDB, 4) => x87_32::instr_DB_4_reg(st),
+        (0xDB, 5) => x87_32::instr_DB_5_reg(st),
+        (0xDB, 6) => x87_32::instr_DB_6_reg(st),
+        (0xDB, 7) => x87_32::instr_DB_7_reg(st),
+        (0xDC, 0) => x87_32::instr_DC_0_reg(st),
+        (0xDC, 1) => x87_32::instr_DC_1_reg(st),
+        (0xDC, 2) => x87_32::instr_DC_2_reg(st),
+        (0xDC, 3) => x87_32::instr_DC_3_reg(st),
+        (0xDC, 4) => x87_32::instr_DC_4_reg(st),
+        (0xDC, 5) => x87_32::instr_DC_5_reg(st),
+        (0xDC, 6) => x87_32::instr_DC_6_reg(st),
+        (0xDC, 7) => x87_32::instr_DC_7_reg(st),
+        (0xDD, 0) => if sixteen { x87_32::instr16_DD_0_reg(st) } else { x87_32::instr32_DD_0_reg(st) },
+        (0xDD, 1) => if sixteen { x87_32::instr16_DD_1_reg(st) } else { x87_32::instr32_DD_1_reg(st) },
+        (0xDD, 2) => if sixteen { x87_32::instr16_DD_2_reg(st) } else { x87_32::instr32_DD_2_reg(st) },
+        (0xDD, 3) => if sixteen { x87_32::instr16_DD_3_reg(st) } else { x87_32::instr32_DD_3_reg(st) },
+        (0xDD, 4) => if sixteen { x87_32::instr16_DD_4_reg(st) } else { x87_32::instr32_DD_4_reg(st) },
+        (0xDD, 5) => if sixteen { x87_32::instr16_DD_5_reg(st) } else { x87_32::instr32_DD_5_reg(st) },
+        (0xDD, 6) => if sixteen { x87_32::instr16_DD_6_reg(st) } else { x87_32::instr32_DD_6_reg(st) },
+        (0xDD, 7) => if sixteen { x87_32::instr16_DD_7_reg(st) } else { x87_32::instr32_DD_7_reg(st) },
+        (0xDE, 0) => x87_32::instr_DE_0_reg(st),
+        (0xDE, 1) => x87_32::instr_DE_1_reg(st),
+        (0xDE, 2) => x87_32::instr_DE_2_reg(st),
+        (0xDE, 3) => x87_32::instr_DE_3_reg(st),
+        (0xDE, 4) => x87_32::instr_DE_4_reg(st),
+        (0xDE, 5) => x87_32::instr_DE_5_reg(st),
+        (0xDE, 6) => x87_32::instr_DE_6_reg(st),
+        (0xDE, 7) => x87_32::instr_DE_7_reg(st),
+        (0xDF, 0) => x87_32::instr_DF_0_reg(st),
+        (0xDF, 1) => x87_32::instr_DF_1_reg(st),
+        (0xDF, 2) => x87_32::instr_DF_2_reg(st),
+        (0xDF, 3) => x87_32::instr_DF_3_reg(st),
+        (0xDF, 4) => x87_32::instr_DF_4_reg(st),
+        (0xDF, 5) => x87_32::instr_DF_5_reg(st),
+        (0xDF, 6) => x87_32::instr_DF_6_reg(st),
+        (0xDF, 7) => x87_32::instr_DF_7_reg(st),
+        _ => crate::cpu::cpu::trigger_ud(),
     }
 }
 
@@ -1539,15 +1966,15 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             write_reg64(r as i32, value);
         },
 
-        // MOVSXD r64, r/m32
+        // MOVSXD r64, r/m32 (REX.W); without it AMD's r32 form is accepted.
         0x63 => {
             let (modrm, operand) = decode_operand(&pfx)?;
-            if size != OpSize::S64 {
-                crate::cpu::cpu::trigger_ud();
+            let value = read_operand(operand, OpSize::S32, pfx.has_rex())?;
+            if size == OpSize::S64 {
+                write_reg64(modrm.reg as i32, value as u32 as i32 as i64 as u64);
             }
             else {
-                let value = read_operand(operand, OpSize::S32, pfx.has_rex())? as u32 as i32 as i64;
-                write_reg64(modrm.reg as i32, value as u64);
+                write_reg(modrm.reg, OpSize::S32, pfx.has_rex(), value);
             }
         },
 
@@ -1681,6 +2108,29 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             *rip = (*rip).wrapping_add(displacement as u64);
         },
 
+        // LOOPNE/LOOPE/LOOP/JRCXZ (0xE0-0xE3); the counter is RCX or ECX.
+        0xE0 | 0xE1 | 0xE2 | 0xE3 => {
+            let displacement = fetch8()? as i8 as i64;
+            let counter_mask = if pfx.addrsize_32 { 0xFFFF_FFFFu64 } else { u64::MAX };
+            let count = read_reg64(RCX as i32) & counter_mask;
+            let taken = if opcode == 0xE3 {
+                count == 0
+            }
+            else {
+                let count = count.wrapping_sub(1) & counter_mask;
+                write_reg64(RCX as i32, count);
+                let zf = *flags as u32 & FLAG_ZF != 0;
+                match opcode {
+                    0xE0 => count != 0 && !zf,
+                    0xE1 => count != 0 && zf,
+                    _ => count != 0,
+                }
+            };
+            if taken {
+                *rip = (*rip).wrapping_add(displacement as u64);
+            }
+        },
+
         // POP r/m64 (8F /0)
         0x8F => {
             let (modrm, operand) = decode_operand(&pfx)?;
@@ -1792,8 +2242,9 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             write_reg64(RSP as i32, rsp);
         },
 
-        // MOVS (0xA4/0xA5), STOS (0xAA/0xAB), LODS (0xAC/0xAD). F3 repeats.
-        0xA4 | 0xA5 | 0xAA | 0xAB | 0xAC | 0xAD => {
+        // MOVS (A4/A5), STOS (AA/AB), LODS (AC/AD), INS (6C/6D), OUTS (6E/6F).
+        // F3 repeats.
+        0x6C | 0x6D | 0x6E | 0x6F | 0xA4 | 0xA5 | 0xAA | 0xAB | 0xAC | 0xAD => {
             let elem_size = if opcode & 1 == 0 { OpSize::S8 } else { size };
             let bytes = (elem_size.bits() / 8) as u64;
             let delta = if *flags & (1 << 10) != 0 { -(bytes as i64) } else { bytes as i64 };
@@ -1818,6 +2269,34 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
                         let value = read_reg(RAX, elem_size, pfx.has_rex());
                         mem_write(rdi, elem_size, value)?;
                         write_reg64(RDI as i32, rdi.wrapping_add(delta as u64));
+                    },
+                    // INS: read the port (DX) into [rdi]
+                    0x6C => {
+                        let port = read_reg(RDX, OpSize::S16, false) as i32;
+                        let width = (elem_size.bits() / 8) as i32;
+                        if test_privileges_for_io(port, width) {
+                            let value = match width {
+                                1 => io_port_read8(port) as u64,
+                                2 => crate::cpu::cpu::io_port_read16(port) as u16 as u64,
+                                _ => crate::cpu::cpu::io_port_read32(port) as u32 as u64,
+                            };
+                            mem_write(rdi, elem_size, value)?;
+                        }
+                        write_reg64(RDI as i32, rdi.wrapping_add(delta as u64));
+                    },
+                    // OUTS: write [rsi] to the port (DX)
+                    0x6E => {
+                        let port = read_reg(RDX, OpSize::S16, false) as i32;
+                        let width = (elem_size.bits() / 8) as i32;
+                        let value = mem_read(rsi, elem_size)?;
+                        if test_privileges_for_io(port, width) {
+                            match width {
+                                1 => io_port_write8(port, value as i32),
+                                2 => crate::cpu::cpu::io_port_write16(port, value as i32),
+                                _ => crate::cpu::cpu::io_port_write32(port, value as i32),
+                            }
+                        }
+                        write_reg64(RSI as i32, rsi.wrapping_add(delta as u64));
                     },
                     // LODS
                     _ => {
@@ -1880,6 +2359,31 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             }
         },
 
+        // ENTER imm16, imm8: build a stack frame
+        0xC8 => {
+            let alloc = fetch16()? as u64;
+            let nesting = fetch8()? & 0x1F;
+            let frame = (size.bits() / 8) as u64;
+            let mut rsp = read_reg64(RSP as i32);
+            let rbp = read_reg64(RBP as i32);
+            rsp = rsp.wrapping_sub(frame);
+            mem_write(rsp, size, rbp & size.mask())?;
+            let frame_temp = rsp;
+            if nesting > 0 {
+                let mut walk = rbp;
+                for _ in 1..nesting {
+                    walk = walk.wrapping_sub(frame);
+                    let value = mem_read(walk, size)? & size.mask();
+                    rsp = rsp.wrapping_sub(frame);
+                    mem_write(rsp, size, value)?;
+                }
+                rsp = rsp.wrapping_sub(frame);
+                mem_write(rsp, size, frame_temp)?;
+            }
+            write_reg64(RBP as i32, frame_temp);
+            write_reg64(RSP as i32, rsp.wrapping_sub(alloc));
+        },
+
         // LEAVE: mov rsp, rbp; pop rbp
         0xC9 => {
             write_reg64(RSP as i32, read_reg64(RBP as i32));
@@ -1887,45 +2391,21 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             write_reg64(RBP as i32, value);
         },
 
-        // FNINIT (DB E3), FNCLEX (DB E2), FNSTCW (D9 /7), FLDCW (D9 /5),
-        // FNSTSW m16 (DD /7) and FNSTSW AX (DF E0).
-        0xD9 | 0xDB | 0xDD | 0xDF => {
-            let (modrm, operand) = decode_operand(&pfx)?;
-            let address = if let Operand::Mem(address) = operand { address } else { 0 };
-
-            match (opcode, modrm.mod_bits, modrm.reg, modrm.rm) {
-                // FLDCW m16
-                (0xD9, m, 5, _) if m != 3 => {
-                    *fpu_control_word = mem_read(address, OpSize::S16)? as u16;
-                },
-                // FNSTCW m16
-                (0xD9, m, 7, _) if m != 3 => {
-                    mem_write(address, OpSize::S16, *fpu_control_word as u64)?;
-                },
-                // FNSTSW m16
-                (0xDD, m, 7, _) if m != 3 => {
-                    mem_write(address, OpSize::S16, *fpu_status_word as u64)?;
-                },
-                // FNINIT
-                (0xDB, 3, 4, 3) => {
-                    *fpu_control_word = 0x37F;
-                    *fpu_status_word = 0;
-                    *fpu_stack_empty = 0xFF;
-                    *fpu_stack_ptr = 0;
-                },
-                // FNCLEX
-                (0xDB, 3, 4, 2) => {
-                    *fpu_status_word = 0;
-                },
-                // FNSTSW AX
-                (0xDF, 3, 4, 0) => {
-                    write_reg(RAX, OpSize::S16, false, *fpu_status_word as u64);
-                },
-                _ => {
-                    dbg_log!("#ud interp64: x87 opcode {:02x}", opcode);
-                    crate::cpu::cpu::trigger_ud();
-                },
+        // XLAT (0xD7): AL = [RBX + AL] (BX with a 32-bit address size)
+        0xD7 => {
+            let mut base = read_reg64((RBX | (pfx.rex & prefix::REX_B) << 3) as i32);
+            if pfx.addrsize_32 {
+                base &= 0xFFFF_FFFF;
             }
+            let offset = read_reg(RAX, OpSize::S8, false);
+            let value = mem_read(base.wrapping_add(offset), OpSize::S8)?;
+            write_reg(RAX, OpSize::S8, false, value);
+        },
+
+        // x87 (D8-DF). The register forms reuse the 32-bit implementations;
+        // the memory forms are done here so addresses are not truncated.
+        0xD8..=0xDF => {
+            x87(&pfx, opcode)?;
         },
 
         // IRETQ (0xCF)
@@ -2020,6 +2500,37 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
             *flags_changed = 0;
         },
 
+        // FWAIT (0x9B): no pending x87 exceptions are modelled
+        0x9B => {},
+
+        // SAHF (0x9E) / LAHF (0x9F): AH <-> SF ZF 0 AF 0 PF 1 CF
+        0x9E => {
+            let mask = FLAG_CF | FLAG_PF | FLAG_AF | FLAG_ZF | FLAG_SF;
+            let ah = (read_reg64(RAX as i32) >> 8) as u32 & 0xFF;
+            *flags = ((*flags as u32 & !mask) | (ah & mask)) as i32;
+            *flags_changed = 0;
+        },
+        0x9F => {
+            let mask = FLAG_CF | FLAG_PF | FLAG_AF | FLAG_ZF | FLAG_SF;
+            let ah = (*flags as u32 & mask) | 0x02; // bit 1 reads as 1
+            let rax = read_reg64(RAX as i32);
+            write_reg64(RAX as i32, (rax & !0xFF00) | (ah as u64) << 8);
+        },
+
+        // MOV AL/eAX, moffs (0xA0/A1), MOV moffs, AL/eAX (0xA2/A3)
+        0xA0 | 0xA1 | 0xA2 | 0xA3 => {
+            let address = if pfx.addrsize_32 { fetch32()? as u64 } else { fetch64()? };
+            let acc_size = if opcode & 1 == 0 { OpSize::S8 } else { size };
+            if opcode & 2 == 0 {
+                let value = mem_read(address, acc_size)? & acc_size.mask();
+                write_reg(RAX, acc_size, false, value);
+            }
+            else {
+                let value = read_reg(RAX, acc_size, false);
+                mem_write(address, acc_size, value)?;
+            }
+        },
+
         // MOVSB (0xA4) / REP MOVSB
         0xA4 => {
             let count = if pfx.f3 { read_reg64(RCX as i32) } else { 1 };
@@ -2061,6 +2572,115 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
     }
 
     match opcode {
+        // ENDBR64 (F3 0F 1E FA) / ENDBR32 (F3 0F 1E FB): no effect
+        0x1E if pfx.f3 => {
+            let modrm = fetch8()?;
+            if modrm != 0xFA && modrm != 0xFB {
+                crate::cpu::cpu::trigger_ud();
+            }
+        },
+
+        // LAR/LSL (0F 02/03); only the GDT is modelled, else ZF is cleared.
+        0x02 | 0x03 => {
+            let (modrm, operand) = decode_operand(&pfx)?;
+            let selector = read_operand(operand, OpSize::S16, pfx.has_rex())? as u16;
+            let index = (selector >> 3) as u64;
+            let in_ldt = selector >> 2 & 1 != 0;
+            let descriptor = if selector & !7 != 0 && !in_ldt {
+                mem_read(*crate::cpu::global_pointers::gdtr_base + index * 8, OpSize::S64)?
+            }
+            else {
+                0
+            };
+            let present = descriptor >> 47 & 1 != 0;
+            if present {
+                let value = if opcode == 0x02 {
+                    // access rights in bits 8-15, flags (AVL/L/D/B/G) in 20-23;
+                    // a 64-bit destination takes them in the upper dword
+                    let rights = (descriptor >> 40 & 0xFF) << 8 | (descriptor >> 52 & 0xF) << 20;
+                    if size == OpSize::S64 { rights << 32 } else { rights }
+                }
+                else {
+                    let mut limit = descriptor & 0xFFFF | (descriptor >> 32 & 0xF0000);
+                    if descriptor >> 55 & 1 != 0 {
+                        // page granularity: limit is scaled by 4 KiB
+                        limit = (limit << 12) | 0xFFF;
+                    }
+                    limit
+                };
+                *flags &= !(FLAG_ZF as i32);
+                *flags |= FLAG_ZF as i32;
+                write_reg(modrm.reg, size, pfx.has_rex(), value & size.mask());
+            }
+            else {
+                *flags &= !(FLAG_ZF as i32);
+            }
+        },
+
+        // FEMMS (0F 0E): no-op, MMX state is not modelled
+        0x0E => {},
+
+        // PREFETCHT0/T1/T2/NTA (0F 18 /0../3) and PREFETCHW (0F 0D /0,/1).
+        // No architectural effect: only the operand has to be decoded, and
+        // prefetches never fault.
+        0x18 | 0x0D => {
+            let _ = decode_operand(pfx)?;
+        },
+
+        // CMPXCHG8B/CMPXCHG16B (0F C7 /1), RDRAND (0F C7 /6)
+        0xC7 => {
+            let modrm = decode_modrm(pfx)?;
+            match modrm.reg & 7 {
+                1 if modrm.mod_bits != 3 => {
+                    let operand = decode_operand_after_modrm(pfx, modrm, 0)?.1;
+                    let Operand::Mem(address) = operand else {
+                        crate::cpu::cpu::trigger_ud();
+                        return Ok(());
+                    };
+                    let acc_lo = read_reg(RAX, OpSize::S64, false);
+                    let acc_hi = read_reg(RDX, OpSize::S64, false);
+                    if pfx.rex & prefix::REX_W != 0 {
+                        // CMPXCHG16B: compare RDX:RAX with m128 and exchange
+                        let lo = mem_read(address, OpSize::S64)?;
+                        let hi = mem_read(address + 8, OpSize::S64)?;
+                        if lo == acc_lo && hi == acc_hi {
+                            set_zf(true);
+                            mem_write(address, OpSize::S64, read_reg(RBX, OpSize::S64, false))?;
+                            mem_write(address + 8, OpSize::S64, read_reg(RCX, OpSize::S64, false))?;
+                        }
+                        else {
+                            set_zf(false);
+                            write_reg(RAX, OpSize::S64, false, lo);
+                            write_reg(RDX, OpSize::S64, false, hi);
+                        }
+                    }
+                    else {
+                        // CMPXCHG8B: compare EDX:EAX with m64 and exchange
+                        let lo = mem_read(address, OpSize::S64)?;
+                        if lo == (acc_lo & 0xFFFF_FFFF) | (acc_hi << 32) {
+                            set_zf(true);
+                            mem_write(address, OpSize::S32, read_reg(RBX, OpSize::S32, false))?;
+                            mem_write(address + 4, OpSize::S32, read_reg(RCX, OpSize::S32, false))?;
+                        }
+                        else {
+                            set_zf(false);
+                            write_reg(RAX, OpSize::S32, false, lo & 0xFFFF_FFFF);
+                            write_reg(RDX, OpSize::S32, false, lo >> 32);
+                        }
+                    }
+                },
+                6 if modrm.mod_bits == 3 => {
+                    // RDRAND r
+                    let random = crate::cpu::cpu::js::get_rand_int() as u32 as u64;
+                    write_reg(modrm.rm, size, pfx.has_rex(), random);
+                    *flags &= !(FLAG_CF as i32 | FLAG_OF as i32);
+                    *flags |= FLAG_CF as i32;
+                    *flags_changed = 0;
+                },
+                _ => crate::cpu::cpu::trigger_ud(),
+            }
+        },
+
         // Jcc rel32 (0F 80-0F 8F)
         0x80..=0x8F => {
             let displacement = fetch32()? as i32 as i64;
@@ -2408,8 +3028,10 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
             else {
                 let (modrm, operand) = decode_operand_after_modrm(pfx, modrm, 0)?;
                 match modrm.reg & 7 {
-                    // FXSAVE
-                    0 => {
+                    // FXSAVE (0) and XSAVE (4). Only x87 and SSE state is
+                    // supported, whose layout is the same as FXSAVE's; XSAVE
+                    // additionally records them in the XSTATE_BV header.
+                    0 | 4 => {
                         let Operand::Mem(address) = operand else {
                             crate::cpu::cpu::trigger_ud();
                             return Ok(());
@@ -2420,14 +3042,24 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                         mem_write(address, OpSize::S16, *fpu_control_word as u64)?;
                         mem_write(address + 2, OpSize::S16, *fpu_status_word as u64)?;
                         mem_write(address + 24, OpSize::S32, *mxcsr as u32 as u64)?;
+                        // MXCSR_MASK: the bits of MXCSR that may be set. Real CPUs
+                        // report 0xffff; leaving it zero makes the kernel (which
+                        // derives mxcsr_feature_mask from it) consider its own
+                        // MXCSR value invalid and WARN on every context switch.
+                        mem_write(address + 28, OpSize::S32, 0xFFFF)?;
                         for i in 0..8u64 {
                             let x = xmm_get(i as u8);
                             mem_write(address + 160 + i * 16, OpSize::S64, x.u64[0])?;
                             mem_write(address + 160 + i * 16 + 8, OpSize::S64, x.u64[1])?;
                         }
+                        if modrm.reg & 7 == 4 {
+                            // XSTATE_BV: x87 (bit 0) and SSE (bit 1) were saved
+                            mem_write(address + 512, OpSize::S64, 3)?;
+                            mem_write(address + 520, OpSize::S64, 0)?;
+                        }
                     },
-                    // FXRSTOR
-                    1 => {
+                    // FXRSTOR (1) and XRSTOR (5)
+                    1 | 5 => {
                         let Operand::Mem(address) = operand else {
                             crate::cpu::cpu::trigger_ud();
                             return Ok(());
@@ -2581,8 +3213,9 @@ unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
             }
         },
 
-        // CMPXCHG r/m, r (0F B1)
-        0xB1 => {
+        // CMPXCHG r/m, r (0F B1) and CMPXCHG r/m8, r8 (0F B0, always 8-bit)
+        0xB0 | 0xB1 => {
+            let size = if opcode == 0xB0 { OpSize::S8 } else { size };
             let (modrm, operand) = decode_operand(pfx)?;
             let dst = read_operand(operand, size, pfx.has_rex())? & size.mask();
             let src = read_reg(modrm.reg, size, pfx.has_rex());

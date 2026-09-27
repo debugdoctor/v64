@@ -123,6 +123,8 @@ pub enum Instr {
     Out { imm: Option<u16>, width: u8 },
     Cli,
     PushFlags,
+    CmpxchgReg { dst: u8, src: u8, width: u8 },
+    CmpxchgMem { mem: Mem, src: u8, width: u8 },
     BitTestReg { r: u8, index_r: u8, op: u8, width: u8 },
     BitTestImm { r: u8, index: u64, op: u8, width: u8 },
     ImulRegReg { dst: u8, lhs: u8, rhs: u8, width: u8 },
@@ -1085,6 +1087,35 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     i += 1;
                     out.push(Instr::Nop); // ENDBR64
                 }
+                else if second == 0x18 || second == 0x0D {
+                    // PREFETCHT0/T1/T2/NTA (0F 18 /0../3) and PREFETCHW (0F 0D):
+                    // no architectural effect, only the operand has to be decoded.
+                    let modrm = *bytes.get(i).ok_or("truncated prefetch modrm")?;
+                    i += 1;
+                    if modrm >> 6 != 3 {
+                        let _ = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
+                    }
+                    out.push(Instr::Nop);
+                }
+                else if second == 0xB0 || second == 0xB1 {
+                    // CMPXCHG r/m, r (0F B1) and CMPXCHG r/m8, r8 (0F B0)
+                    let modrm = *bytes.get(i).ok_or("truncated cmpxchg modrm")?;
+                    i += 1;
+                    let width = if second == 0xB0 { 8 } else { operand_width(prefix_66, rex_w) };
+                    // AH/CH/DH/BH need the high-8 handling used elsewhere; let
+                    // the interpreter take those encodings.
+                    if width == 8 && rex == 0 && ((modrm >> 3 & 7) >= 4 || (modrm >> 6 == 3 && (modrm & 7) >= 4)) {
+                        return Err("cmpxchg with a high byte register is not supported".into());
+                    }
+                    let src = (modrm >> 3 & 7) | rex_r << 3;
+                    if modrm >> 6 == 3 {
+                        out.push(Instr::CmpxchgReg { dst: (modrm & 7) | rex_b << 3, src, width });
+                    }
+                    else {
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
+                        out.push(Instr::CmpxchgMem { mem, src, width });
+                    }
+                }
                 else if matches!(second, 0xB6 | 0xB7 | 0xBE | 0xBF) {
                     let modrm = *bytes.get(i).ok_or("truncated movx modrm")?;
                     i += 1;
@@ -1943,6 +1974,92 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 emit_write_reg(&mut b, &locals[bi].1, &old_a, width);
                 b.free_local_i64(old_a);
                 b.free_local_i64(old_b);
+            },
+            Instr::CmpxchgReg { dst, src, width } => {
+                let di = load_reg(&mut b, &mut locals, dst);
+                let ai = load_reg(&mut b, &mut locals, 0);
+                b.get_local_i64(&locals[di].1);
+                emit_mask(&mut b, width);
+                b.get_local_i64(&locals[ai].1);
+                emit_mask(&mut b, width);
+                b.eq_i64();
+                let zf = b.set_new_local();
+                b.const_i32(FLAGS_ADDR);
+                b.const_i32(FLAGS_ADDR);
+                b.load_aligned_i32(0);
+                b.const_i32(!0x40);
+                b.and_i32();
+                b.get_local(&zf);
+                b.const_i32(6);
+                b.shl_i32();
+                b.or_i32();
+                b.store_aligned_i32(0);
+                b.get_local(&zf);
+                b.if_void();
+                {
+                    let si = load_reg(&mut b, &mut locals, src);
+                    let sv = locals[si].1.unsafe_clone();
+                    b.get_local_i64(&sv);
+                    emit_mask(&mut b, width);
+                    let masked = b.set_new_local_i64();
+                    emit_write_reg(&mut b, &locals[di].1, &masked, width);
+                    b.free_local_i64(masked);
+                }
+                b.else_();
+                {
+                    b.get_local_i64(&locals[di].1);
+                    emit_mask(&mut b, width);
+                    let masked = b.set_new_local_i64();
+                    emit_write_reg(&mut b, &locals[ai].1, &masked, width);
+                    b.free_local_i64(masked);
+                }
+                b.block_end();
+                b.free_local(zf);
+            },
+            Instr::CmpxchgMem { mem, src, width } => {
+                let address = gen_memory_address_local(&mut b, &mut locals, &mem);
+                let current = gen_memory_read(&mut b, &locals, &address, width);
+                let ai = load_reg(&mut b, &mut locals, 0);
+                b.get_local_i64(&current);
+                emit_mask(&mut b, width);
+                b.get_local_i64(&locals[ai].1);
+                emit_mask(&mut b, width);
+                b.eq_i64();
+                let zf = b.set_new_local();
+                b.const_i32(FLAGS_ADDR);
+                b.const_i32(FLAGS_ADDR);
+                b.load_aligned_i32(0);
+                b.const_i32(!0x40);
+                b.and_i32();
+                b.get_local(&zf);
+                b.const_i32(6);
+                b.shl_i32();
+                b.or_i32();
+                b.store_aligned_i32(0);
+                b.get_local(&zf);
+                b.if_void();
+                {
+                    gen_memory_probe_write(&mut b, &locals, &address, width);
+                    let si = load_reg(&mut b, &mut locals, src);
+                    let sv = locals[si].1.unsafe_clone();
+                    b.get_local_i64(&sv);
+                    emit_mask(&mut b, width);
+                    let masked = b.set_new_local_i64();
+                    gen_memory_write(&mut b, &locals, &address, &masked, width);
+                    b.free_local_i64(masked);
+                }
+                b.else_();
+                {
+                    b.get_local_i64(&current);
+                    emit_mask(&mut b, width);
+                    let masked = b.set_new_local_i64();
+                    emit_write_reg(&mut b, &locals[ai].1, &masked, width);
+                    b.free_local_i64(masked);
+                }
+                b.block_end();
+                b.free_local(zf);
+                b.free_local_i64(address);
+                b.free_local_i64(current);
             },
             Instr::XchgMemReg { mem, r, width } => {
                 let address = gen_memory_address_local(&mut b, &mut locals, &mem);

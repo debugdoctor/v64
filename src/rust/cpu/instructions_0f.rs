@@ -3326,7 +3326,7 @@ pub unsafe fn instr_0FA2() {
             if config::VMWARE_HYPERVISOR_PORT {
                 ecx |= 1 << 31
             }; // hypervisor
-            edx = (if !*long_mode /* have fpu */ { 1 } else {  0 }) |      // fpu
+            edx = 1 |      // fpu
                     vme | 1 << 3 | 1 << 4 | 1 << 5 | 1 << 6 |  // vme, pse, tsc, msr, pae
                     1 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | // cx8, sep, pge, cmov
                     1 << 23 | 1 << 24 | 1 << 25 | 1 << 26; // mmx, fxsr, sse1, sse2
