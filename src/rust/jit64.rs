@@ -1676,6 +1676,20 @@ fn write_reg_value(
     }
 }
 
+// AH/CH/DH/BH use temporary locals; merge ALU results into their parent
+// registers before another instruction reads them.
+fn write_back_high_byte(
+    b: &mut WasmBuilder,
+    locals: &mut Vec<(u8, WasmLocalI64)>,
+    r: u8,
+    index: usize,
+) {
+    if r >= 16 {
+        let value = locals[index].1.unsafe_clone();
+        write_reg_value(b, locals, r, &value, 8);
+    }
+}
+
 fn gen_arith_flags(
     b: &mut WasmBuilder,
     dst: &WasmLocalI64,
@@ -2247,6 +2261,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.xor_i64();
                 emit_mask(&mut b, width);
                 b.set_local_i64(&locals[ri].1);
+                write_back_high_byte(&mut b, &mut locals, r, ri);
             },
             Instr::NotMem { mem, width } => {
                 let address = gen_memory_address_local(&mut b, &mut locals, &mem);
@@ -2268,6 +2283,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 let source = locals[ri].1.unsafe_clone();
                 emit_arith(&mut b, &zero, &source, ArithOp::Sub, width);
                 emit_write_reg(&mut b, &locals[ri].1, &zero, width);
+                write_back_high_byte(&mut b, &mut locals, r, ri);
                 b.free_local_i64(zero);
             },
             Instr::NegMem { mem, width } => {
@@ -2782,24 +2798,32 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 let di = load_reg(&mut b, &mut locals, dst);
                 let si = load_reg(&mut b, &mut locals, src);
                 emit_arith(&mut b, &locals[di].1, &locals[si].1, ArithOp::Add, width);
+                write_back_high_byte(&mut b, &mut locals, dst, di);
             },
             Instr::AddRegImm { r, value, width } => {
                 let di = load_reg(&mut b, &mut locals, r);
                 b.const_i64(value as i64);
                 let src = b.set_new_local_i64();
                 emit_arith(&mut b, &locals[di].1, &src, ArithOp::Add, width);
+                write_back_high_byte(&mut b, &mut locals, r, di);
                 b.free_local_i64(src);
             },
             Instr::ArithRegReg { op, dst, src, width } => {
                 let di = load_reg(&mut b, &mut locals, dst);
                 let si = load_reg(&mut b, &mut locals, src);
                 emit_arith(&mut b, &locals[di].1, &locals[si].1, op, width);
+                if op.writes_result() {
+                    write_back_high_byte(&mut b, &mut locals, dst, di);
+                }
             },
             Instr::ArithRegImm { op, r, value, width } => {
                 let di = load_reg(&mut b, &mut locals, r);
                 b.const_i64(value as i64);
                 let src = b.set_new_local_i64();
                 emit_arith(&mut b, &locals[di].1, &src, op, width);
+                if op.writes_result() {
+                    write_back_high_byte(&mut b, &mut locals, r, di);
+                }
                 b.free_local_i64(src);
             },
             Instr::ArithRegMem { op, dst, mem, width } => {
@@ -2807,6 +2831,9 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 let src = gen_memory_read(&mut b, &locals, &address, width);
                 let di = load_reg(&mut b, &mut locals, dst);
                 emit_arith(&mut b, &locals[di].1, &src, op, width);
+                if op.writes_result() {
+                    write_back_high_byte(&mut b, &mut locals, dst, di);
+                }
                 b.free_local_i64(address);
                 b.free_local_i64(src);
             },
