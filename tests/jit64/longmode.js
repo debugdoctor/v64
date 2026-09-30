@@ -22,8 +22,8 @@ const emulator = new v64({
 emulator.add_listener("emulator-loaded", () => {
     const cpu = emulator.v86.cpu;
     const ex = cpu.wm.exports;
-    const buffer = ex.memory.buffer;
-    const u32 = new Uint32Array(buffer);
+    let buffer = ex.memory.buffer;
+    let u32 = new Uint32Array(buffer);
 
     const write64 = (address, value) => {
         ex.write32(address, Number(value & 0xFFFF_FFFFn));
@@ -166,6 +166,10 @@ emulator.add_listener("emulator-loaded", () => {
     {
         ex.main_loop();
     }
+
+    // The guest can grow the wasm heap while it runs, detaching these views.
+    buffer = ex.memory.buffer;
+    u32 = new Uint32Array(buffer);
 
     const rax = (BigInt(u32[32]) << 32n) | BigInt(u32[16]);
     const rcx = (BigInt(u32[32 + 1]) << 32n) | BigInt(u32[16 + 1]);

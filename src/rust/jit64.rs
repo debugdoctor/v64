@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocalI64};
+use crate::wasmgen::wasm_builder::{WasmBuilder, WasmLocal, WasmLocalI64};
 
 // Instrumentation: log the first few blocks that fail to decode.
 static LOGGED_FAILS: AtomicU32 = AtomicU32::new(0);
@@ -1460,12 +1460,262 @@ fn gen_memory_address_local(
     b.set_new_local_i64()
 }
 
+// Long-mode inline memory fast path.
+const CPL_ADDR: i32 = 612; // global_pointers::cpl
+const CR0_ADDR: i32 = 580; // global_pointers::cr
+const MEMORY_SIZE_ADDR: i32 = 812; // global_pointers::memory_size
+const CR0_WP: i32 = 1 << 16;
+
+fn tlb64_base() -> i32 { std::ptr::addr_of!(crate::cpu::cpu::tlb64) as u32 as i32 }
+fn tlb64_generation_addr() -> i32 {
+    std::ptr::addr_of!(crate::cpu::cpu::tlb64_generation) as u32 as i32
+}
+fn mem8_static_addr() -> i32 {
+    std::ptr::addr_of!(crate::cpu::memory::mem8) as u32 as i32
+}
+
+// Leaves a local holding &tlb64[(vaddr >> 12) & mask].
+fn gen_tlb64_entry(b: &mut WasmBuilder, address: &WasmLocalI64) -> WasmLocal {
+    use crate::cpu::cpu::*;
+    b.get_local_i64(address);
+    b.const_i64(12);
+    b.shr_u_i64();
+    b.wrap_i64_to_i32();
+    b.const_i32(TLB64_INDEX_MASK as i32);
+    b.and_i32();
+    b.const_i32(TLB64_ENTRY_SIZE as i32);
+    b.mul_i32();
+    b.const_i32(tlb64_base());
+    b.add_i32();
+    b.set_new_local()
+}
+
+// Leaves an i32 (0/1) on the stack: whether this read can be served inline.
+fn gen_memory_read_fast_condition(b: &mut WasmBuilder, address: &WasmLocalI64, width: u8) {
+    use crate::cpu::cpu::*;
+    let bytes = (width / 8) as i32;
+    let entry = gen_tlb64_entry(b, address);
+
+    // generation matches
+    b.get_local(&entry);
+    b.load_aligned_i32(TLB64_OFF_GENERATION);
+    b.const_i32(tlb64_generation_addr());
+    b.load_aligned_i32(0);
+    b.eq_i32();
+    // tag matches vaddr & !0xFFF
+    b.get_local(&entry);
+    b.load_aligned_i64(TLB64_OFF_TAG);
+    b.get_local_i64(address);
+    b.const_i64(!0xFFFi64);
+    b.and_i64();
+    b.eq_i64();
+    b.and_i32();
+    // the access stays inside one page
+    b.get_local_i64(address);
+    b.wrap_i64_to_i32();
+    b.const_i32(0xFFF);
+    b.and_i32();
+    b.const_i32(0x1000 - bytes);
+    b.leu_i32();
+    b.and_i32();
+    // a user access needs the user bit
+    b.const_i32(CPL_ADDR);
+    b.load_u8(0);
+    b.eqz_i32();
+    b.get_local(&entry);
+    b.load_u8(TLB64_OFF_FLAGS);
+    b.const_i32(TLB64_USER as i32);
+    b.and_i32();
+    b.const_i32(0);
+    b.ne_i32();
+    b.or_i32();
+    b.and_i32();
+    // phys is plain RAM: below memory_size and outside the 0xA0000..0xC0000 hole
+    gen_phys_is_ram(b, &entry, address);
+    b.and_i32();
+
+    b.free_local(entry);
+}
+
+// Leaves an i32 (0/1) on the stack: whether this write can be served inline.
+fn gen_memory_write_fast_condition(b: &mut WasmBuilder, address: &WasmLocalI64, width: u8) {
+    use crate::cpu::cpu::*;
+    let bytes = (width / 8) as i32;
+    let entry = gen_tlb64_entry(b, address);
+
+    b.get_local(&entry);
+    b.load_aligned_i32(TLB64_OFF_GENERATION);
+    b.const_i32(tlb64_generation_addr());
+    b.load_aligned_i32(0);
+    b.eq_i32();
+    b.get_local(&entry);
+    b.load_aligned_i64(TLB64_OFF_TAG);
+    b.get_local_i64(address);
+    b.const_i64(!0xFFFi64);
+    b.and_i64();
+    b.eq_i64();
+    b.and_i32();
+    b.get_local_i64(address);
+    b.wrap_i64_to_i32();
+    b.const_i32(0xFFF);
+    b.and_i32();
+    b.const_i32(0x1000 - bytes);
+    b.leu_i32();
+    b.and_i32();
+    // user bit (for a user access) and the write bit (or a supervisor write with
+    // CR0.WP clear)
+    b.const_i32(CPL_ADDR);
+    b.load_u8(0);
+    b.eqz_i32(); // !user
+    b.get_local(&entry);
+    b.load_u8(TLB64_OFF_FLAGS);
+    b.const_i32(TLB64_USER as i32);
+    b.and_i32();
+    b.const_i32(0);
+    b.ne_i32();
+    b.or_i32();
+    b.and_i32();
+    // writable = (flags & WRITABLE) || (!user && CR0.WP == 0)
+    b.get_local(&entry);
+    b.load_u8(TLB64_OFF_FLAGS);
+    b.const_i32(TLB64_WRITABLE as i32);
+    b.and_i32();
+    b.const_i32(0);
+    b.ne_i32();
+    b.const_i32(CPL_ADDR);
+    b.load_u8(0);
+    b.eqz_i32();
+    b.const_i32(CR0_ADDR);
+    b.load_aligned_i32(0);
+    b.const_i32(CR0_WP);
+    b.and_i32();
+    b.const_i32(0);
+    b.ne_i32();
+    b.eqz_i32();
+    b.and_i32();
+    b.or_i32();
+    b.and_i32();
+    // no compiled code on this physical page (self-modifying code stays correct)
+    b.get_local(&entry);
+    b.load_u8(TLB64_OFF_FLAGS);
+    b.const_i32(TLB64_HAS_CODE as i32);
+    b.and_i32();
+    b.const_i32(0);
+    b.eq_i32();
+    b.and_i32();
+    gen_phys_is_ram(b, &entry, address);
+    b.and_i32();
+
+    b.free_local(entry);
+}
+
+// Leaves an i32 (0/1): the physical address is plain RAM (not MMIO).
+fn gen_phys_is_ram(b: &mut WasmBuilder, entry: &WasmLocal, address: &WasmLocalI64) {
+    use crate::cpu::cpu::*;
+    b.get_local(entry);
+    b.load_aligned_i32(TLB64_OFF_PHYS_PAGE);
+    b.get_local_i64(address);
+    b.wrap_i64_to_i32();
+    b.const_i32(0xFFF);
+    b.and_i32();
+    b.or_i32();
+    let phys = b.set_new_local();
+    b.get_local(&phys);
+    b.const_i32(0xA0000);
+    b.ltu_i32();
+    b.get_local(&phys);
+    b.const_i32(0xC0000);
+    b.geu_i32();
+    b.get_local(&phys);
+    b.const_i32(MEMORY_SIZE_ADDR);
+    b.load_aligned_i32(0);
+    b.ltu_i32();
+    b.and_i32();
+    b.or_i32();
+    b.free_local(phys);
+}
+
+// Leaves the linear address (i32) of the access on the stack.
+fn gen_inline_address(b: &mut WasmBuilder, address: &WasmLocalI64) {
+    use crate::cpu::cpu::*;
+    let entry = gen_tlb64_entry(b, address);
+    b.get_local(&entry);
+    b.load_aligned_i32(TLB64_OFF_PHYS_PAGE);
+    b.get_local_i64(address);
+    b.wrap_i64_to_i32();
+    b.const_i32(0xFFF);
+    b.and_i32();
+    b.or_i32();
+    b.const_i32(mem8_static_addr());
+    b.load_aligned_i32(0);
+    b.add_i32();
+    b.free_local(entry);
+}
+
+fn gen_inline_load(b: &mut WasmBuilder, address: &WasmLocalI64, width: u8) {
+    gen_inline_address(b, address);
+    match width {
+        8 =>
+        {
+            b.load_u8(0);
+            b.extend_unsigned_i32_to_i64();
+        },
+        16 =>
+        {
+            b.load_aligned_u16(0);
+            b.extend_unsigned_i32_to_i64();
+        },
+        32 =>
+        {
+            b.load_aligned_i32(0);
+            b.extend_unsigned_i32_to_i64();
+        },
+        _ => { b.load_aligned_i64(0); },
+    }
+}
+
+fn gen_inline_store(b: &mut WasmBuilder, address: &WasmLocalI64, value: &WasmLocalI64, width: u8) {
+    gen_inline_address(b, address);
+    b.get_local_i64(value);
+    match width {
+        8 =>
+        {
+            b.wrap_i64_to_i32();
+            b.store_u8(0);
+        },
+        16 =>
+        {
+            b.wrap_i64_to_i32();
+            b.store_unaligned_u16(0);
+        },
+        32 =>
+        {
+            b.wrap_i64_to_i32();
+            b.store_unaligned_i32(0);
+        },
+        _ => { b.store_unaligned_i64(0); },
+    }
+}
+
 fn gen_memory_read(
     b: &mut WasmBuilder,
     locals: &[(u8, WasmLocalI64)],
     address: &WasmLocalI64,
     width: u8,
 ) -> WasmLocalI64 {
+    if unsafe { JIT64_INLINE_MEMORY } && matches!(width, 8 | 16 | 32 | 64)
+    {
+        gen_memory_read_fast_condition(b, address, width);
+        b.if_i64();
+        gen_inline_load(b, address, width);
+        b.else_();
+        b.get_local_i64(address);
+        b.const_i32(width as i32);
+        b.call_fn2_i64_i32_ret_i64("jit64_mem_read");
+        gen_check_memory_fault(b, locals);
+        b.block_end();
+        return b.set_new_local_i64();
+    }
     b.get_local_i64(address);
     b.const_i32(width as i32);
     b.call_fn2_i64_i32_ret_i64("jit64_mem_read");
@@ -1475,6 +1725,27 @@ fn gen_memory_read(
 }
 
 fn gen_memory_write(
+    b: &mut WasmBuilder,
+    locals: &[(u8, WasmLocalI64)],
+    address: &WasmLocalI64,
+    value: &WasmLocalI64,
+    width: u8,
+) {
+    if unsafe { JIT64_INLINE_MEMORY && JIT64_INLINE_MEMORY_WRITE } && matches!(width, 8 | 16 | 32 | 64)
+    {
+        gen_memory_write_fast_condition(b, address, width);
+        b.if_void();
+        // A plain RAM write has no side effects, so no register flush is needed.
+        gen_inline_store(b, address, value, width);
+        b.else_();
+        gen_memory_write_slow(b, locals, address, value, width);
+        b.block_end();
+        return;
+    }
+    gen_memory_write_slow(b, locals, address, value, width);
+}
+
+fn gen_memory_write_slow(
     b: &mut WasmBuilder,
     locals: &[(u8, WasmLocalI64)],
     address: &WasmLocalI64,
@@ -3159,6 +3430,10 @@ static mut COMPILE_BUF: [u8; COMPILE_BUF_SIZE] = [0; COMPILE_BUF_SIZE];
 static mut JIT64_MEMORY_FAULT: u8 = 0;
 // Lets tests and benchmarks run the same code with the JIT off.
 static mut JIT64_ENABLED: bool = true;
+// Inline RAM loads/stores in generated code (see gen_memory_read).
+static mut JIT64_INLINE_MEMORY: bool = true;
+// Separate switch for inline stores (self-modifying code makes them riskier).
+static mut JIT64_INLINE_MEMORY_WRITE: bool = true;
 // SSE2 codegen remains opt-in while boot validation is incomplete.
 static mut JIT64_SSE: bool = false;
 // Dispatch counters (diagnostics; see jit64_stat).
@@ -3386,8 +3661,10 @@ unsafe fn compile_and_register(rip: u64) {
     }
     virt_pages().entry(rip >> 12).or_default().insert(rip);
     code_pages().entry(phys_page).or_default().insert(rip);
-    // Flag as code so a guest write invalidates the block (SMC).
+    // Flag as code so a guest write invalidates the block (SMC), and so inline
+    // writes on this physical page fall back to the helper.
     crate::cpu::cpu::tlb_set_has_code(crate::page::Page::page_of(phys_page << 12), true);
+    crate::cpu::cpu::tlb64_mark_code(phys_page, true);
 }
 
 // Physical page backing this guest page (one-entry cache).
@@ -3484,6 +3761,7 @@ pub unsafe fn clear_cache() {
     if !VIRT_PAGES.is_null() {
         virt_pages().clear();
     }
+    crate::cpu::cpu::tlb64_clear_has_code();
 }
 
 // Drop only the blocks compiled from this physical page.
@@ -3498,6 +3776,12 @@ pub unsafe fn invalidate_physical_page(page: u32) {
     for rip in rips {
         forget(rip);
     }
+    crate::cpu::cpu::tlb64_mark_code(page, false);
+}
+
+// Whether this physical page holds compiled code (inline writes must fall back).
+pub unsafe fn physical_page_has_code(page: u32) -> bool {
+    !CODE_PAGES.is_null() && code_pages().contains_key(&page)
 }
 
 // INVLPG: drop this virtual page's blocks (each block is one page).
@@ -3536,6 +3820,12 @@ pub unsafe fn jit64_stat(index: u32) -> u64 {
 // Enable or disable block compilation and dispatch (used by tests/benchmarks).
 #[no_mangle]
 pub unsafe fn jit64_set_enabled(enabled: u32) { JIT64_ENABLED = enabled != 0; }
+
+#[no_mangle]
+pub unsafe fn jit64_set_inline_memory(enabled: u32) { JIT64_INLINE_MEMORY = enabled != 0; }
+
+#[no_mangle]
+pub unsafe fn jit64_set_inline_write(enabled: u32) { JIT64_INLINE_MEMORY_WRITE = enabled != 0; }
 
 #[no_mangle]
 pub unsafe fn jit64_set_sse(enabled: u32) { JIT64_SSE = enabled != 0; }

@@ -84,6 +84,11 @@ pub enum stat {
     PAGE_FAULT,
     TLB_MISS,
 
+    // Long-mode TLB (cpu.rs).
+    TLB64_HIT,
+    TLB64_MISS,
+    TLB64_PAGE_WALK,
+
     MAIN_LOOP,
     MAIN_LOOP_IDLE,
     DO_MANY_CYCLES,

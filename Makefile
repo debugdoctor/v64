@@ -373,6 +373,14 @@ jit64-tests: build/v64-debug.wasm
 	node tests/jit64/e2e.js
 	node tests/jit64/benchmark.js
 
+# CPU microbenchmarks (interpreter vs jit64); MICROBENCH_OUT saves the results.
+jit64-microbench: build/v64-debug.wasm
+	JIT64_BENCH_ITERATIONS=$(or $(MICROBENCH_ITERATIONS),300000) node tests/jit64/microbench.js
+
+# Alpine boot throughput; needs images/alpine-virt-*.iso.
+alpine-perf: build/v64.wasm
+	SECONDS=$(or $(SECONDS),120) node tests/e2e/alpine-perf.js
+
 interp64-tests: build/v64-debug.wasm
 	node tests/interp64/run.js
 	node tests/interp64/code_page_boundary.js

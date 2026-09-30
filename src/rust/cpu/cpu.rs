@@ -330,6 +330,126 @@ pub static mut tlb_code: [Option<ptr::NonNull<Code>>; 0x100000] = [None; 0x10000
 pub static mut valid_tlb_entries: [i32; 10000] = [0; 10000];
 pub static mut valid_tlb_entries_count: i32 = 0;
 
+// Long-mode TLB. tlb_data is indexed by the low 20 bits of the virtual page, so
+// it cannot key 64-bit addresses. Direct-mapped by virtual page; entries hold
+// only permissions that were granted, so a hit is always safe.
+const TLB64_ENTRIES: usize = 4096;
+pub const TLB64_WRITABLE: u8 = 1;
+pub const TLB64_USER: u8 = 2;
+pub const TLB64_HAS_CODE: u8 = 4;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Tlb64Entry {
+    tag: u64,        // vaddr & !0xFFF
+    phys_page: u32,  // 4 KiB aligned
+    flags: u8,       // TLB64_WRITABLE | TLB64_USER
+    generation: u32, // stale unless equal to tlb64_generation
+}
+
+// Layout shared with the JIT's inline fast path (jit64.rs).
+pub const TLB64_ENTRY_SIZE: u32 = 24;
+pub const TLB64_OFF_TAG: u32 = 0;
+pub const TLB64_OFF_PHYS_PAGE: u32 = 8;
+pub const TLB64_OFF_FLAGS: u32 = 12;
+pub const TLB64_OFF_GENERATION: u32 = 16;
+pub const TLB64_INDEX_MASK: u32 = (TLB64_ENTRIES - 1) as u32;
+
+const _: () = assert!(TLB64_ENTRY_SIZE == std::mem::size_of::<Tlb64Entry>() as u32);
+const _: () = assert!(TLB64_OFF_TAG == std::mem::offset_of!(Tlb64Entry, tag) as u32);
+const _: () = assert!(TLB64_OFF_PHYS_PAGE == std::mem::offset_of!(Tlb64Entry, phys_page) as u32);
+const _: () = assert!(TLB64_OFF_FLAGS == std::mem::offset_of!(Tlb64Entry, flags) as u32);
+const _: () = assert!(
+    TLB64_OFF_GENERATION == std::mem::offset_of!(Tlb64Entry, generation) as u32
+);
+
+const TLB64_EMPTY: Tlb64Entry = Tlb64Entry { tag: 0, phys_page: 0, flags: 0, generation: 0 };
+
+pub static mut tlb64: [Tlb64Entry; TLB64_ENTRIES] = [TLB64_EMPTY; TLB64_ENTRIES];
+// Bumped on flush so clearing is O(1) (set_cr3 flushes on every context switch).
+pub static mut tlb64_generation: u32 = 1;
+
+#[inline(always)]
+unsafe fn tlb64_lookup(vaddr: u64, for_writing: bool, user: bool) -> Option<u32> {
+    let index = ((vaddr >> 12) as usize) & (TLB64_ENTRIES - 1);
+    let entry = *std::ptr::addr_of!(tlb64[index]);
+    if entry.generation == tlb64_generation && entry.tag == vaddr & !0xFFF {
+        // A supervisor write is also allowed when CR0.WP is clear.
+        let writable = entry.flags & TLB64_WRITABLE != 0 || (!user && *cr & CR0_WP == 0);
+        if (!for_writing || writable) && (!user || entry.flags & TLB64_USER != 0) {
+            return Some(entry.phys_page | (vaddr as u32 & 0xFFF));
+        }
+    }
+    None
+}
+
+#[inline(always)]
+unsafe fn tlb64_fill(vaddr: u64, phys: u32, granted_writable: bool, granted_user: bool) {
+    let index = ((vaddr >> 12) as usize) & (TLB64_ENTRIES - 1);
+    let phys_page = phys & 0xFFFFF000;
+    // Inline writes must fall back when the page holds compiled code.
+    let has_code = crate::jit64::physical_page_has_code(phys_page >> 12);
+    std::ptr::write(
+        std::ptr::addr_of_mut!(tlb64[index]),
+        Tlb64Entry {
+            tag: vaddr & !0xFFF,
+            phys_page,
+            flags: (granted_writable as u8 * TLB64_WRITABLE)
+                | (granted_user as u8 * TLB64_USER)
+                | if has_code { TLB64_HAS_CODE } else { 0 },
+            generation: tlb64_generation,
+        },
+    );
+}
+
+/// Set or clear TLB64_HAS_CODE on entries mapping this physical page. jit64 calls
+/// this when a page gains or loses compiled code.
+pub unsafe fn tlb64_mark_code(page_number: u32, has_code: bool) {
+    for i in 0..TLB64_ENTRIES {
+        let ptr = std::ptr::addr_of_mut!(tlb64[i]);
+        let mut entry = std::ptr::read(ptr);
+        if entry.generation == tlb64_generation && entry.phys_page >> 12 == page_number {
+            if has_code {
+                entry.flags |= TLB64_HAS_CODE;
+            }
+            else {
+                entry.flags &= !TLB64_HAS_CODE;
+            }
+            std::ptr::write(ptr, entry);
+        }
+    }
+}
+
+pub unsafe fn clear_tlb64() {
+    let next = tlb64_generation.wrapping_add(1);
+    tlb64_generation = if next == 0 { 1 } else { next }; // 0 must stay invalid
+}
+
+/// Clear every TLB64_HAS_CODE bit (jit64 dropped all its blocks).
+pub unsafe fn tlb64_clear_has_code() {
+    for i in 0..TLB64_ENTRIES {
+        let ptr = std::ptr::addr_of_mut!(tlb64[i]);
+        let mut entry = std::ptr::read(ptr);
+        if entry.generation == tlb64_generation && entry.flags & TLB64_HAS_CODE != 0 {
+            entry.flags &= !TLB64_HAS_CODE;
+            std::ptr::write(ptr, entry);
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn translate_address_64_lookup(vaddr: u64, for_writing: bool, user: bool) -> Option<u32> {
+    let phys = tlb64_lookup(vaddr, for_writing, user);
+    #[cfg(feature = "profiler")]
+    if phys.is_some() {
+        profiler::stat_increment(profiler::stat::TLB64_HIT);
+    }
+    else {
+        profiler::stat_increment(profiler::stat::TLB64_MISS);
+    }
+    phys
+}
+
 pub static mut in_jit: bool = false;
 
 pub enum JitExitReason {
@@ -2196,21 +2316,38 @@ pub unsafe fn do_page_walk64(
     Ok((pte as u32 & 0xFFFFF000) | (vaddr as u32 & 0xFFF))
 }
 
+#[inline(always)]
 pub unsafe fn translate_address_64(vaddr: u64, for_writing: bool, user: bool) -> OrPageFault<u32> {
-    do_page_walk64(vaddr, for_writing, user, false, true)
+    if let Some(phys) = translate_address_64_lookup(vaddr, for_writing, user) {
+        return Ok(phys);
+    }
+    let phys = do_page_walk64(vaddr, for_writing, user, false, true)?;
+    tlb64_fill(vaddr, phys, for_writing, user);
+    Ok(phys)
 }
 
+#[inline(always)]
 pub unsafe fn translate_address_64_jit(
     vaddr: u64,
     for_writing: bool,
     user: bool,
 ) -> OrPageFault<u32> {
-    do_page_walk64(vaddr, for_writing, user, true, true)
+    if let Some(phys) = translate_address_64_lookup(vaddr, for_writing, user) {
+        return Ok(phys);
+    }
+    let phys = do_page_walk64(vaddr, for_writing, user, true, true)?;
+    tlb64_fill(vaddr, phys, for_writing, user);
+    Ok(phys)
 }
 
 /// Non-faulting probe for jit64's dispatch-time stale-block check.
 pub unsafe fn translate_address_64_no_side_effects(vaddr: u64) -> OrPageFault<u32> {
-    do_page_walk64(vaddr, false, false, false, false)
+    if let Some(phys) = translate_address_64_lookup(vaddr, false, false) {
+        return Ok(phys);
+    }
+    let phys = do_page_walk64(vaddr, false, false, false, false)?;
+    tlb64_fill(vaddr, phys, false, false);
+    Ok(phys)
 }
 
 // 32-bit paging:
@@ -2445,6 +2582,7 @@ pub unsafe fn full_clear_tlb() {
 /// Flush the TLB only: blocks re-check their physical page on dispatch.
 pub unsafe fn full_clear_tlb_keep_code() {
     crate::jit64::note_mapping_changed();
+    clear_tlb64();
     profiler::stat_increment(stat::FULL_CLEAR_TLB);
     // clear tlb including global pages
     *last_virt_eip = -1;
@@ -2466,6 +2604,7 @@ pub unsafe fn full_clear_tlb_keep_code() {
 #[no_mangle]
 pub unsafe fn clear_tlb() {
     crate::jit64::note_mapping_changed();
+    clear_tlb64();
     profiler::stat_increment(stat::CLEAR_TLB);
     // clear tlb excluding global pages
     *last_virt_eip = -1;
@@ -2580,6 +2719,27 @@ pub unsafe fn exit_jit64() {
 ///   and finally calls exit_jit, which does the interrupt
 ///
 /// Non-jit resets the instruction pointer and does the PF interrupt directly
+// Diagnostic: guest state at the last low-address user page fault. Read from
+// the host through fault_regs_ptr() to debug wild user pointers.
+pub static mut FAULT_REGS: [u64; 24] = [0; 24];
+pub static mut FAULT_RIP_RING: [u64; 256] = [0; 256];
+pub static mut FAULT_RIP_POS: u64 = 0;
+
+#[no_mangle]
+pub unsafe fn fault_regs_ptr() -> u32 {
+    std::ptr::addr_of!(FAULT_REGS) as u32
+}
+
+#[no_mangle]
+pub unsafe fn fault_rip_ptr() -> u32 {
+    std::ptr::addr_of!(FAULT_RIP_RING) as u32
+}
+
+#[no_mangle]
+pub unsafe fn fault_rip_pos() -> u64 {
+    FAULT_RIP_POS
+}
+
 pub unsafe fn trigger_pagefault(addr: i32, present: bool, write: bool, user: bool, jit: bool) {
     trigger_pagefault_lin(addr as u32 as u64, present, write, user, jit);
 }
@@ -2597,6 +2757,21 @@ pub unsafe fn trigger_pagefault_lin(addr: u64, present: bool, write: bool, user:
             addr
         );
         dbg_trace();
+    }
+    if user && addr < 0x10000 {
+        FAULT_RIP_POS = crate::cpu::interp64::RIP_RING_POS;
+        for i in 0..256 {
+            FAULT_RIP_RING[i] = crate::cpu::interp64::RIP_RING[i];
+        }
+        for i in 0..16 {
+            FAULT_REGS[i as usize] = read_reg64(i);
+        }
+        FAULT_REGS[16] = *previous_ip as u64;
+        FAULT_REGS[17] = *rip;
+        FAULT_REGS[18] = addr;
+        FAULT_REGS[19] = *flags as u32 as u64;
+        FAULT_REGS[20] = *cr.offset(3) as u32 as u64; // cr3
+        FAULT_REGS[21] = *cpl as u64;
     }
     profiler::stat_increment(stat::PAGE_FAULT);
     *cr.offset(2) = addr as i32;
@@ -4852,6 +5027,9 @@ pub unsafe fn invlpg(addr: i32) {
     // This however means that valid_tlb_entries can contain some invalid entries
     clear_tlb_code(page);
     tlb_data[page as usize] = 0;
+    // Drop the long-mode TLB (invlpg is rare) and jit64's dispatch cache.
+    clear_tlb64();
+    crate::jit64::note_mapping_changed();
     *last_virt_eip = -1;
 }
 
