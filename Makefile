@@ -438,9 +438,56 @@ build/libwabt.cjs:
 	rm build/1.0.6.zip
 
 build/xterm.js:
-	curl https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.min.js > build/xterm.js
-	curl https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.js.map > build/xterm.js.map
-	curl https://cdn.jsdelivr.net/npm/xterm@5.2.1/css/xterm.css > build/xterm.css
+	mkdir -p build
+	curl -fL https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.min.js > build/xterm.js
+	curl -fL https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.js.map > build/xterm.js.map
+	curl -fL https://cdn.jsdelivr.net/npm/xterm@5.2.1/css/xterm.css > build/xterm.css
+
+# ---------------------------------------------------------------------------
+# Guest images for the examples and the end-to-end tests. These are large and
+# not committed (images is in .gitignore); download them with
+# `make test-images` (or only what you need, e.g. `make alpine-example`).
+# ---------------------------------------------------------------------------
+
+ALPINE_VERSION=3.24
+ALPINE_RELEASE=3.24.2
+ALPINE_X86_64=https://dl-cdn.alpinelinux.org/alpine/v$(ALPINE_VERSION)/releases/x86_64
+
+images/vmlinuz-virt:
+	mkdir -p images
+	curl -fL -o $@ $(ALPINE_X86_64)/netboot/vmlinuz-virt
+
+images/initramfs-virt:
+	mkdir -p images
+	curl -fL -o $@ $(ALPINE_X86_64)/netboot/initramfs-virt
+
+images/modloop-virt:
+	mkdir -p images
+	curl -fL -o $@ $(ALPINE_X86_64)/netboot/modloop-virt
+
+images/busybox:
+	mkdir -p images
+	curl -fL -o $@ https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
+	chmod +x $@
+
+images/alpine-minirootfs-$(ALPINE_RELEASE)-x86_64.tar.gz:
+	mkdir -p images
+	curl -fL -o $@ $(ALPINE_X86_64)/alpine-minirootfs-$(ALPINE_RELEASE)-x86_64.tar.gz
+
+images/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso:
+	mkdir -p images
+	curl -fL -o $@ $(ALPINE_X86_64)/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso
+	curl -fL -o $@.sha256 $(ALPINE_X86_64)/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso.sha256
+	cd images && (shasum -a 256 -c alpine-virt-$(ALPINE_RELEASE)-x86_64.iso.sha256 || sha256sum -c alpine-virt-$(ALPINE_RELEASE)-x86_64.iso.sha256)
+
+.PHONY: test-images
+test-images: images/vmlinuz-virt images/initramfs-virt images/modloop-virt \
+	     images/busybox images/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso
+
+# Everything examples/alpine-iso.html needs (release wasm + xterm + the ISO).
+.PHONY: alpine-example
+alpine-example: build/v64.wasm build/xterm.js build/xterm.css \
+		images/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso
 
 update-package-json-version:
 	git describe --tags --exclude latest | sed 's/-/./' | tr - + | tee build/version

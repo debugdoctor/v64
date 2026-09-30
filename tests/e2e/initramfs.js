@@ -4,10 +4,10 @@
 // and runs its /init to a shell.
 //
 // The initramfs is generated here as a newc cpio archive; a static busybox is
-// needed for /init to be a script. See tests/images/README.md:
+// needed for /init to be a script. See images/README.md:
 //
-//   LINUX64_IMAGE=tests/images/vmlinuz-virt \
-//   LINUX64_BUSYBOX=tests/images/busybox \
+//   LINUX64_IMAGE=images/vmlinuz-virt \
+//   LINUX64_BUSYBOX=images/busybox \
 //       node tests/e2e/initramfs.js
 //
 // Requires a debug wasm build: `make build/v64-debug.wasm`
@@ -34,20 +34,20 @@ function first_existing(candidates)
 
 const image = first_existing([
     process.env.LINUX64_IMAGE,
-    path.join(ROOT, "tests/images/bzImage"),
-    path.join(ROOT, "tests/images/vmlinuz-virt"),
-    path.join(ROOT, "tests/images/vmlinuz"),
+    path.join(ROOT, "images/bzImage"),
+    path.join(ROOT, "images/vmlinuz-virt"),
+    path.join(ROOT, "images/vmlinuz"),
 ]);
 const busybox = first_existing([
     process.env.LINUX64_BUSYBOX,
-    path.join(ROOT, "tests/images/busybox"),
+    path.join(ROOT, "images/busybox"),
 ]);
 
 if(!image || !busybox)
 {
     const missing = [!image && "kernel (LINUX64_IMAGE)", !busybox && "busybox (LINUX64_BUSYBOX)"].filter(Boolean);
     console.log("e2e initramfs: missing " + missing.join(" and ") + ", test skipped");
-    console.log("  put them in tests/images/ (see tests/images/README.md)");
+    console.log("  put them in images/ (see images/README.md)");
     process.exit(0);
 }
 

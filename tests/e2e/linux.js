@@ -3,10 +3,10 @@
 // The hard goal: a real 64-bit Linux kernel plus initramfs reaches a shell.
 //
 // The image is not distributed with the repository, so the test skips unless
-// one is provided (see tests/images/README.md):
+// one is provided (see images/README.md):
 //
-//   LINUX64_IMAGE=tests/images/vmlinuz-virt \
-//   LINUX64_INITRD=tests/images/initramfs.cpio.gz \
+//   LINUX64_IMAGE=images/vmlinuz-virt \
+//   LINUX64_INITRD=images/initramfs.cpio.gz \
 //       node tests/e2e/linux.js
 //
 // It boots through the 64-bit boot protocol and watches COM1 for the kernel
@@ -35,24 +35,24 @@ function first_existing(candidates)
 
 const image = first_existing([
     process.env.LINUX64_IMAGE,
-    path.join(ROOT, "tests/images/bzImage"),
-    path.join(ROOT, "tests/images/vmlinuz-virt"),
-    path.join(ROOT, "tests/images/vmlinuz"),
+    path.join(ROOT, "images/bzImage"),
+    path.join(ROOT, "images/vmlinuz-virt"),
+    path.join(ROOT, "images/vmlinuz"),
 ]);
 
 const initrd = first_existing([
     process.env.LINUX64_INITRD,
-    path.join(ROOT, "tests/images/initramfs-virt"),
-    path.join(ROOT, "tests/images/initramfs.cpio.gz"),
-    path.join(ROOT, "tests/images/rootfs.cpio"),
-    path.join(ROOT, "tests/images/initrd"),
+    path.join(ROOT, "images/initramfs-virt"),
+    path.join(ROOT, "images/initramfs.cpio.gz"),
+    path.join(ROOT, "images/rootfs.cpio"),
+    path.join(ROOT, "images/initrd"),
 ]);
 
 if(!image || !initrd)
 {
     const missing = [!image && "kernel (LINUX64_IMAGE)", !initrd && "initrd (LINUX64_INITRD)"].filter(Boolean);
     console.log("e2e linux: missing " + missing.join(" and ") + ", test skipped");
-    console.log("  put them in tests/images/ (see tests/images/README.md)");
+    console.log("  put them in images/ (see images/README.md)");
     process.exit(0);
 }
 
