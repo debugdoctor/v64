@@ -384,6 +384,7 @@ alpine-perf: build/v64.wasm
 interp64-tests: build/v64-debug.wasm
 	node tests/interp64/run.js
 	node tests/interp64/code_page_boundary.js
+	node tests/interp64/rep.js
 
 boot64-tests: build/v64-debug.wasm
 	node tests/boot64/run.js

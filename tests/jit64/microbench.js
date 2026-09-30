@@ -189,6 +189,8 @@ emulator.add_listener("emulator-loaded", () => {
     const u32 = new Uint32Array(buffer);
     if(process.env.INLINE_MEMORY === "0") ex.jit64_set_inline_memory(0);
     if(process.env.INLINE_WRITE === "0") ex.jit64_set_inline_write(0);
+    if(process.env.INTERP_CACHE === "0") ex.interp64_set_fetch_cache(0);
+    if(process.env.INTERP_MEM_SINGLE === "0") ex.interp64_set_mem_single(0);
 
     const write64 = (address, value) => {
         ex.write32(address, Number(value & 0xFFFF_FFFFn));

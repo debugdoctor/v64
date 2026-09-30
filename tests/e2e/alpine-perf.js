@@ -72,6 +72,8 @@ emulator.add_listener("emulator-loaded", async () =>
 {
     const ex = emulator.v86.cpu.wm.exports;
     if(process.env.INTERP) ex.jit64_set_enabled(0);
+    if(process.env.INTERP_CACHE === "0") ex.interp64_set_fetch_cache(0);
+    if(process.env.INTERP_MEM_SINGLE === "0") ex.interp64_set_mem_single(0);
     const counter = () => new Uint32Array(ex.memory.buffer)[166];
 
     const start = Date.now();
@@ -101,6 +103,14 @@ emulator.add_listener("emulator-loaded", async () =>
     instructions += (counter() - last) >>> 0;
 
     if(!reached && serial.includes(MARKER)) reached = true;
+    if(process.env.PERF_STATS === "1")
+    {
+        const s = i => ex.jit64_stat(i);
+        console.error(
+            "jit64 stats: run_hits=" + s(0) + " run_misses=" + s(1) + " interp=" + s(2) +
+            " compiles=" + s(3) + " fails=" + s(4) + " blocks=" + s(5) + " faults=" + s(6),
+        );
+    }
     console.log(
         "RESULT wasm=" + (process.env.WASM_PATH || "build/v64.wasm") +
         " jit=" + (process.env.INTERP ? "0" : "1") +

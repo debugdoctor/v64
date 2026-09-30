@@ -19,8 +19,11 @@ use crate::cpu::fpu::{
 };
 use crate::softfloat::F80;
 use crate::cpu::memory;
+use crate::jit;
+use crate::page::Page;
 use crate::paging::OrPageFault;
 use crate::prefix;
+use crate::profiler::stat;
 
 // General-purpose register indices
 const RAX: u8 = 0;
@@ -128,19 +131,70 @@ struct Modrm {
     rm: u8,
 }
 
+// Single-entry code fetch cache: the physical base of the current virtual code
+// page. Keyed by the TLB64 generation, so any mapping change (CR3/INVLPG/CR0)
+// invalidates it, and by CPL so a supervisor mapping is not reused for a user
+// fetch. Only the mapping is cached; instruction bytes are always read from
+// memory, so self-modifying code still works.
+static mut FETCH_GEN: u32 = 0;
+static mut FETCH_USER: bool = false;
+static mut FETCH_PAGE: u64 = u64::MAX;
+static mut FETCH_PHYS: u32 = 0;
+// Runtime A/B switch (tests/benchmarks).
+pub static mut INTERP64_FETCH_CACHE: bool = true;
+// Same-page accesses translate once (P2). Runtime A/B switch.
+pub static mut INTERP64_MEM_SINGLE: bool = true;
+
+#[no_mangle]
+pub unsafe fn interp64_set_fetch_cache(enabled: u32) { INTERP64_FETCH_CACHE = enabled != 0; }
+
+#[no_mangle]
+pub unsafe fn interp64_set_mem_single(enabled: u32) { INTERP64_MEM_SINGLE = enabled != 0; }
+
+#[inline(always)]
+unsafe fn fetch_phys(address: u64) -> OrPageFault<u32> {
+    let user = *cpl == 3;
+    let vpage = address & !0xFFF;
+    if INTERP64_FETCH_CACHE
+        && FETCH_PAGE == vpage
+        && FETCH_USER == user
+        && FETCH_GEN == crate::cpu::cpu::tlb64_generation
+    {
+        return Ok(FETCH_PHYS | (address as u32 & 0xFFF));
+    }
+    pstat(stat::INTERP64_FETCH_TRANSLATIONS);
+    let phys = translate_address_64(address, false, user)?;
+    FETCH_GEN = crate::cpu::cpu::tlb64_generation;
+    FETCH_USER = user;
+    FETCH_PAGE = vpage;
+    FETCH_PHYS = phys & 0xFFFFF000;
+    Ok(phys)
+}
+
 unsafe fn fetch8() -> OrPageFault<u8> {
-    let phys = translate_address_64(*rip, false, *cpl == 3)?;
+    pstat(stat::INTERP64_FETCH_BYTES);
+    let phys = fetch_phys(*rip)?;
     let value = memory::read8(phys) as u8;
     *rip = (*rip).wrapping_add(1);
     Ok(value)
 }
+
+// Profiling counters, compiled out unless the `profiler` feature is enabled.
+#[cfg(feature = "profiler")]
+#[inline(always)]
+fn pstat(s: crate::profiler::stat) { crate::profiler::stat_increment(s); }
+#[cfg(not(feature = "profiler"))]
+#[inline(always)]
+fn pstat(_s: crate::profiler::stat) {}
 
 unsafe fn fetch16() -> OrPageFault<u16> {
     let address = *rip;
     // Don't fetch past the page end: the next physical page is not the next
     // virtual one. cf. Intel SDM Vol. 1, 3.2.1 (words don't straddle pages).
     if (address as usize & 0xFFF) + 2 <= 0x1000 {
-        let phys = translate_address_64(address, false, *cpl == 3)?;
+        pstat(stat::INTERP64_FETCH_BYTES);
+        pstat(stat::INTERP64_FETCH_BYTES);
+        let phys = fetch_phys(address)?;
         let value = memory::read16(phys) as u16;
         *rip = address.wrapping_add(2);
         Ok(value)
@@ -155,7 +209,8 @@ unsafe fn fetch16() -> OrPageFault<u16> {
 unsafe fn fetch32() -> OrPageFault<u32> {
     let address = *rip;
     if (address as usize & 0xFFF) + 4 <= 0x1000 {
-        let phys = translate_address_64(address, false, *cpl == 3)?;
+        for _ in 0..4 { pstat(stat::INTERP64_FETCH_BYTES); }
+        let phys = fetch_phys(address)?;
         let value = memory::read32s(phys) as u32;
         *rip = address.wrapping_add(4);
         Ok(value)
@@ -405,20 +460,25 @@ unsafe fn write_reg(r: u8, size: OpSize, has_rex: bool, value: u64) {
 
 unsafe fn mem_read(address: u64, size: OpSize) -> OrPageFault<u64> {
     let bytes = (size.bits() / 8) as usize;
-    let mut physical = [0u32; 8];
-    for offset in 0..bytes {
-        physical[offset] = translate_address_64(address + offset as u64, false, *cpl == 3)?;
-    }
-    if (address as usize & 0xFFF) + bytes <= 0x1000 {
+    pstat(stat::INTERP64_MEM_READS);
+    // A same-page access maps contiguously, so one translation is enough.
+    if INTERP64_MEM_SINGLE && (address as usize & 0xFFF) + bytes <= 0x1000 {
+        pstat(stat::INTERP64_MEM_TRANSLATIONS);
+        let phys = translate_address_64(address, false, *cpl == 3)?;
         return Ok(match size {
-            OpSize::S8 => memory::read8(physical[0]) as u8 as u64,
-            OpSize::S16 => memory::read16(physical[0]) as u16 as u64,
-            OpSize::S32 => memory::read32s(physical[0]) as u32 as u64,
+            OpSize::S8 => memory::read8(phys) as u8 as u64,
+            OpSize::S16 => memory::read16(phys) as u16 as u64,
+            OpSize::S32 => memory::read32s(phys) as u32 as u64,
             OpSize::S64 => {
-                memory::read32s(physical[0]) as u32 as u64
-                    | (memory::read32s(physical[0].wrapping_add(4)) as u32 as u64) << 32
+                memory::read32s(phys) as u32 as u64
+                    | (memory::read32s(phys.wrapping_add(4)) as u32 as u64) << 32
             },
         });
+    }
+    let mut physical = [0u32; 8];
+    for offset in 0..bytes {
+        pstat(stat::INTERP64_MEM_TRANSLATIONS);
+        physical[offset] = translate_address_64(address + offset as u64, false, *cpl == 3)?;
     }
     let mut value = 0;
     for offset in 0..bytes {
@@ -429,26 +489,154 @@ unsafe fn mem_read(address: u64, size: OpSize) -> OrPageFault<u64> {
 
 unsafe fn mem_write(address: u64, size: OpSize, value: u64) -> OrPageFault<()> {
     let bytes = (size.bits() / 8) as usize;
-    let mut physical = [0u32; 8];
-    for offset in 0..bytes {
-        physical[offset] = translate_address_64(address + offset as u64, true, *cpl == 3)?;
-    }
-    if (address as usize & 0xFFF) + bytes <= 0x1000 {
+    pstat(stat::INTERP64_MEM_WRITES);
+    if INTERP64_MEM_SINGLE && (address as usize & 0xFFF) + bytes <= 0x1000 {
+        pstat(stat::INTERP64_MEM_TRANSLATIONS);
+        let phys = translate_address_64(address, true, *cpl == 3)?;
         match size {
-            OpSize::S8 => memory::write8(physical[0], value as i32),
-            OpSize::S16 => memory::write16(physical[0], value as i32),
-            OpSize::S32 => memory::write32(physical[0], value as i32),
+            OpSize::S8 => memory::write8(phys, value as i32),
+            OpSize::S16 => memory::write16(phys, value as i32),
+            OpSize::S32 => memory::write32(phys, value as i32),
             OpSize::S64 => {
-                memory::write32(physical[0], value as i32);
-                memory::write32(physical[0] + 4, (value >> 32) as i32);
+                memory::write32(phys, value as i32);
+                memory::write32(phys.wrapping_add(4), (value >> 32) as i32);
             },
         }
         return Ok(());
+    }
+    // Cross-page: translate every byte first, then write, so a fault on the
+    // second page cannot leave the first one partly written.
+    let mut physical = [0u32; 8];
+    for offset in 0..bytes {
+        pstat(stat::INTERP64_MEM_TRANSLATIONS);
+        physical[offset] = translate_address_64(address + offset as u64, true, *cpl == 3)?;
     }
     for offset in 0..bytes {
         memory::write8(physical[offset], (value >> (offset * 8)) as u8 as i32);
     }
     Ok(())
+}
+
+// Elements of this size that fit in the current page, moving in `direction`.
+fn count_until_end_of_page64(direction: i32, bytes: u64, addr: u32) -> u64 {
+    if direction == 1 {
+        (0x1000 - (addr & 0xFFF) as u64) / bytes
+    }
+    else {
+        ((addr & 0xFFF) as u64) / bytes + 1
+    }
+}
+
+// REP MOVS/STOS fast path: move or fill a whole page of plain RAM at once
+// instead of translating and checking every element. Returns Ok(true) when the
+// whole REP is done and Ok(false) to let the per-element loop handle the rest
+// (MMIO, page crossings, overlapping MOVS, non-canonical addresses).
+unsafe fn rep_movs_stos_fast(
+    opcode: u8,
+    elem_size: OpSize,
+    delta: i64,
+    has_rex: bool,
+    count: &mut u64,
+) -> OrPageFault<bool> {
+    let bytes = (elem_size.bits() / 8) as u64;
+    let is_movs = opcode & 0xFE == 0xA4;
+    let direction = if delta > 0 { 1 } else { -1 };
+
+    while *count > 0 {
+        let rsi = read_reg64(RSI as i32);
+        let rdi = read_reg64(RDI as i32);
+
+        let phys_dst = translate_address_64(rdi, true, *cpl == 3)?;
+        if memory::in_mapped_range(phys_dst) {
+            return Ok(false);
+        }
+        let phys_src = if is_movs {
+            let phys = translate_address_64(rsi, false, *cpl == 3)?;
+            if memory::in_mapped_range(phys) {
+                return Ok(false);
+            }
+            phys
+        }
+        else {
+            0
+        };
+        if (phys_dst & 0xFFF) as u64 + bytes > 0x1000
+            || is_movs && (phys_src & 0xFFF) as u64 + bytes > 0x1000
+        {
+            return Ok(false);
+        }
+
+        let mut n = u64::min(*count, count_until_end_of_page64(direction, bytes, phys_dst));
+        if is_movs {
+            n = u64::min(n, count_until_end_of_page64(direction, bytes, phys_src));
+        }
+        if n == 0 {
+            return Ok(false);
+        }
+
+        if is_movs {
+            // A forward copy that overlaps must not be batched (memmove differs
+            // from the element-by-element x86 semantics).
+            let len = (n * bytes) as u32;
+            let overlap = if phys_src < phys_dst {
+                phys_dst - phys_src < len && direction == 1
+            }
+            else if phys_src > phys_dst {
+                phys_src - phys_dst < len && direction == -1
+            }
+            else {
+                false
+            };
+            if overlap {
+                return Ok(false);
+            }
+        }
+
+        let mut ps = phys_src;
+        let mut pd = phys_dst;
+        if direction == -1 {
+            ps = ps.wrapping_sub(((n - 1) * bytes) as u32);
+            pd = pd.wrapping_sub(((n - 1) * bytes) as u32);
+        }
+
+        jit::jit_dirty_page(Page::page_of(pd));
+        if is_movs {
+            memory::memcpy_no_mmap_or_dirty_check(ps, pd, (n * bytes) as u32);
+        }
+        else {
+            let value = read_reg(RAX, elem_size, has_rex);
+            match bytes {
+                1 => memory::memset_no_mmap_or_dirty_check(pd, value as u8, n as u32),
+                2 =>
+                {
+                    for i in 0..n as u32 {
+                        memory::write16_no_mmap_or_dirty_check(pd + i * 2, value as i32);
+                    }
+                },
+                4 =>
+                {
+                    for i in 0..n as u32 {
+                        memory::write32_no_mmap_or_dirty_check(pd + i * 4, value as i32);
+                    }
+                },
+                _ =>
+                {
+                    for i in 0..n as u32 {
+                        memory::write64_no_mmap_or_dirty_check(pd + i * 8, value);
+                    }
+                },
+            }
+        }
+
+        let step = (n as i64).wrapping_mul(delta) as u64;
+        if is_movs {
+            write_reg64(RSI as i32, rsi.wrapping_add(step));
+        }
+        write_reg64(RDI as i32, rdi.wrapping_add(step));
+        *count -= n;
+        write_reg64(RCX as i32, *count);
+    }
+    Ok(true)
 }
 
 unsafe fn mem_probe_write(address: u64, size: OpSize) -> OrPageFault<()> {
@@ -2845,6 +3033,7 @@ unsafe fn jcc(code: u8, displacement: i64) {
 }
 
 pub unsafe fn run_one() {
+    pstat(stat::INTERP64_INSTRUCTIONS);
     *previous_rip = *rip;
     let _ = run_one_inner();
     // keep the 32-bit view in sync
@@ -3332,6 +3521,10 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
 
             let rep = pfx.f3;
             let mut count = if rep { read_reg64(RCX as i32) } else { 1 };
+
+            if rep && count > 0 && (opcode & 0xFE == 0xA4 || opcode & 0xFE == 0xAA) {
+                rep_movs_stos_fast(opcode, elem_size, delta, pfx.has_rex(), &mut count)?;
+            }
 
             while count > 0 {
                 let rsi = read_reg64(RSI as i32);
