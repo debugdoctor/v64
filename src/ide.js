@@ -669,14 +669,20 @@ IDEChannel.prototype.write_control = function(data)
     }
     this.device_control_reg = data;
 
-    // Gate the pending interrupt line with nIEN.
-    if((data & ATA_CR_NIEN) === 0 && this.irq_pending)
-    {
-        this.cpu.device_raise_irq(this.irq);
-    }
-    else if(data & ATA_CR_NIEN)
+    // INTRQ is a level signal: nIEN gates whether it may be asserted, it does
+    // not cancel a pending interrupt whose condition still holds. QEMU can get
+    // away with raising only at the event point because its ATAPI transfers
+    // complete asynchronously; this device model completes most commands
+    // synchronously, inside the very port access that issued them, so a
+    // completion is frequently raised while nIEN is still set. Discarding it
+    // there would leave the guest waiting for its full command timeout.
+    if(data & ATA_CR_NIEN)
     {
         this.cpu.device_lower_irq(this.irq);
+    }
+    else if(this.irq_pending)
+    {
+        this.cpu.device_raise_irq(this.irq);
     }
 };
 
@@ -789,6 +795,13 @@ IDEChannel.prototype.dma_write_command8 = function(value)
 
 IDEChannel.prototype.push_irq = function()
 {
+    // Level IRQ, gated by nIEN exactly like QEMU's ide_bus_set_irq:
+    //
+    //     if (!(bus->cmd & IDE_CTRL_DISABLE_IRQ)) qemu_irq_raise(bus->irq);
+    //
+    // While nIEN is set the event is discarded, not remembered. The line is
+    // lowered by the host reading the status register or writing a command
+    // register (cf. ide_ioport_read / ide_ioport_write).
     this.irq_pending = true;
     this.dma_status |= 4;
 
@@ -934,6 +947,11 @@ function IDEInterface(channel, interface_nr, buffer, is_cd)
 
     /** @type {number} */
     this.current_command = -1;
+
+    // Set once a command has raised its data-ready interrupt, so the dispatcher
+    // does not raise a second one for the same command.
+    /** @type {boolean} */
+    this.atapi_irq_pushed = false;
 
     /** @type {number} */
     this.write_dest = 0;
@@ -1194,6 +1212,12 @@ IDEInterface.prototype.device_reset = function()
 
 IDEInterface.prototype.push_irq = function()
 {
+    // One interrupt per event: the dispatcher tail only raises one if the
+    // command's own data phase has not already done so. ATA devices assert
+    // INTRQ when DRQ is set and again on completion; a third, duplicate
+    // assertion is delivered after the driver has already completed the
+    // command, which libata reports as "lost interrupt".
+    this.atapi_irq_pushed = true;
     this.channel.push_irq();
 };
 
@@ -1484,6 +1508,7 @@ IDEInterface.prototype.atapi_handle = function()
 
     this.data_pointer = 0;
     this.current_atapi_command = cmd;
+    this.atapi_irq_pushed = false;
 
     // Report a media change before the sense-clear, over two commands each
     // pending until REQUEST SENSE: NOT PRESENT then UNIT ATTENTION. Polling
@@ -1755,12 +1780,45 @@ IDEInterface.prototype.atapi_handle = function()
             break;
 
         case ATAPI_CMD_PAUSE:
-        case ATAPI_CMD_GET_EVENT_STATUS_NOTIFICATION:
         case ATAPI_CMD_REPORT_KEY:
         case ATAPI_CMD_READ_DISC_STRUCTURE:
             dbg_log_extra = "unimplemented";
             this.atapi_check_condition_response(ATAPI_SK_ILLEGAL_REQUEST, ATAPI_ASC_INV_FIELD_IN_CMD_PACKET);
             break;
+
+        case ATAPI_CMD_GET_EVENT_STATUS_NOTIFICATION:
+        {
+            // [MMC-3] 6.13, the only way a guest learns about media changes on
+            // a polling drive. The response is an 8 byte event header followed
+            // by a 4 byte media event descriptor. Linux requires
+            // be16(data_len) == 4, notification_class == 4 and nea == 0
+            // (cf. sr_get_events and cdrom_get_media_event).
+            const polled = (this.data[1] & 1) !== 0;
+            const media_class = (this.data[4] & 0x10) !== 0;
+            dbg_log_extra = `polled=${+polled} class=${h(this.data[4], 2)}`;
+            if(!polled)
+            {
+                // Asynchronous (non-polled) event delivery is not implemented.
+                this.atapi_check_condition_response(ATAPI_SK_ILLEGAL_REQUEST, ATAPI_ASC_INV_FIELD_IN_CMD_PACKET);
+                break;
+            }
+            this.data_allocate(8);
+            this.data_end = this.data_length;
+            this.data[1] = 4;               // data_len = 4, big endian
+            this.data[3] = 0x10;            // supported event classes: media
+            if(media_class)
+            {
+                this.data[2] = 4;           // notification class: media
+                this.data[4] = 0;           // media event code: no change
+                this.data[5] = 2;           // door closed, media present
+            }
+            else
+            {
+                this.data[2] = 0x80;        // NEA: no event available
+            }
+            this.status_reg = ATA_SR_DRDY|ATA_SR_DSC|ATA_SR_DRQ;
+            break;
+        }
 
         case ATAPI_CMD_READ_CD:
             dbg_log_extra = "unimplemented";
@@ -1783,7 +1841,7 @@ IDEInterface.prototype.atapi_handle = function()
         this.status_reg &= ~ATA_SR_DRQ;
     }
 
-    if((this.status_reg & ATA_SR_BSY) === 0)
+    if((this.status_reg & ATA_SR_BSY) === 0 && !this.atapi_irq_pushed)
     {
         this.push_irq();
     }
@@ -2901,6 +2959,7 @@ IDEInterface.prototype.get_state = function()
     state[26] = this.data_end;
     state[27] = this.current_atapi_command;
     state[28] = this.buffer;
+    state[29] = this.atapi_irq_pushed;
     return state;
 };
 
@@ -2932,6 +2991,7 @@ IDEInterface.prototype.set_state = function(state)
 
     this.data_end = state[26];
     this.current_atapi_command = state[27];
+    this.atapi_irq_pushed = state[29] || false;
 
     this.data16 = new Uint16Array(this.data.buffer);
     this.data32 = new Int32Array(this.data.buffer);

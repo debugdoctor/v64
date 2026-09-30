@@ -3297,7 +3297,10 @@ unsafe fn compile_and_register(rip: u64) {
         EVICT_PENDING = true;
     }
     JIT64_COMPILES += 1;
-    let phys_page = match crate::cpu::cpu::translate_address_64(rip, false, false) {
+    // Hotness is recorded after interpretation, which may have switched CR3
+    // or delivered an exception. Compilation is only a probe of the old RIP:
+    // missing mappings must not inject a second guest exception.
+    let phys_page = match crate::cpu::cpu::translate_address_64_no_side_effects(rip) {
         Ok(phys) => phys >> 12,
         Err(()) => return,
     };
@@ -3305,9 +3308,7 @@ unsafe fn compile_and_register(rip: u64) {
     let mut bytes = Vec::new();
     let mut addr = rip;
     while addr < page_end {
-        // Translating guest code isn't fetching it: don't inherit the last CPL
-        // (compiling a kernel block right after iretq to user mode used to fault).
-        match crate::cpu::cpu::translate_address_64(addr, false, false) {
+        match crate::cpu::cpu::translate_address_64_no_side_effects(addr) {
             Ok(phys) => bytes.push(crate::cpu::memory::read8(phys) as u8),
             Err(()) => break,
         }

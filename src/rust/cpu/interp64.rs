@@ -3514,8 +3514,16 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
         },
 
         // CLI (0xFA) / STI (0xFB)
-        0xFA => *flags &= !FLAG_INTERRUPT,
-        0xFB => *flags |= FLAG_INTERRUPT,
+        0xFA => crate::cpu::instructions::instr_FA(),
+        0xFB => {
+            let was_enabled = *flags & FLAG_INTERRUPT != 0;
+            if !crate::cpu::instructions::instr_FB_without_fault() {
+                crate::cpu::cpu::trigger_gp(0);
+            }
+            else if !was_enabled {
+                crate::cpu::cpu::set_sti_shadow();
+            }
+        },
 
         // CMC (0xF5) / CLC (0xF8) / STC (0xF9) / CLD (0xFC) / STD (0xFD)
         0xF5 => *flags ^= FLAG_CF as i32,

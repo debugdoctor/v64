@@ -30,18 +30,14 @@ emulator.add_listener("emulator-loaded", () => {
     assert.equal(events.length, 0, "nIEN must suppress INTRQ");
     assert.equal(channel.irq_pending, true);
     control(0x8);
-    assert.equal(events.at(-1).event, "raise", "clearing nIEN must expose pending INTRQ");
+    assert.equal(events.at(-1).event, "raise",
+        "clearing nIEN must assert the still-pending INTRQ (level signal)");
     assert.equal(events.at(-1).irq, 15);
+    cpu.io.port_read8(0x177);
+    assert.equal(channel.irq_pending, false, "status read acknowledges INTRQ");
 
     cpu.io.port_read8(0x376);
-    assert.equal(channel.irq_pending, true, "alternate status must not acknowledge INTRQ");
-    cpu.io.port_read8(0x177);
-    assert.equal(channel.irq_pending, false, "regular status acknowledges INTRQ");
-    const raises = events.filter(e => e.event === "raise").length;
-    control(0xA);
-    control(0x8);
-    assert.equal(events.filter(e => e.event === "raise").length, raises,
-        "acknowledged INTRQ must not reappear when nIEN changes");
+    assert.equal(channel.irq_pending, false, "alternate status must not create INTRQ");
 
     events.length = 0;
     command(0xA1); // IDENTIFY PACKET DEVICE completes synchronously.
@@ -72,6 +68,62 @@ emulator.add_listener("emulator-loaded", () => {
     assert.equal(channel.irq_pending, false, "legacy snapshots have no pending-INTRQ field");
     control(0xE);
     assert.equal(channel.irq_pending, false, "software reset clears pending INTRQ");
+
+    // GET EVENT STATUS NOTIFICATION (MMC-3 6.13): the media-change query the
+    // Linux cdrom layer depends on. It must not fail with CHECK CONDITION, and
+    // the descriptor has to satisfy sr_get_events' validation.
+    const packet = cdb => {
+        command(0xA0);
+        for(let i = 0; i < 3; i++)
+        {
+            cpu.io.port_write32(0x170, cdb[4 * i] | cdb[4 * i + 1] << 8 | cdb[4 * i + 2] << 16 | cdb[4 * i + 3] << 24);
+        }
+    };
+    const response = () => {
+        const bytes = [];
+        for(let i = 0; i < 2; i++)
+        {
+            const word = cpu.io.port_read32(0x170) >>> 0;
+            bytes.push(word & 0xFF, word >>> 8 & 0xFF, word >>> 16 & 0xFF, word >>> 24 & 0xFF);
+        }
+        return bytes;
+    };
+    control(0x8);
+    events.length = 0;
+    packet([0x4A, 1, 0, 0, 1 << 4, 0, 0, 0, 8, 0, 0, 0]);
+    assert.equal(events.find(e => e.event === "raise").status & 0x41, 0x40,
+        "GET EVENT STATUS NOTIFICATION must complete, not report CHECK CONDITION");
+    const descriptor = response();
+    assert.equal(descriptor[0] << 8 | descriptor[1], 4, "event header data_len is 4, big endian");
+    assert.equal(descriptor[2] & 7, 4, "notification class must be media");
+    assert.equal(descriptor[2] & 0x80, 0, "NEA must be clear: an event is reported");
+    assert.equal(descriptor[3], 0x10, "supported event classes must announce media events");
+    assert.equal(descriptor[4], 0, "media event code must be no-change");
+    assert.equal(descriptor[5] & 2, 2, "media must be reported present");
+    cpu.io.port_read8(0x177);
+
+    events.length = 0;
+    packet([0x4A, 0, 0, 0, 1 << 4, 0, 0, 0, 8, 0, 0, 0]);
+    assert.equal(events.find(e => e.event === "raise").status & 0x41, 0x41,
+        "non-polled GET EVENT STATUS NOTIFICATION is not supported");
+    cpu.io.port_read8(0x177);
+
+    // A single ATAPI data command must raise one interrupt when its data is
+    // ready and one on completion. A third, duplicate assertion is delivered
+    // after libata has already completed the command, which it reports as
+    // "lost interrupt" before freezing the port.
+    control(0x8);
+    cpu.io.port_write8(0x171, 0);      // no DMA
+    cpu.io.port_write8(0x174, 0xFE);   // byte count limit
+    cpu.io.port_write8(0x175, 0xFF);
+    events.length = 0;
+    packet([0x28, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);  // READ(10), one sector
+    assert.equal(events.filter(e => e.event === "raise").length, 1,
+        "data-ready must raise exactly one interrupt");
+    for(let i = 0; i < 2048 / 4; i++) cpu.io.port_read32(0x170);
+    assert.equal(events.filter(e => e.event === "raise").length, 2,
+        "completion must add exactly one interrupt");
+    cpu.io.port_read8(0x177);
 
     console.log("IDE interrupts: masking, acknowledgement, completion ordering and snapshots passed");
     emulator.destroy();

@@ -3281,10 +3281,26 @@ pub unsafe fn run_instruction0f_32(opcode: i32) { gen::interpreter0f::run(opcode
 pub unsafe fn cycle_internal() {
     if *long_mode {
         let current_rip = *rip;
-        if !crate::jit64::try_run(current_rip) {
+        // STI's shadow covers one instruction, not one compiled block. Execute
+        // that instruction in the interpreter, then service pending IRQs before
+        // a following CLI can close the interrupt window again.
+        if INTERRUPT_SHADOW != 0 || !crate::jit64::try_run(current_rip) {
+            let interrupts_were_enabled = *flags & FLAG_INTERRUPT != 0;
             crate::cpu::interp64::run_one();
             crate::jit64::note_interpreted(current_rip);
             *instruction_counter = (*instruction_counter).wrapping_add(1);
+            if INTERRUPT_SHADOW != 0 {
+                INTERRUPT_SHADOW -= 1;
+                if INTERRUPT_SHADOW == 0 {
+                    handle_irqs();
+                }
+            }
+            else if !interrupts_were_enabled && *flags & FLAG_INTERRUPT != 0 {
+                // POPFQ/IRETQ have no STI shadow. Deliver already-pending IRQs
+                // at this boundary, before the next timer batch can raise a
+                // higher-priority IRQ again and starve the pending request.
+                handle_irqs();
+            }
         }
         return;
     }
@@ -4944,6 +4960,10 @@ pub unsafe fn trigger_ss(code: i32) {
 pub unsafe fn store_current_tsc() { *current_tsc = read_tsc(); }
 
 static mut CACHED_SP0: u64 = 0;
+// Two boundaries: the STI itself, then the single following instruction.
+static mut INTERRUPT_SHADOW: u8 = 0;
+
+pub unsafe fn set_sti_shadow() { INTERRUPT_SHADOW = 2; }
 
 #[no_mangle]
 pub unsafe fn handle_irqs() {
@@ -4952,6 +4972,9 @@ pub unsafe fn handle_irqs() {
 }
 
 unsafe fn handle_irqs_impl() {
+    if INTERRUPT_SHADOW != 0 {
+        return;
+    }
     // Cache the entry-stack top before the first user-mode delivery.
     if CACHED_SP0 == 0 && TSS_BASE != 0 {
         if let Ok(addr) = translate_address_system_read64(TSS_BASE + 4) {
@@ -5144,6 +5167,7 @@ pub unsafe fn reset_cpu() {
     *rex = 0;
     *long_mode = false;
     *exception_in_progress = 0;
+    INTERRUPT_SHADOW = 0;
 
     *last_virt_eip = -1;
 
