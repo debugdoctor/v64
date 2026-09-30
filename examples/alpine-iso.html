@@ -2,25 +2,22 @@
 <meta charset="utf-8">
 <title>Alpine Linux 3.24 - live ISO (v64)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="../build/xterm.css">
+<script src="../build/xterm.js"></script>
 <style>
     body { background: #101014; color: #d8d8d8; font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 0; padding: 16px; }
     h1 { font-size: 16px; font-weight: 600; margin: 0 0 6px; }
     #hint { color: #8f8f96; font-size: 13px; margin-bottom: 12px; max-width: 900px; }
     #hint code { color: #c8c8d0; }
-    #screen_container { background: #000; display: inline-block; padding: 6px; border-radius: 4px; }
-    #screen_container > div { white-space: pre; font: 14px/14px "DejaVu Sans Mono", Menlo, monospace; color: #ccc; }
-    canvas { display: block; }
+    #terminal { width: 900px; max-width: 100%; height: 520px; background: #000; border: 1px solid #2a2a30; border-radius: 4px; }
     #stats { color: #8f8f96; font: 12px/1.8 monospace; margin-top: 8px; }
-    button { font: 12px monospace; margin-right: 6px; }
+    button { font: 12px monospace; margin-right: 6px; margin-bottom: 8px; }
 </style>
 
 <h1>Alpine Linux 3.24.2 - live ISO</h1>
 <div id="hint">
-    BIOS (bochs-bios.bin) &rarr; El Torito &rarr; ISOLINUX &rarr; Linux 6.18.52-0-virt &rarr; OpenRC &rarr; <code>localhost login:</code>
-    (log in as <code>root</code>, no password). Boots <code>tests/images/alpine-virt-3.24.2-x86_64.iso</code>.
-    Keep this tab in the foreground: a background tab is throttled to ~1 Hz, which drops the emulator to a crawl.
-    The ISO on disk is untouched; the boot entry is patched in memory to show the kernel log.
-    <code>?jit64=0</code> runs the interpreter instead, <code>?screen=none</code> hides the screen.
+    Boots <code>images/alpine-virt-3.24.2-x86_64.iso</code> over the serial console.
+    Wait for <code>localhost login:</code>, then type <code>root</code> (no password). Keep this tab focused.
 </div>
 
 <div>
@@ -30,12 +27,8 @@
     <button id="restore">Restore state</button>
 </div>
 
-<div id="screen_container">
-    <div id="screen"></div>
-    <canvas id="vga" style="display: none"></canvas>
-</div>
+<div id="terminal"></div>
 <input id="state_file" type="file" style="display: none">
-
 <div id="stats"></div>
 
 <script>globalThis.DEBUG = false; // release behaviour: no JS dbg_assert/dbg_log</script>
@@ -44,12 +37,29 @@ import { v64 } from "../src/browser/starter.js";
 import { dump_file } from "../src/lib.js";
 
 const args = new URLSearchParams(location.search);
-const show_screen = args.get("screen") !== "none";
-const ISO_URL = "../tests/images/alpine-virt-3.24.2-x86_64.iso";
+const ISO_URL = "../images/alpine-virt-3.24.2-x86_64.iso";
+
+// build/xterm.js comes from `make build/xterm.js`; fall back to the CDN so the
+// example also works straight after a fresh checkout.
+if(!window["Terminal"])
+{
+    await new Promise(function(resolve, reject)
+    {
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/xterm@5.2.1/lib/xterm.min.js";
+        script.onload = resolve;
+        script.onerror = function()
+        {
+            reject(new Error("xterm.js is not available (run `make build/xterm.js`)"));
+        };
+        document.head.appendChild(script);
+    });
+}
 
 const BOOT_ENTRY = "APPEND modules=loop,squashfs,sd-mod,usb-storage quiet";
-// sr-mod: load the CD driver up front. console=tty0: kernel log on the screen.
-const BOOT_ENTRY_PATCHED = "APPEND modules=loop,squashfs,sr-mod console=tty0";
+// sr-mod: load the CD driver up front (loop/squashfs come from the initramfs).
+// console=ttyS0: run everything on the serial console, shown in the terminal below.
+const BOOT_ENTRY_PATCHED = "APPEND modules=sr-mod console=ttyS0";
 
 // Pad to the original length: the ISO9660 record fixes the file's size.
 async function load_patched_iso()
@@ -91,24 +101,13 @@ async function load_patched_iso()
 const emulator = new v64({
     wasm_path: "../build/v64.wasm",
     memory_size: 1024 * 1024 * 1024,
-    vga_memory_size: 8 * 1024 * 1024,
-    screen_container: show_screen ? document.getElementById("screen_container") : undefined,
+    serial_container_xtermjs: document.getElementById("terminal"),
     bios: { url: "../bios/bochs-bios.bin" },
-    vga_bios: { url: "../bios/bochs-vgabios.bin" },
     cdrom: { buffer: await load_patched_iso() },
     boot_order: 0x213, // CD / floppy / hard disk
     log_level: 0,      // else every RTC/PCI access goes through console.log
     autostart: true,
 });
-
-// ?sse=1 enables the experimental SSE2 codegen (jit64); off by default.
-if(args.get("sse") === "1")
-{
-    emulator.add_listener("emulator-loaded", function()
-    {
-        emulator.v86.cpu.wm.exports.jit64_set_sse(1);
-    });
-}
 
 // ?jit64=0 falls back to the interpreter.
 if(args.get("jit64") === "0")
