@@ -266,6 +266,39 @@ emulator.add_listener("emulator-loaded", () => {
         "self-modifying code dropped the block(s) from that page",
     );
 
+    // Same-page self-write in one block: the write must stop the block so the
+    // patched instruction is used, not the stale decoded one.
+    {
+        const sp_base = 0x4800;
+        const sp = [
+            0x80, 0x3C, 0x25, 0x00, 0x60, 0x00, 0x00, 0x00, // cmp byte [0x6000], 0
+            0x74, 0x08,                                     // jz 0x4812
+            0xC6, 0x04, 0x25, 0x13, 0x48, 0x00, 0x00, 0x07, // mov byte [0x4813], 7
+            0xB8, 0x09, 0x00, 0x00, 0x00,                   // mov eax, 9
+            0xF4,                                           // hlt
+        ];
+        for(let i = 0; i < sp.length; i++) ex.write8(sp_base + i, sp[i]);
+        ex.write8(0x6000, 0); // patch disabled
+
+        const run_sp = () => {
+            cpu.in_hlt[0] = 0;
+            new DataView(buffer).setBigUint64(232, BigInt(sp_base), true);
+            let g = 0;
+            while(!cpu.in_hlt[0] && g++ < 1000) ex.main_loop();
+            return u32[64 / 4] >>> 0; // eax
+        };
+        // Warm up so the block is compiled from the unpatched code.
+        let eax = 0;
+        for(let i = 0; i < 700; i++) eax = run_sp();
+        assert.equal(eax, 9, "unpatched block leaves eax=9");
+
+        // Enable the patch: the block writes 7 over its own later instruction.
+        ex.write8(0x6000, 1);
+        eax = run_sp();
+        assert.equal(eax, 7, "same-block self-write uses the patched instruction");
+        assert.equal(ex.read8(0x4813), 7, "patch landed in the code page");
+    }
+
     // cmov/setcc with memory operands, compiled as a hot block.
     {
         const cmov_base = 0x4000;

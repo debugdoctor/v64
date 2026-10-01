@@ -28,6 +28,11 @@ const ONLY = +process.env.JIT64_DIFF_ONLY || 0;
 const FLAG_MASK = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7); // CF, PF, ZF, SF
 
 const POOL = [
+    // 66 + REX.W: REX.W wins, so these are 64-bit.
+    [0x66, 0x48, 0x01, 0xC8], // add rax, rcx
+    [0x66, 0x4D, 0x03, 0x07], // add r8, [r15]
+    [0x66, 0x48, 0x81, 0xC0, 0x78, 0x56, 0x34, 0x12], // add rax, 0x12345678
+    [0x66, 0x4C, 0x2B, 0x47, 0x10], // sub r8, [r15+16]
     [0x48, 0x01, 0xD8], // add rax, rbx
     [0x48, 0x29, 0xD1], // sub rcx, rdx
     [0x48, 0x21, 0xFE], // and rsi, rdi
@@ -47,6 +52,15 @@ const POOL = [
     [0x49, 0xD3, 0xE0], // shl r8, cl
     [0x49, 0xD3, 0xE9], // shr r9, cl
     [0x49, 0xD3, 0xFA], // sar r10, cl
+    // Rotates only affect CF/OF; SF/ZF/PF must be preserved.
+    [0x48, 0xD1, 0xC3], // rol rbx, 1
+    [0x48, 0xD1, 0xCB], // ror rbx, 1
+    [0x49, 0xD3, 0xC0], // rol r8, cl
+    [0x49, 0xD3, 0xC9], // ror r9, cl
+    [0xD0, 0xC0], // rol al, 1
+    [0xD0, 0xC8], // ror al, 1
+    [0x66, 0xD1, 0xC0], // rol ax, 1
+    [0x66, 0xD1, 0xC8], // ror ax, 1
     [0x0F, 0xB6, 0xC3], // movzx eax, bl
     [0x48, 0x0F, 0xBE, 0xC3], // movsx rax, bl
     [0x48, 0x63, 0xC3], // movsxd rax, ebx
@@ -76,6 +90,22 @@ const POOL = [
     [0x41, 0x8B, 0x57, 0x18], // mov edx, [r15+24]
     [0x41, 0x89, 0xD6], // mov r14d, edx
     [0x41, 0xD1, 0xEE], // shr r14d, 1
+    // Memory-source arithmetic (r, r/m); the r/m operand is read.
+    [0x02, 0x57, 0x08], // add dl, [r15+8]
+    [0x03, 0x47, 0x10], // add eax, [r15+16]
+    [0x48, 0x03, 0x47, 0x10], // add rax, [r15+16]
+    [0x0B, 0x47, 0x10], // or eax, [r15+16]
+    [0x2B, 0x47, 0x10], // sub eax, [r15+16]
+    [0x3B, 0x47, 0x10], // cmp eax, [r15+16]
+    [0x33, 0x47, 0x10], // xor eax, [r15+16]
+    [0x13, 0x47, 0x10], // adc eax, [r15+16]
+    [0x1B, 0x47, 0x10], // sbb eax, [r15+16]
+    // Byte-width memory source, incl. a negative displacement (kernel pattern).
+    [0x02, 0x57, 0xFF], // add dl, [r15-1]
+    [0x02, 0x57, 0x0F], // add dl, [r15+15]
+    [0x41, 0x80, 0x7F, 0x0F, 0x01], // cmp byte [r15+15], 1
+    [0x41, 0x38, 0x47, 0x08], // cmp [r15+8], al
+    [0x41, 0x84, 0x47, 0x08], // test [r15+8], al
     [0x41, 0x83, 0xFC, 0x02], // cmp r12d, 2
     [0x48, 0x0F, 0xA3, 0xD8], // bt rax, rbx
     [0x48, 0x0F, 0xBA, 0xE0, 0x03], // bt rax, 3
@@ -104,6 +134,34 @@ const POOL = [
     [0x66, 0x0F, 0x6F, 0xC8], // movdqa xmm1, xmm0
     [0x66, 0x0F, 0xEF, 0xC1], // pxor xmm0, xmm1
     [0x66, 0x41, 0x0F, 0xEF, 0x07], // pxor xmm0, [r15]
+    // Integer SSE2 (66 0F xx), register and memory forms.
+    [0x66, 0x0F, 0xFE, 0xC1], // paddd xmm0, xmm1
+    [0x66, 0x0F, 0xFA, 0xC1], // psubd xmm0, xmm1
+    [0x66, 0x0F, 0xD4, 0xC1], // paddq xmm0, xmm1
+    [0x66, 0x0F, 0xEB, 0xC1], // por xmm0, xmm1
+    [0x66, 0x0F, 0xDB, 0xC1], // pand xmm0, xmm1
+    [0x66, 0x0F, 0xDF, 0xC1], // pandn xmm0, xmm1
+    [0x66, 0x0F, 0x6C, 0xC1], // punpcklqdq xmm0, xmm1
+    [0x66, 0x0F, 0x6D, 0xC1], // punpckhqdq xmm0, xmm1
+    [0x66, 0x0F, 0x76, 0xC1], // pcmpeqd xmm0, xmm1
+    [0x66, 0x0F, 0xFC, 0xC1], // paddb xmm0, xmm1
+    [0x66, 0x0F, 0xFD, 0xC1], // paddw xmm0, xmm1
+    [0x66, 0x0F, 0x74, 0xC1], // pcmpeqb xmm0, xmm1
+    // PSHUFD (66 0F 70), register and memory source.
+    [0x66, 0x0F, 0x70, 0xC1, 0x1B], // pshufd xmm0, xmm1, 0x1b
+    [0x66, 0x0F, 0x70, 0xC1, 0x00], // pshufd xmm0, xmm1, 0
+    [0x66, 0x0F, 0x70, 0xC1, 0xFF], // pshufd xmm0, xmm1, 0xff
+    [0x66, 0x0F, 0x70, 0x07, 0x4E], // pshufd xmm0, [r15], 0x4e
+    // Packed shift by immediate (66 0F 71/72/73), register form.
+    [0x66, 0x0F, 0x72, 0xD1, 0x03], // psrld xmm1, 3
+    [0x66, 0x0F, 0x72, 0xE1, 0x03], // psrad xmm1, 3
+    [0x66, 0x0F, 0x72, 0xF1, 0x03], // pslld xmm1, 3
+    [0x66, 0x0F, 0x73, 0xD1, 0x03], // psrlq xmm1, 3
+    [0x66, 0x0F, 0x73, 0xF1, 0x03], // psllq xmm1, 3
+    [0x66, 0x0F, 0x71, 0xD1, 0x03], // psrlw xmm1, 3
+    [0x66, 0x0F, 0xFE, 0x07], // paddd xmm0, [r15]
+    [0x66, 0x0F, 0xDB, 0x47, 0x10], // pand xmm0, [r15+16]
+    [0x66, 0x0F, 0x6C, 0x07], // punpcklqdq xmm0, [r15]
 ];
 if(ONLY)
 {
@@ -206,6 +264,223 @@ emulator.add_listener("emulator-loaded", () => {
     // Fixed sequences the random pool only reaches by chance.
     const FIXED = [
         {
+            name: "partial prefix: shr al,1; setne bl; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD8, // mov rax, ds (undecodable: partial block)
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+            ],
+        },
+        {
+            name: "partial prefix: setne bl; mov rax,ds",
+            body: [
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: test rax,rax; setne bl; mov rax,ds",
+            body: [
+                0x48, 0x85, 0xC0, // test rax, rax
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; sete bl; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x94, 0xC3, // sete bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; add rsi,rdi",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x01, 0xFE, // add rsi, rdi (no undecodable tail)
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne cl; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC1, // setne cl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne r11b; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x41, 0x0F, 0x95, 0xC3, // setne r11b
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; mov r13,rax; pushfq; pop r14; setne bl; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x49, 0x89, 0xC5, // mov r13, rax
+                0x9C,             // pushfq
+                0x41, 0x5E,       // pop r14
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; pushfq; pop r11; setne bl; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x9C,             // pushfq
+                0x41, 0x5B,       // pop r11
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; test al,al; setne bl; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x84, 0xC0,       // test al, al
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; mov bl,0; setne bl; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0xB3, 0x00,       // mov bl, 0
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setb bl; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x92, 0xC3, // setb bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; sets bl; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x98, 0xC3, // sets bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; cbw",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x66, 0x98,       // cbw (undecodable, writes AX)
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; xchg rax,rax2? (mov rax,ds via 16-bit)",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x66, 0x8C, 0xD8, // mov ax, ds (undecodable, writes AX)
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; mov r11,rax; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x49, 0x89, 0xC3, // mov r11, rax
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; mov r11,rax; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x49, 0x89, 0xC3, // mov r11, rax
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; mov rcx,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD9, // mov rcx, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; mov rax,es",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xC0, // mov rax, es
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; pause",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0xF3, 0x90,       // pause (JIT-undecodable no-op)
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; add rsi,rdi; pause",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x01, 0xFE, // add rsi, rdi
+                0xF3, 0x90,       // pause
+            ],
+        },
+        {
+            name: "partial prefix: shr eax,1; setne bl; mov rax,ds",
+            body: [
+                0xD1, 0xE8,       // shr eax, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr rax,1; setne bl; mov rax,ds",
+            body: [
+                0x48, 0xD1, 0xE8, // shr rax, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; add rsi,rdi; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x48, 0x01, 0xFE, // add rsi, rdi
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
+            name: "partial prefix: shr al,1; setne bl; nop; mov rax,ds",
+            body: [
+                0xD0, 0xC8,       // shr al, 1
+                0x0F, 0x95, 0xC3, // setne bl
+                0x90,             // nop
+                0x48, 0x8C, 0xD8, // mov rax, ds
+            ],
+        },
+        {
             name: "cmpxchg + cmove + add [r15+16],rax + bt + imul",
             body: [
                 0x48, 0x0F, 0x44, 0xC3, // cmove rax, rbx
@@ -253,6 +528,30 @@ emulator.add_listener("emulator-loaded", () => {
                 0x48, 0x0F, 0x45, 0xCA, // cmovne rcx, rdx
             ],
         },
+        {
+            // Several internal branches, so the superblock holds multiple exits.
+            name: "multiple internal branches",
+            body: [
+                0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax, 0
+                0x85, 0xC0,                   // test eax, eax (ZF=1)
+                0x74, 0x03,                   // jz +3
+                0xFF, 0xC0,                   // inc eax (skipped)
+                0x90,                         // nop
+                0x83, 0xF8, 0x00,             // cmp eax, 0 (ZF=1)
+                0x74, 0x03,                   // jz +3
+                0xFF, 0xC0,                   // inc eax (skipped)
+                0x90,                         // nop
+                0x83, 0xF8, 0x00,             // cmp eax, 0
+                0x75, 0x03,                   // jnz +3
+                0xFF, 0xC0,                   // inc eax (executed)
+                0x90,                         // nop
+                0x83, 0xF8, 0x01,             // cmp eax, 1 (ZF=1)
+                0x74, 0x03,                   // jz +3
+                0xFF, 0xC0,                   // inc eax (skipped)
+                0x90,                         // nop
+                0x90,                         // nop
+            ],
+        },
     ];
 
     const seed_regs = random => {
@@ -266,13 +565,36 @@ emulator.add_listener("emulator-loaded", () => {
 
     const run = (program, regs, memory, jitEnabled) => {
         ex.jit64_set_enabled(jitEnabled ? 1 : 0);
-        ex.jit64_set_sse(1); // exercises the SSE2 codegen
+        ex.jit64_set_sse(process.env.JIT64_DIFF_SSE === "0" ? 0 : 1);
+        const legacy = process.env.JIT64_DIFF_LEGACY === "1";
+        // Leave build defaults alone unless an env overrides, to test what ships.
+        const set = (env, fn) => {
+            if(legacy) fn(0);
+            else if(process.env[env] === "0") fn(0);
+            else if(process.env[env] === "1") fn(1);
+        };
+        set("JIT64_DIFF_PARTIAL", v => ex.jit64_set_partial_blocks(v));
+        set("JIT64_DIFF_ENTRY", v => ex.jit64_set_entry_cache(v));
+        set("JIT64_DIFF_HOT", v => ex.jit64_set_hot_cache(v));
+        set("JIT64_DIFF_DIRECT", v => ex.jit64_set_direct_code_read(v));
+        ex.jit64_set_chain_budget(process.env.JIT64_DIFF_CHAIN ? parseInt(process.env.JIT64_DIFF_CHAIN, 10) : 0);
+        ex.jit64_set_block_prologue(process.env.JIT64_DIFF_PROLOGUE === "1" ? 1 : 0);
+        if(process.env.JIT64_DIFF_BAIL)
+        {
+            const [lo, hi] = process.env.JIT64_DIFF_BAIL.split(",").map(x => BigInt(x));
+            ex.jit64_set_bail_rip(lo, hi);
+        }
+        else
+        {
+            ex.jit64_set_bail_rip(0n, 0n);
+        }
         ex.jit64_clear_cache();
         for(let i = 0; i < program.length; i++) ex.write8(BASE + i, program[i]);
         for(let i = 0; i < 16; i++) set_reg64(i, regs[i]);
         set_reg64(12, 0n);
         set_reg64(15, BigInt(SCRATCH));
         set_reg64(4, 0x80000n); // rsp
+        ex.jit64_clear_xmm(); // both engines must start from the same XMM state
         for(let i = 0; i < memory.length; i++) ex.write8(SCRATCH + i, memory[i]);
 
         cpu.instruction_pointer[0] = BASE;
@@ -299,12 +621,35 @@ emulator.add_listener("emulator-loaded", () => {
     // mismatch down to the instruction that first diverges.
     const step = (program, regs, memory, jitEnabled, n) => {
         ex.jit64_set_enabled(jitEnabled ? 1 : 0);
-        ex.jit64_set_sse(1); // exercises the SSE2 codegen
+        ex.jit64_set_sse(process.env.JIT64_DIFF_SSE === "0" ? 0 : 1);
+        const legacy = process.env.JIT64_DIFF_LEGACY === "1";
+        // Leave build defaults alone unless an env overrides, to test what ships.
+        const set = (env, fn) => {
+            if(legacy) fn(0);
+            else if(process.env[env] === "0") fn(0);
+            else if(process.env[env] === "1") fn(1);
+        };
+        set("JIT64_DIFF_PARTIAL", v => ex.jit64_set_partial_blocks(v));
+        set("JIT64_DIFF_ENTRY", v => ex.jit64_set_entry_cache(v));
+        set("JIT64_DIFF_HOT", v => ex.jit64_set_hot_cache(v));
+        set("JIT64_DIFF_DIRECT", v => ex.jit64_set_direct_code_read(v));
+        ex.jit64_set_chain_budget(process.env.JIT64_DIFF_CHAIN ? parseInt(process.env.JIT64_DIFF_CHAIN, 10) : 0);
+        ex.jit64_set_block_prologue(process.env.JIT64_DIFF_PROLOGUE === "1" ? 1 : 0);
+        if(process.env.JIT64_DIFF_BAIL)
+        {
+            const [lo, hi] = process.env.JIT64_DIFF_BAIL.split(",").map(x => BigInt(x));
+            ex.jit64_set_bail_rip(lo, hi);
+        }
+        else
+        {
+            ex.jit64_set_bail_rip(0n, 0n);
+        }
         ex.jit64_clear_cache();
         for(let i = 0; i < program.length; i++) ex.write8(BASE + i, program[i]);
         for(let i = 0; i < 16; i++) set_reg64(i, regs[i]);
         set_reg64(12, 0n);
         set_reg64(15, BigInt(SCRATCH));
+        ex.jit64_clear_xmm(); // both engines must start from the same XMM state
         for(let i = 0; i < memory.length; i++) ex.write8(SCRATCH + i, memory[i]);
         cpu.instruction_pointer[0] = BASE;
         cpu.flags[0] = 0x2;
@@ -399,7 +744,7 @@ emulator.add_listener("emulator-loaded", () => {
     let fixed_failures = 0;
     for(const test of FIXED)
     {
-        const program = wrap_body(test.body);
+        const program = wrap_body(test.body, +process.env.JIT64_DIFF_FIXED_ITERS || ITERATIONS);
         const random = rng(12345);
         const regs = seed_regs(random);
         const memory = Array.from({ length: 32 }, () => Math.floor(random() * 256));
@@ -413,6 +758,10 @@ emulator.add_listener("emulator-loaded", () => {
         {
             fixed_failures++;
             console.log("FAIL fixed: " + test.name);
+            console.log("    interp r0=0x" + interpreted.regs[0].toString(16) +
+                " r3=0x" + interpreted.regs[3].toString(16) + " flags=0x" + interpreted.flags.toString(16));
+            console.log("    jit    r0=0x" + compiled.regs[0].toString(16) +
+                " r3=0x" + compiled.regs[3].toString(16) + " flags=0x" + compiled.flags.toString(16));
             for(let i = 0; i < 16; i++)
             {
                 if(interpreted.regs[i] !== compiled.regs[i])
@@ -463,6 +812,7 @@ emulator.add_listener("emulator-loaded", () => {
 
     let compiled_any = false;
     let mismatches = 0;
+    const debugSeed = +process.env.JIT64_DIFF_DEBUG_SEED || 0;
     for(let seed = 1; seed <= CASES; seed++)
     {
         const random = rng(seed);
@@ -473,6 +823,21 @@ emulator.add_listener("emulator-loaded", () => {
         const interpreted = run(program, regs, memory, false);
         const compiled = run(program, regs, memory, true);
         if(ex.jit64_compiled_count() > 0) compiled_any = true;
+
+        if(debugSeed && seed === debugSeed)
+        {
+            console.log("DEBUG seed " + seed + " program: [" + program.join(", ") + "]");
+            const n = ex.jit64_block_log_len();
+            for(let i = 0; i < n; i++)
+            {
+                const rip = ex.jit64_block_log_rip(i);
+                const probe = ex.jit64_probe_block(rip);
+                console.log("  block rip=0x" + rip.toString(16) +
+                    (probe === 0xFFFFFFFFFFFFFFFFn
+                        ? " (undecodable)"
+                        : " end=0x" + (probe >> 16n).toString(16) + " n=" + (probe & 0xFFFFn)));
+            }
+        }
 
         const problems = [];
         if(!interpreted.halted) problems.push("interpreter did not halt");
@@ -502,6 +867,14 @@ emulator.add_listener("emulator-loaded", () => {
         {
             mismatches++;
             console.log("FAIL seed " + seed + ": " + problems[0]);
+            // Re-run the interpreter: a difference means harness state leaked.
+            {
+                const again = run(program, regs, memory, false);
+                const leaked = again.flags !== interpreted.flags ||
+                    again.regs.some((v, i) => v !== interpreted.regs[i]) ||
+                    again.memory.some((v, i) => v !== interpreted.memory[i]);
+                console.log("     interp-vs-interp leak: " + leaked);
+            }
             for(const problem of problems.slice(1)) console.log("     " + problem);
             console.log("     program: [" + program.join(", ") + "]");
             localize(seed);
@@ -516,6 +889,11 @@ emulator.add_listener("emulator-loaded", () => {
     if(mismatches)
     {
         console.log("jit64 differential: " + mismatches + " mismatching program(s)");
+        process.exit(1);
+    }
+    if(fixed_failures)
+    {
+        console.log("jit64 differential: " + fixed_failures + " fixed case(s) failed");
         process.exit(1);
     }
 

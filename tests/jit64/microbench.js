@@ -144,6 +144,40 @@ const WORKLOADS = [
         program: iterations => call_ret_program(iterations),
     },
     {
+        name: "partial_prefix",
+        note: "supported prefix followed by an undecodable pause",
+        iterations: ITERATIONS,
+        outer: [],
+        body: [
+            0x48, 0x01, 0xD8, // add rax, rbx
+            0x48, 0x31, 0xC3, // xor rbx, rax
+            0x48, 0xD1, 0xE3, // shl rbx, 1
+            0xF3, 0x90,       // pause: the JIT decoder stops here
+        ],
+    },
+    {
+        name: "sse_movdqa",
+        note: "movdqa 16-byte load + store (SSE2 codegen)",
+        iterations: ITERATIONS,
+        outer: mov_rbx_imm(SCRATCH),
+        body: [
+            0x66, 0x0F, 0x6F, 0x03,       // movdqa xmm0, [rbx]
+            0x66, 0x0F, 0x7F, 0x43, 0x10, // movdqa [rbx+16], xmm0
+            ...and_rbx_imm32(SCRATCH_MASK), // keep rbx inside the mapped window
+        ],
+    },
+    {
+        name: "sse_paddd",
+        note: "packed integer SSE2 (paddd/pand/por)",
+        iterations: ITERATIONS,
+        outer: [],
+        body: [
+            0x66, 0x0F, 0xFE, 0xC1, // paddd xmm0, xmm1
+            0x66, 0x0F, 0xDB, 0xC2, // pand xmm0, xmm2
+            0x66, 0x0F, 0xEB, 0xC3, // por xmm0, xmm3
+        ],
+    },
+    {
         name: "rep_stosb",
         note: "rep stosb, 64 bytes per iteration (known slow path)",
         iterations: REP_ITERATIONS,
@@ -191,6 +225,14 @@ emulator.add_listener("emulator-loaded", () => {
     if(process.env.INLINE_WRITE === "0") ex.jit64_set_inline_write(0);
     if(process.env.INTERP_CACHE === "0") ex.interp64_set_fetch_cache(0);
     if(process.env.INTERP_MEM_SINGLE === "0") ex.interp64_set_mem_single(0);
+    if(process.env.PARTIAL_BLOCKS === "0") ex.jit64_set_partial_blocks(0);
+    if(process.env.ENTRY_CACHE === "0") ex.jit64_set_entry_cache(0);
+    if(process.env.HOT_CACHE === "0") ex.jit64_set_hot_cache(0);
+    if(process.env.SSE === "0") ex.jit64_set_sse(0);
+    if(process.env.SSE === "1") ex.jit64_set_sse(1);
+    if(process.env.CHAIN_BUDGET !== undefined) ex.jit64_set_chain_budget(parseInt(process.env.CHAIN_BUDGET, 10));
+    if(process.env.BLOCK_PROLOGUE !== undefined) ex.jit64_set_block_prologue(parseInt(process.env.BLOCK_PROLOGUE, 10));
+    if(process.env.SUPERBLOCKS !== undefined) ex.jit64_set_superblocks(parseInt(process.env.SUPERBLOCKS, 10));
 
     const write64 = (address, value) => {
         ex.write32(address, Number(value & 0xFFFF_FFFFn));

@@ -98,6 +98,7 @@ pub struct WasmBuilder {
     pending_free_i64: Vec<WasmLocalI64>,
     pending_free_marks: Vec<(usize, usize)>,
     local_count: u16,
+    local_types: Vec<u8>,
     pub arg_local_initial_state: WasmLocal,
 }
 
@@ -150,6 +151,7 @@ impl WasmBuilder {
             pending_free_i64: Vec::new(),
             pending_free_marks: Vec::new(),
             local_count: 0,
+            local_types: Vec::with_capacity(16),
             arg_local_initial_state: WasmLocal(0),
         };
         b.init();
@@ -183,6 +185,7 @@ impl WasmBuilder {
         self.pending_free_i64.clear();
         self.pending_free_marks.clear();
         self.local_count = 0;
+        self.local_types.clear();
 
         dbg_assert!(self.label_to_depth.is_empty());
         dbg_assert!(self.label_stack.is_empty());
@@ -222,19 +225,8 @@ impl WasmBuilder {
             "All locals should have been freed"
         );
 
-        let free_locals_i32 = &self.free_locals_i32;
-        let free_locals_i64 = &self.free_locals_i64;
-
-        let locals = (0..self.local_count).map(|i| {
-            let local_index = WASM_MODULE_ARGUMENT_COUNT + i;
-            if free_locals_i64.iter().any(|v| v.idx() == local_index) {
-                op::TYPE_I64
-            }
-            else {
-                dbg_assert!(free_locals_i32.iter().any(|v| v.idx() == local_index));
-                op::TYPE_I32
-            }
-        });
+        dbg_assert!(self.local_types.len() == self.local_count as usize);
+        let locals = self.local_types.iter().copied();
         let mut groups: Vec<(u8, u32)> = vec![];
         for local_type in locals {
             if let Some(last) = groups.last_mut() {
@@ -583,6 +575,7 @@ impl WasmBuilder {
 
     pub fn get_output_ptr(&self) -> *const u8 { self.output.as_ptr() }
     pub fn get_output_len(&self) -> u32 { self.output.len() as u32 }
+    pub fn local_count(&self) -> u16 { self.local_count }
 
     fn open_block(&mut self) -> Label {
         self.pending_free_marks
@@ -619,6 +612,7 @@ impl WasmBuilder {
             None => {
                 let new_idx = self.local_count + WASM_MODULE_ARGUMENT_COUNT;
                 self.local_count = self.local_count.checked_add(1).unwrap();
+                self.local_types.push(op::TYPE_I32);
                 WasmLocal(new_idx)
             },
         }
@@ -672,6 +666,7 @@ impl WasmBuilder {
             None => {
                 let new_idx = self.local_count + WASM_MODULE_ARGUMENT_COUNT;
                 self.local_count += 1;
+                self.local_types.push(op::TYPE_I64);
                 WasmLocalI64(new_idx)
             },
         }

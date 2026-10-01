@@ -111,8 +111,22 @@ export function v64(options)
 
         // jit64: instantiate a compiled block and put it in the shared table
         "jit64_compile": (index, ptr, len) => {
-            const bytes = new Uint8Array(wasm_memory.buffer, Number(ptr), Number(len)).slice();
-            const module = new WebAssembly.Module(bytes);
+            const t0 = performance.now();
+            // Module copies bytes synchronously, so a view suffices; slicing
+            // would allocate a fresh buffer per compiled block.
+            const bytes = new Uint8Array(wasm_memory.buffer, Number(ptr), Number(len));
+            let module;
+            try
+            {
+                module = new WebAssembly.Module(bytes);
+            }
+            catch(e)
+            {
+                cpu.jit64_compile_errors = (cpu.jit64_compile_errors || 0) + 1;
+                if(cpu.jit64_compile_errors < 5) console.error("jit64 compile error: " + e.message + " len=" + len);
+                return;
+            }
+            const t1 = performance.now();
             // Pass the wasm exports directly instead of JS wrappers: every guest
             // memory access in a compiled block calls these, and a JS wrapper
             // would make each one a wasm -> JS -> wasm round trip.
@@ -127,6 +141,9 @@ export function v64(options)
                 jit64_imul: jit64.jit64_imul,
                 jit64_bswap: jit64.jit64_bswap,
                 jit64_shift: jit64.jit64_shift,
+                jit64_sse_int: jit64.jit64_sse_int,
+                jit64_sse_shift_imm: jit64.jit64_sse_shift_imm,
+                jit64_sse_pshuf: jit64.jit64_sse_pshuf,
                 jit64_adc_sbb: jit64.jit64_adc_sbb,
                 jit64_cpuid: jit64.jit64_cpuid,
                 jit64_bt: jit64.jit64_bt,
@@ -135,12 +152,21 @@ export function v64(options)
                 jit64_out: jit64.jit64_out,
                 jit64_cli: jit64.jit64_cli,
                 jit64_sync_flags: jit64.jit64_sync_flags,
+                jit64_chain: jit64.jit64_chain,
                 jit64_pushfq: jit64.jit64_pushfq,
                 jit64_hlt: jit64.jit64_hlt,
                 jit64_clear_exception_flag: jit64.jit64_clear_exception_flag,
                 jit64_exception_delivered: jit64.jit64_exception_delivered,
+                jit64_note_exit: jit64.jit64_note_exit,
+                jit64_code_write_bail: jit64.jit64_code_write_bail,
+                jit64_selfcheck_log_write: jit64.jit64_selfcheck_log_write,
             } });
             wasm_table.set(index + WASM_TABLE_OFFSET, instance.exports.f);
+            const t2 = performance.now();
+            cpu.jit64_compile_ms = (cpu.jit64_compile_ms || 0) + (t2 - t0);
+            cpu.jit64_module_ms = (cpu.jit64_module_ms || 0) + (t1 - t0);
+            cpu.jit64_instance_ms = (cpu.jit64_instance_ms || 0) + (t2 - t1);
+            cpu.jit64_compile_count = (cpu.jit64_compile_count || 0) + 1;
         },
     };
 

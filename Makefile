@@ -373,6 +373,8 @@ jit64-tests: build/v64-debug.wasm
 	node tests/jit64/debug-probe.js
 	node tests/ide-interrupts.js
 	node tests/jit64/e2e.js
+	node tests/jit64/entry-cache.js
+	JIT64_DIFF_CASES=500 node tests/jit64/differential.js
 	node tests/jit64/benchmark.js
 
 # CPU microbenchmarks (interpreter vs jit64); MICROBENCH_OUT saves the results.

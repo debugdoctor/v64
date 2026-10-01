@@ -60,13 +60,13 @@ fn width_sign_bit(width: u8) -> u64 {
     }
 }
 
-// The `66` prefix selects a 16-bit operand in long mode even together with REX.W.
+// In long mode REX.W beats `66`: `66 4c 03 07` is `add r8, [rdi]`.
 fn operand_width(prefix_66: bool, rex_w: bool) -> u8 {
-    if prefix_66 {
-        16
-    }
-    else if rex_w {
+    if rex_w {
         64
+    }
+    else if prefix_66 {
+        16
     }
     else {
         32
@@ -128,6 +128,14 @@ pub enum Instr {
     XmmStore { mem: Mem, src: u8 },
     XmmXor { dst: u8, src: u8 },
     XmmXorMem { dst: u8, mem: Mem },
+    // Integer SSE2 ops (66 0F xx), applied by a helper shared with interp64.
+    XmmInt { op: u8, dst: u8, src: u8 },
+    XmmIntMem { op: u8, dst: u8, mem: Mem },
+    // Packed shift by immediate (66 0F 71/72/73), register operand only.
+    XmmShiftImm { op: u8, group: u8, count: u8, dst: u8 },
+    // PSHUFD (66 0F 70), register or memory source.
+    XmmShuf { control: u8, dst: u8, src: u8 },
+    XmmShufMem { control: u8, dst: u8, mem: Mem },
 
     In { imm: Option<u16>, width: u8 },
     Out { imm: Option<u16>, width: u8 },
@@ -328,17 +336,20 @@ fn decode_mem(
     })
 }
 
-// Stops at the end of the basic block (after hlt, jmp or jcc).
-fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, String> {
-    let mut out = DecodedBlock {
-        instrs: Vec::new(),
-        rips: Vec::new(),
-        current_rip: base,
-        end_rip: base,
-    };
+// Decode one basic block into `out`; stops at hlt/jmp/jcc or the first
+// undecodable instruction (whose start is `current_rip`).
+fn superblock_limit() -> usize {
+    if unsafe { JIT64_SUPERBLOCKS } { unsafe { JIT64_BLOCK_LIMIT } } else { usize::MAX }
+}
+
+fn decode_into(out: &mut DecodedBlock, base: u64, bytes: &[u8]) -> Result<(), String> {
     let mut i = 0;
 
     while i < bytes.len() {
+        // stop at the superblock instruction cap.
+        if out.instrs.len() >= superblock_limit() {
+            break;
+        }
         let start = i;
         out.current_rip = base.wrapping_add(start as u64);
         let mut rex = 0u8;
@@ -517,7 +528,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
             0xFA => out.push(Instr::Cli),
             // pushfq (0x9C)
             0x9C => {
-                if prefix_66 {
+                if prefix_66 && !rex_w {
                     return Err("16-bit pushf is not supported".into());
                 }
                 out.push(Instr::PushFlags);
@@ -525,7 +536,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
 
             // movsxd r64, r/m32
             0x63 => {
-                if prefix_66 || !rex_w { return Err("movsxd requires rex.w".into()); }
+                if !rex_w { return Err("movsxd requires rex.w".into()); }
                 let modrm = *bytes.get(i).ok_or("truncated movsxd modrm")?;
                 i += 1;
                 let dst = (modrm >> 3 & 7) | rex_r << 3;
@@ -914,13 +925,13 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
 
             // push/pop r64
             0x50..=0x57 => {
-                if prefix_66 {
+                if prefix_66 && !rex_w {
                     return Err("16-bit push is not supported".into());
                 }
                 out.push(Instr::PushReg { r: opcode - 0x50 | rex_b << 3 });
             },
             0x58..=0x5F => {
-                if prefix_66 {
+                if prefix_66 && !rex_w {
                     return Err("16-bit pop is not supported".into());
                 }
                 out.push(Instr::PopReg { r: opcode - 0x58 | rex_b << 3 });
@@ -928,14 +939,14 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
 
             // push imm32/imm8 (sign-extended)
             0x68 => {
-                if prefix_66 {
+                if prefix_66 && !rex_w {
                     return Err("16-bit push is not supported".into());
                 }
                 let value = read_u32(bytes, &mut i)? as i32 as i64 as u64;
                 out.push(Instr::PushImm { value });
             },
             0x6A => {
-                if prefix_66 {
+                if prefix_66 && !rex_w {
                     return Err("16-bit push is not supported".into());
                 }
                 let value = read_i8(bytes, &mut i)? as i64 as u64;
@@ -1080,7 +1091,9 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                     target: after.wrapping_add(rel as u64),
                     fallthrough: after,
                 });
-                break;
+                if !unsafe { JIT64_SUPERBLOCKS } {
+                    break;
+                }
             },
 
             // jcc rel32
@@ -1098,7 +1111,9 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         target: after.wrapping_add(rel as u64),
                         fallthrough: after,
                     });
-                    break;
+                    if !unsafe { JIT64_SUPERBLOCKS } {
+                        break;
+                    }
                 }
                 else if second == 0x1F {
                     let modrm = *bytes.get(i).ok_or("truncated nop modrm")?;
@@ -1202,6 +1217,50 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         out.push(Instr::XmmXorMem { dst, mem });
                     }
                 }
+                // Integer SSE2 (66 0F xx), via interp64's sse_int_apply.
+                else if unsafe { JIT64_SSE } && prefix_66 && is_sse_int_op(second) {
+                    let modrm = *bytes.get(i).ok_or("truncated sse modrm")?;
+                    i += 1;
+                    let dst = (modrm >> 3 & 7) | rex_r << 3;
+                    if modrm >> 6 == 3 {
+                        out.push(Instr::XmmInt { op: second, dst, src: (modrm & 7) | rex_b << 3 });
+                    }
+                    else {
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
+                        out.push(Instr::XmmIntMem { op: second, dst, mem });
+                    }
+                }
+                // Packed shift by imm (66 0F 71/72/73); register form only.
+                else if unsafe { JIT64_SSE } && prefix_66 && matches!(second, 0x71 | 0x72 | 0x73) {
+                    let modrm = *bytes.get(i).ok_or("truncated sse shift modrm")?;
+                    i += 1;
+                    if modrm >> 6 != 3 {
+                        return Err("sse shift by immediate with a memory operand".into());
+                    }
+                    let count = *bytes.get(i).ok_or("truncated sse shift imm8")?;
+                    i += 1;
+                    out.push(Instr::XmmShiftImm {
+                        op: second,
+                        group: modrm >> 3 & 7,
+                        count,
+                        dst: (modrm & 7) | rex_b << 3,
+                    });
+                }
+                // PSHUFD (66 0F 70); PSHUFHW/PSHUFLW stay in the interpreter.
+                else if unsafe { JIT64_SSE } && prefix_66 && second == 0x70 {
+                    let modrm = *bytes.get(i).ok_or("truncated pshufd modrm")?;
+                    i += 1;
+                    let dst = (modrm >> 3 & 7) | rex_r << 3;
+                    let control = *bytes.get(i).ok_or("truncated pshufd imm8")?;
+                    i += 1;
+                    if modrm >> 6 == 3 {
+                        out.push(Instr::XmmShuf { control, dst, src: (modrm & 7) | rex_b << 3 });
+                    }
+                    else {
+                        let mem = decode_mem(modrm, rex, bytes, &mut i, base, addr_size, segment_override, 0)?;
+                        out.push(Instr::XmmShufMem { control, dst, mem });
+                    }
+                }
                 else if (0x40..=0x4F).contains(&second) {
                     let modrm = *bytes.get(i).ok_or("truncated cmov modrm")?;
                     i += 1;
@@ -1272,7 +1331,6 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         width: if rex_w { 64 } else { 32 },
                     });
                 }
-                // CPUID
                 // RDTSC (0F 31)
                 else if second == 0x31 {
                     out.push(Instr::Rdtsc);
@@ -1313,6 +1371,7 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
                         width,
                     });
                 }
+                // CPUID (0F A2)
                 else if second == 0xA2 {
                     out.push(Instr::Cpuid);
                 }
@@ -1331,11 +1390,44 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
     }
 
     out.end_rip = base.wrapping_add(i as u64);
+    Ok(())
+}
+
+fn new_decoded_block(base: u64) -> DecodedBlock {
+    DecodedBlock {
+        instrs: Vec::new(),
+        rips: Vec::new(),
+        current_rip: base,
+        end_rip: base,
+    }
+}
+
+// Strict decoding: any undecodable instruction fails the block (decoder tests).
+fn decode_block_strict(base: u64, bytes: &[u8]) -> Result<DecodedBlock, String> {
+    let mut out = new_decoded_block(base);
+    decode_into(&mut out, base, bytes)?;
     Ok(out)
 }
 
+// Compile the decodable prefix, resume at the first undecodable instruction.
+fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, String> {
+    let mut out = new_decoded_block(base);
+    match decode_into(&mut out, base, bytes) {
+        Ok(()) => Ok(out),
+        Err(e) =>
+        {
+            if !unsafe { JIT64_PARTIAL_BLOCKS } || out.instrs.is_empty() {
+                return Err(e);
+            }
+            // Resume in the interpreter at `current_rip`, where decode stopped.
+            out.end_rip = out.current_rip;
+            Ok(out)
+        },
+    }
+}
+
 pub fn decode_block(base: u64, bytes: &[u8]) -> Result<Vec<Instr>, String> {
-    Ok(decode_block_with_rips(base, bytes)?.instrs)
+    Ok(decode_block_strict(base, bytes)?.instrs)
 }
 
 fn find_reg(locals: &[(u8, WasmLocalI64)], r: u8) -> Option<usize> {
@@ -1463,6 +1555,14 @@ fn gen_check_memory_fault(b: &mut WasmBuilder, locals: &[(u8, WasmLocalI64)]) {
     emit_registers_back(b, locals);
     b.return_();
     b.block_end();
+    // An SMC write may have invalidated this block; stop before running on.
+    if unsafe { JIT64_SMC_BAIL } {
+        b.call_fn0_ret("jit64_code_write_bail");
+        b.if_void();
+        emit_registers_back(b, locals);
+        b.return_();
+        b.block_end();
+    }
 }
 
 fn gen_memory_address_local(
@@ -1472,6 +1572,18 @@ fn gen_memory_address_local(
 ) -> WasmLocalI64 {
     gen_effective_addr(b, locals, mem);
     b.set_new_local_i64()
+}
+
+// Integer SSE2 opcodes (66 0F xx) shared with interp64's sse_int_apply.
+fn is_sse_int_op(op: u8) -> bool {
+    matches!(
+        op,
+        0x60 | 0x61 | 0x62 | 0x63 | 0x64 | 0x65 | 0x66 | 0x67 | 0x68 | 0x69 | 0x6A | 0x6B
+            | 0x6C | 0x6D | 0x74 | 0x75 | 0x76 | 0xD1 | 0xD2 | 0xD3 | 0xD4 | 0xD5 | 0xD8
+            | 0xD9 | 0xDA | 0xDB | 0xDC | 0xDD | 0xDE | 0xDF | 0xE1 | 0xE2 | 0xE4 | 0xE5
+            | 0xE8 | 0xE9 | 0xEA | 0xEB | 0xEC | 0xED | 0xEE | 0xEF | 0xF1 | 0xF2 | 0xF3
+            | 0xF5 | 0xF6 | 0xF8 | 0xF9 | 0xFA | 0xFB | 0xFC | 0xFD | 0xFE
+    )
 }
 
 // Long-mode inline memory fast path.
@@ -1504,20 +1616,24 @@ fn gen_tlb64_entry(b: &mut WasmBuilder, address: &WasmLocalI64) -> WasmLocal {
     b.set_new_local()
 }
 
-// Leaves an i32 (0/1) on the stack: whether this read can be served inline.
-fn gen_memory_read_fast_condition(b: &mut WasmBuilder, address: &WasmLocalI64, width: u8) {
+// Leaves i32 (0/1): can this read be inline? `entry` = TLB for `address`.
+fn gen_memory_read_fast_condition(
+    b: &mut WasmBuilder,
+    entry: &WasmLocal,
+    address: &WasmLocalI64,
+    width: u8,
+) {
     use crate::cpu::cpu::*;
     let bytes = (width / 8) as i32;
-    let entry = gen_tlb64_entry(b, address);
 
     // generation matches
-    b.get_local(&entry);
+    b.get_local(entry);
     b.load_aligned_i32(TLB64_OFF_GENERATION);
     b.const_i32(tlb64_generation_addr());
     b.load_aligned_i32(0);
     b.eq_i32();
     // tag matches vaddr & !0xFFF
-    b.get_local(&entry);
+    b.get_local(entry);
     b.load_aligned_i64(TLB64_OFF_TAG);
     b.get_local_i64(address);
     b.const_i64(!0xFFFi64);
@@ -1536,7 +1652,7 @@ fn gen_memory_read_fast_condition(b: &mut WasmBuilder, address: &WasmLocalI64, w
     b.const_i32(CPL_ADDR);
     b.load_u8(0);
     b.eqz_i32();
-    b.get_local(&entry);
+    b.get_local(entry);
     b.load_u8(TLB64_OFF_FLAGS);
     b.const_i32(TLB64_USER as i32);
     b.and_i32();
@@ -1545,24 +1661,26 @@ fn gen_memory_read_fast_condition(b: &mut WasmBuilder, address: &WasmLocalI64, w
     b.or_i32();
     b.and_i32();
     // phys is plain RAM: below memory_size and outside the 0xA0000..0xC0000 hole
-    gen_phys_is_ram(b, &entry, address);
+    gen_phys_is_ram(b, entry, address);
     b.and_i32();
-
-    b.free_local(entry);
 }
 
 // Leaves an i32 (0/1) on the stack: whether this write can be served inline.
-fn gen_memory_write_fast_condition(b: &mut WasmBuilder, address: &WasmLocalI64, width: u8) {
+fn gen_memory_write_fast_condition(
+    b: &mut WasmBuilder,
+    entry: &WasmLocal,
+    address: &WasmLocalI64,
+    width: u8,
+) {
     use crate::cpu::cpu::*;
     let bytes = (width / 8) as i32;
-    let entry = gen_tlb64_entry(b, address);
 
-    b.get_local(&entry);
+    b.get_local(entry);
     b.load_aligned_i32(TLB64_OFF_GENERATION);
     b.const_i32(tlb64_generation_addr());
     b.load_aligned_i32(0);
     b.eq_i32();
-    b.get_local(&entry);
+    b.get_local(entry);
     b.load_aligned_i64(TLB64_OFF_TAG);
     b.get_local_i64(address);
     b.const_i64(!0xFFFi64);
@@ -1581,7 +1699,7 @@ fn gen_memory_write_fast_condition(b: &mut WasmBuilder, address: &WasmLocalI64, 
     b.const_i32(CPL_ADDR);
     b.load_u8(0);
     b.eqz_i32(); // !user
-    b.get_local(&entry);
+    b.get_local(entry);
     b.load_u8(TLB64_OFF_FLAGS);
     b.const_i32(TLB64_USER as i32);
     b.and_i32();
@@ -1590,7 +1708,7 @@ fn gen_memory_write_fast_condition(b: &mut WasmBuilder, address: &WasmLocalI64, 
     b.or_i32();
     b.and_i32();
     // writable = (flags & WRITABLE) || (!user && CR0.WP == 0)
-    b.get_local(&entry);
+    b.get_local(entry);
     b.load_u8(TLB64_OFF_FLAGS);
     b.const_i32(TLB64_WRITABLE as i32);
     b.and_i32();
@@ -1610,17 +1728,15 @@ fn gen_memory_write_fast_condition(b: &mut WasmBuilder, address: &WasmLocalI64, 
     b.or_i32();
     b.and_i32();
     // no compiled code on this physical page (self-modifying code stays correct)
-    b.get_local(&entry);
+    b.get_local(entry);
     b.load_u8(TLB64_OFF_FLAGS);
     b.const_i32(TLB64_HAS_CODE as i32);
     b.and_i32();
     b.const_i32(0);
     b.eq_i32();
     b.and_i32();
-    gen_phys_is_ram(b, &entry, address);
+    gen_phys_is_ram(b, entry, address);
     b.and_i32();
-
-    b.free_local(entry);
 }
 
 // Leaves an i32 (0/1): the physical address is plain RAM (not MMIO).
@@ -1649,11 +1765,10 @@ fn gen_phys_is_ram(b: &mut WasmBuilder, entry: &WasmLocal, address: &WasmLocalI6
     b.free_local(phys);
 }
 
-// Leaves the linear address (i32) of the access on the stack.
-fn gen_inline_address(b: &mut WasmBuilder, address: &WasmLocalI64) {
+// Leaves the linear address (i32); `entry` = TLB entry for `address`.
+fn gen_inline_address(b: &mut WasmBuilder, entry: &WasmLocal, address: &WasmLocalI64) {
     use crate::cpu::cpu::*;
-    let entry = gen_tlb64_entry(b, address);
-    b.get_local(&entry);
+    b.get_local(entry);
     b.load_aligned_i32(TLB64_OFF_PHYS_PAGE);
     b.get_local_i64(address);
     b.wrap_i64_to_i32();
@@ -1663,11 +1778,10 @@ fn gen_inline_address(b: &mut WasmBuilder, address: &WasmLocalI64) {
     b.const_i32(mem8_static_addr());
     b.load_aligned_i32(0);
     b.add_i32();
-    b.free_local(entry);
 }
 
-fn gen_inline_load(b: &mut WasmBuilder, address: &WasmLocalI64, width: u8) {
-    gen_inline_address(b, address);
+fn gen_inline_load(b: &mut WasmBuilder, entry: &WasmLocal, address: &WasmLocalI64, width: u8) {
+    gen_inline_address(b, entry, address);
     match width {
         8 =>
         {
@@ -1688,8 +1802,14 @@ fn gen_inline_load(b: &mut WasmBuilder, address: &WasmLocalI64, width: u8) {
     }
 }
 
-fn gen_inline_store(b: &mut WasmBuilder, address: &WasmLocalI64, value: &WasmLocalI64, width: u8) {
-    gen_inline_address(b, address);
+fn gen_inline_store(
+    b: &mut WasmBuilder,
+    entry: &WasmLocal,
+    address: &WasmLocalI64,
+    value: &WasmLocalI64,
+    width: u8,
+) {
+    gen_inline_address(b, entry, address);
     b.get_local_i64(value);
     match width {
         8 =>
@@ -1719,16 +1839,20 @@ fn gen_memory_read(
 ) -> WasmLocalI64 {
     if unsafe { JIT64_INLINE_MEMORY } && matches!(width, 8 | 16 | 32 | 64)
     {
-        gen_memory_read_fast_condition(b, address, width);
+        // One TLB entry for both the fast-path check and the inline address.
+        let entry = gen_tlb64_entry(b, address);
+        gen_memory_read_fast_condition(b, &entry, address, width);
         b.if_i64();
-        gen_inline_load(b, address, width);
+        gen_inline_load(b, &entry, address, width);
         b.else_();
         b.get_local_i64(address);
         b.const_i32(width as i32);
         b.call_fn2_i64_i32_ret_i64("jit64_mem_read");
         gen_check_memory_fault(b, locals);
         b.block_end();
-        return b.set_new_local_i64();
+        let value = b.set_new_local_i64();
+        b.free_local(entry);
+        return value;
     }
     b.get_local_i64(address);
     b.const_i32(width as i32);
@@ -1745,15 +1869,25 @@ fn gen_memory_write(
     value: &WasmLocalI64,
     width: u8,
 ) {
+    if unsafe { JIT64_SELFCHECK } {
+        // Log the store for the self-check (the re-run may overwrite it).
+        b.get_local_i64(address);
+        b.get_local_i64(value);
+        b.const_i32(width as i32);
+        b.call_fn3_i64_i64_i32("jit64_selfcheck_log_write");
+    }
     if unsafe { JIT64_INLINE_MEMORY && JIT64_INLINE_MEMORY_WRITE } && matches!(width, 8 | 16 | 32 | 64)
     {
-        gen_memory_write_fast_condition(b, address, width);
+        // One TLB entry for both the fast-path check and the inline address.
+        let entry = gen_tlb64_entry(b, address);
+        gen_memory_write_fast_condition(b, &entry, address, width);
         b.if_void();
         // A plain RAM write has no side effects, so no register flush is needed.
-        gen_inline_store(b, address, value, width);
+        gen_inline_store(b, &entry, address, value, width);
         b.else_();
         gen_memory_write_slow(b, locals, address, value, width);
         b.block_end();
+        b.free_local(entry);
         return;
     }
     gen_memory_write_slow(b, locals, address, value, width);
@@ -1766,9 +1900,9 @@ fn gen_memory_write_slow(
     value: &WasmLocalI64,
     width: u8,
 ) {
-    // An MMIO write (APIC/IOAPIC) can deliver an interrupt synchronously, and
-    // the delivery pushes a frame using the register file — including RSP — so
-    // flush the resident registers first, exactly like the CPU would have them.
+    // A slow (MMIO/device) write must not be applied twice by the self-check.
+    unsafe { BLOCK_NO_SELFCHECK = true; }
+    // An MMIO write can interrupt; flush registers first so RSP is current.
     emit_registers_back(b, locals);
     b.get_local_i64(address);
     b.get_local_i64(value);
@@ -1807,15 +1941,14 @@ fn gen_xmm_mem_half_read(
         b.get_local_i64(address);
         b.const_i64(offset);
         b.add_i64();
+        let addr = b.set_new_local_i64();
+        let value = gen_memory_read(b, locals, &addr, 64);
+        b.free_local_i64(addr);
+        value
     }
     else {
-        b.get_local_i64(address);
+        gen_memory_read(b, locals, address, 64)
     }
-    b.const_i32(64);
-    b.call_fn2_i64_i32_ret_i64("jit64_mem_read");
-    let value = b.set_new_local_i64();
-    gen_check_memory_fault(b, locals);
-    value
 }
 
 fn gen_xmm_mem_half_write(
@@ -1829,14 +1962,13 @@ fn gen_xmm_mem_half_write(
         b.get_local_i64(address);
         b.const_i64(offset);
         b.add_i64();
+        let addr = b.set_new_local_i64();
+        gen_memory_write(b, locals, &addr, value, 64);
+        b.free_local_i64(addr);
     }
     else {
-        b.get_local_i64(address);
+        gen_memory_write(b, locals, address, value, 64);
     }
-    b.get_local_i64(value);
-    b.const_i32(64);
-    b.call_fn3_i64_i64_i32("jit64_mem_write");
-    gen_check_memory_fault(b, locals);
 }
 
 fn gen_memory_probe_write(
@@ -2104,12 +2236,24 @@ fn emit_arith(
         b.free_local_i64(result);
         return;
     }
-    b.get_local_i64(dst);
-    emit_mask(b, width);
-    let lhs = b.set_new_local_i64();
-    b.get_local_i64(src);
-    emit_mask(b, width);
-    let rhs = b.set_new_local_i64();
+    // 64-bit operands need no masking, so use the register locals directly.
+    let owned = width != 64;
+    let lhs = if owned {
+        b.get_local_i64(dst);
+        emit_mask(b, width);
+        b.set_new_local_i64()
+    }
+    else {
+        dst.unsafe_clone()
+    };
+    let rhs = if owned {
+        b.get_local_i64(src);
+        emit_mask(b, width);
+        b.set_new_local_i64()
+    }
+    else {
+        src.unsafe_clone()
+    };
     b.get_local_i64(&lhs);
     b.get_local_i64(&rhs);
     match op {
@@ -2126,8 +2270,10 @@ fn emit_arith(
     if op.writes_result() {
         emit_write_reg(b, dst, &result, width);
     }
-    b.free_local_i64(lhs);
-    b.free_local_i64(rhs);
+    if owned {
+        b.free_local_i64(lhs);
+        b.free_local_i64(rhs);
+    }
     b.free_local_i64(result);
 }
 
@@ -2303,6 +2449,29 @@ fn emit_registers_back(b: &mut WasmBuilder, locals: &[(u8, WasmLocalI64)]) {
     }
 }
 
+// Hand off to the successor block. Emitted only when chaining is enabled.
+fn emit_chain_exit(b: &mut WasmBuilder) {
+    if unsafe { JIT64_CHAIN_CODEGEN } {
+        b.call_fn0("jit64_chain");
+    }
+}
+
+// Block entry setup (flags + exception flag). Normally in run_block() (A/B).
+fn emit_block_prologue(b: &mut WasmBuilder) {
+    if unsafe { JIT64_BLOCK_PROLOGUE } {
+        b.call_fn0("jit64_sync_flags");
+        b.call_fn0("jit64_clear_exception_flag");
+    }
+}
+
+// Count a block exit by reason (only when a diagnostic build asks for it).
+fn emit_exit_stat(b: &mut WasmBuilder, reason: u32) {
+    if unsafe { JIT64_EXIT_STATS } {
+        b.const_i32(reason as i32);
+        b.call_fn1("jit64_note_exit");
+    }
+}
+
 // Like emit_registers_back, but leaves RSP alone: used on the early-return path
 // after a helper delivered an exception, whose frame push already set RSP.
 fn emit_registers_back_except_rsp(b: &mut WasmBuilder, locals: &[(u8, WasmLocalI64)]) {
@@ -2333,25 +2502,18 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
     let mut b = WasmBuilder::new();
     let mut locals: Vec<(u8, WasmLocalI64)> = Vec::new();
     let mut terminated = false;
+    unsafe { BLOCK_NO_SELFCHECK = false; }
 
-    // The interpreter keeps the arithmetic flags lazily computed
-    // (`flags_changed`, `last_op1`, ...); this block reads the raw flags word.
-    // Materialise them first, otherwise a block entered right after an
-    // interpreted instruction tests stale flags and mis-branches.
-    b.call_fn0("jit64_sync_flags");
-    b.call_fn0("jit64_clear_exception_flag");
+    // Materialise lazy flags first; normally run_block() does this host-side.
+    emit_block_prologue(&mut b);
 
     for (index, instr) in instrs.iter().enumerate() {
         if let Some(instruction_rip) = rips.get(index) {
             b.const_i32(PREVIOUS_RIP_ADDR);
             b.const_i64(*instruction_rip as i64);
             b.store_aligned_i64(0);
-            // *rip is the address an interrupt taken during this instruction
-            // resumes at. Such an interrupt is delivered from inside a helper,
-            // i.e. after the instruction's effects are applied, so it must point
-            // at the *next* instruction (a stale block-start value re-executed
-            // the whole block; pointing at the current instruction double-ran
-            // its store/out/inc).
+            // A helper's interrupt resumes after the effects, so point at the
+            // next instruction.
             let resume = rips.get(index + 1).copied().unwrap_or(block_end);
             b.const_i32(IP_ADDR);
             b.const_i64(resume as i64);
@@ -2737,9 +2899,7 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
 
                 gen_arith_flags(&mut b, &old, &old, &result, ArithOp::Test, width);
 
-                // Carry is the last bit shifted out. A left shift by at least the
-                // operand width is undefined; report no carry instead of shifting
-                // by a negative amount.
+                // Carry is the last bit out; shifts >= width report none.
                 if kind == ShiftKind::Shl && count >= width {
                     b.const_i32(0);
                 }
@@ -2891,9 +3051,9 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.free_local_i64(value);
             },
             Instr::In { imm, width } => {
-                // The helper can deliver a #GP itself (unprivileged port I/O),
-                // which must end the block; flush first so the delivery sees the
-                // up-to-date registers.
+                // I/O-dependent, so not reproducible in the self-check.
+                unsafe { BLOCK_NO_SELFCHECK = true; }
+                // The helper can #GP (unprivileged port I/O); flush first.
                 emit_registers_back(&mut b, &locals);
                 match imm {
                     Some(port) => b.const_i64(port as i64),
@@ -2916,6 +3076,8 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.block_end();
             },
             Instr::Out { imm, width } => {
+                // I/O-dependent, so not reproducible in the self-check.
+                unsafe { BLOCK_NO_SELFCHECK = true; }
                 emit_registers_back(&mut b, &locals);
                 match imm {
                     Some(port) => b.const_i64(port as i64),
@@ -3004,7 +3166,79 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.free_local_i64(hi);
                 b.free_local_i64(address);
             },
+            Instr::XmmInt { op, dst, src } => {
+                gen_xmm_reg_load(&mut b, src, 0);
+                let lo = b.set_new_local_i64();
+                gen_xmm_reg_load(&mut b, src, 8);
+                let hi = b.set_new_local_i64();
+                b.const_i32(op as i32);
+                b.get_local_i64(&lo);
+                b.get_local_i64(&hi);
+                b.const_i32(dst as i32);
+                b.call_fn4_i32_i64_i64_i32_ret("jit64_sse_int");
+                b.drop_();
+                b.free_local_i64(lo);
+                b.free_local_i64(hi);
+            },
+            Instr::XmmIntMem { op, dst, mem } => {
+                let address = gen_memory_address_local(&mut b, &mut locals, &mem);
+                let lo = gen_xmm_mem_half_read(&mut b, &locals, &address, 0);
+                let hi = gen_xmm_mem_half_read(&mut b, &locals, &address, 8);
+                b.const_i32(op as i32);
+                b.get_local_i64(&lo);
+                b.get_local_i64(&hi);
+                b.const_i32(dst as i32);
+                b.call_fn4_i32_i64_i64_i32_ret("jit64_sse_int");
+                b.drop_();
+                b.free_local_i64(lo);
+                b.free_local_i64(hi);
+                b.free_local_i64(address);
+            },
+            Instr::XmmShiftImm { op, group, count, dst } => {
+                gen_xmm_reg_load(&mut b, dst, 0);
+                let lo = b.set_new_local_i64();
+                gen_xmm_reg_load(&mut b, dst, 8);
+                let hi = b.set_new_local_i64();
+                b.const_i32(op as i32 | (group as i32) << 8 | (count as i32) << 16);
+                b.get_local_i64(&lo);
+                b.get_local_i64(&hi);
+                b.const_i32(dst as i32);
+                b.call_fn4_i32_i64_i64_i32_ret("jit64_sse_shift_imm");
+                b.drop_();
+                b.free_local_i64(lo);
+                b.free_local_i64(hi);
+            },
+            Instr::XmmShuf { control, dst, src } => {
+                gen_xmm_reg_load(&mut b, src, 0);
+                let lo = b.set_new_local_i64();
+                gen_xmm_reg_load(&mut b, src, 8);
+                let hi = b.set_new_local_i64();
+                b.const_i32(control as i32);
+                b.get_local_i64(&lo);
+                b.get_local_i64(&hi);
+                b.const_i32(dst as i32);
+                b.call_fn4_i32_i64_i64_i32_ret("jit64_sse_pshuf");
+                b.drop_();
+                b.free_local_i64(lo);
+                b.free_local_i64(hi);
+            },
+            Instr::XmmShufMem { control, dst, mem } => {
+                let address = gen_memory_address_local(&mut b, &mut locals, &mem);
+                let lo = gen_xmm_mem_half_read(&mut b, &locals, &address, 0);
+                let hi = gen_xmm_mem_half_read(&mut b, &locals, &address, 8);
+                b.const_i32(control as i32);
+                b.get_local_i64(&lo);
+                b.get_local_i64(&hi);
+                b.const_i32(dst as i32);
+                b.call_fn4_i32_i64_i64_i32_ret("jit64_sse_pshuf");
+                b.drop_();
+                b.free_local_i64(lo);
+                b.free_local_i64(hi);
+                b.free_local_i64(address);
+            },
             Instr::Rdtsc => {
+                // Time-dependent, so not reproducible in the self-check.
+                unsafe { BLOCK_NO_SELFCHECK = true; }
                 b.call_fn0_ret_i64("jit64_rdtsc");
                 let raw = b.set_new_local_i64();
                 b.get_local_i64(&raw);
@@ -3165,6 +3399,8 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.free_local_i64(local);
                 gen_set_ip(&mut b, target);
                 emit_registers_back(&mut b, &locals);
+                emit_exit_stat(&mut b, 4);
+                emit_chain_exit(&mut b);
                 b.return_();
                 terminated = true;
             },
@@ -3181,6 +3417,8 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.store_aligned_i64(0);
                 b.free_local_i64(target);
                 emit_registers_back(&mut b, &locals);
+                emit_exit_stat(&mut b, 4);
+                emit_chain_exit(&mut b);
                 b.return_();
                 terminated = true;
             },
@@ -3197,6 +3435,8 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.store_aligned_i64(0);
                 b.free_local_i64(target);
                 emit_registers_back(&mut b, &locals);
+                emit_exit_stat(&mut b, 4);
+                emit_chain_exit(&mut b);
                 b.return_();
                 terminated = true;
             },
@@ -3206,6 +3446,8 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.get_local_i64(&locals[ri].1);
                 b.store_aligned_i64(0);
                 emit_registers_back(&mut b, &locals);
+                emit_exit_stat(&mut b, 1);
+                emit_chain_exit(&mut b);
                 b.return_();
                 terminated = true;
             },
@@ -3218,6 +3460,8 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.store_aligned_i64(0);
                 b.free_local_i64(target);
                 emit_registers_back(&mut b, &locals);
+                emit_exit_stat(&mut b, 1);
+                emit_chain_exit(&mut b);
                 b.return_();
                 terminated = true;
             },
@@ -3235,6 +3479,8 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 b.store_aligned_i64(0);
                 b.free_local_i64(value);
                 emit_registers_back(&mut b, &locals);
+                emit_exit_stat(&mut b, 5);
+                emit_chain_exit(&mut b);
                 b.return_();
                 terminated = true;
             },
@@ -3252,6 +3498,8 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
             Instr::Jmp { target } => {
                 gen_set_ip(&mut b, target);
                 emit_registers_back(&mut b, &locals);
+                emit_exit_stat(&mut b, 1);
+                emit_chain_exit(&mut b);
                 b.return_();
                 terminated = true;
             },
@@ -3260,22 +3508,30 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
                 target,
                 fallthrough,
             } => {
+                // Non-final branches exit only when taken; else fall through.
+                let final_branch = index + 1 == instrs.len();
                 gen_condition(&mut b, code);
                 b.if_void();
                 gen_set_ip(&mut b, target);
                 emit_registers_back(&mut b, &locals);
-                b.return_();
-                b.else_();
-                gen_set_ip(&mut b, fallthrough);
-                emit_registers_back(&mut b, &locals);
+                emit_exit_stat(&mut b, 2);
+                emit_chain_exit(&mut b);
                 b.return_();
                 b.block_end();
-                terminated = true;
+                if final_branch {
+                    gen_set_ip(&mut b, fallthrough);
+                    emit_registers_back(&mut b, &locals);
+                    emit_exit_stat(&mut b, 3);
+                    emit_chain_exit(&mut b);
+                    b.return_();
+                    terminated = true;
+                }
             },
             Instr::Hlt => {
                 gen_set_ip(&mut b, block_end);
                 // Publish registers before entering the halted state.
                 emit_registers_back(&mut b, &locals);
+                emit_exit_stat(&mut b, 6);
                 b.call_fn0("jit64_hlt");
                 b.return_();
                 terminated = true;
@@ -3286,6 +3542,8 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
     if !terminated {
         gen_set_ip(&mut b, block_end);
         emit_registers_back(&mut b, &locals);
+        emit_exit_stat(&mut b, 0);
+        emit_chain_exit(&mut b);
         b.return_();
     }
 
@@ -3293,6 +3551,9 @@ fn compile_block_with_rips(instrs: &[Instr], rips: &[u64], block_end: u64) -> Ve
         b.free_local_i64(local.unsafe_clone());
     }
 
+    if instrs.len() >= 15 {
+        unsafe { LAST_BIG_BLOCK_LOCALS = b.local_count() as u32; }
+    }
     b.finish();
     let ptr = b.get_output_ptr();
     let len = b.get_output_len() as usize;
@@ -3318,7 +3579,9 @@ fn bail_class(instr: &Instr) -> u64 {
         Instr::Cpuid => 1 << 7,
         Instr::Rdtsc => 1 << 8,
         Instr::XmmCopy { .. } | Instr::XmmLoad { .. } | Instr::XmmStore { .. }
-        | Instr::XmmXor { .. } | Instr::XmmXorMem { .. } => 1 << 9,
+        | Instr::XmmXor { .. } | Instr::XmmXorMem { .. } | Instr::XmmInt { .. }
+        | Instr::XmmIntMem { .. } | Instr::XmmShiftImm { .. } | Instr::XmmShuf { .. }
+        | Instr::XmmShufMem { .. } => 1 << 9,
         Instr::In { .. } | Instr::Out { .. } => 1 << 10,
         Instr::Cli => 1 << 11,
         Instr::PushFlags => 1 << 12,
@@ -3358,6 +3621,25 @@ pub unsafe fn jit64_set_bail_link(lo: u64, hi: u64) {
 
 pub fn compile_bytes(base: u64, bytes: &[u8]) -> Result<Vec<u8>, String> {
     let decoded = decode_block_with_rips(base, bytes)?;
+    if decoded.instrs.len() >= 15 {
+        unsafe {
+            if base < BIG_BLOCK_LO { BIG_BLOCK_LO = base; }
+            if decoded.end_rip > BIG_BLOCK_HI { BIG_BLOCK_HI = decoded.end_rip; }
+        }
+    }
+    if decoded.instrs.len() >= 15 && unsafe { BIG_BLOCK_N } < BIG_BLOCK_MAX as u32 {
+        unsafe {
+            let slot = BIG_BLOCK_N as usize;
+            BIG_BLOCK_RIP[slot] = base;
+            BIG_BLOCK_LEN[slot] = decoded.instrs.len() as u32;
+            BIG_BLOCK_N += 1;
+            if BIG_BLOCK_N == 1 {
+                let n = bytes.len().min(BIG_BLOCK_BYTES.len());
+                BIG_BLOCK_BYTES[..n].copy_from_slice(&bytes[..n]);
+                BIG_BLOCK_BYTES_LEN = n as u32;
+            }
+        }
+    }
     let bail = unsafe { JIT64_BAIL };
     if bail != 0 && decoded.instrs.iter().any(|i| bail_class(i) & bail != 0) {
         return Err("bailed".into());
@@ -3378,11 +3660,15 @@ pub fn compile_bytes(base: u64, bytes: &[u8]) -> Result<Vec<u8>, String> {
         // instruction counter, starving timers and interrupts.
         return Err("empty block".into());
     }
-    Ok(compile_block_with_rips(
+    unsafe { LAST_COMPILED_END_RIP = decoded.end_rip; }
+    unsafe { LAST_COMPILED_LEN = decoded.instrs.len() as u16; }
+    let module = compile_block_with_rips(
         &decoded.instrs,
         &decoded.rips,
         decoded.end_rip,
-    ))
+    );
+    unsafe { LAST_COMPILED_NO_SELFCHECK = BLOCK_NO_SELFCHECK; }
+    Ok(module)
 }
 
 // Test harness: compile a fixed program and return a pointer to the module bytes.
@@ -3430,17 +3716,60 @@ mod wasm {
 }
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
+
+// Cheap integer hash for the RIP/page-keyed maps (SipHash showed in profiles).
+#[derive(Default)]
+struct FastHasher(u64);
+
+impl Hasher for FastHasher {
+    #[inline]
+    fn finish(&self) -> u64 { self.0 }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x100000001B3);
+        }
+    }
+    #[inline]
+    fn write_u32(&mut self, n: u32) { self.write_u64(n as u64); }
+    #[inline]
+    fn write_u64(&mut self, n: u64) { self.0 = n.wrapping_mul(0x9E37_79B9_7F4A_7C15); }
+    #[inline]
+    fn write_usize(&mut self, n: usize) { self.write_u64(n as u64); }
+}
+
+type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
+type FastSet<K> = HashSet<K, BuildHasherDefault<FastHasher>>;
 
 const JIT64_THRESHOLD: u32 = 500; // interpreted runs before a block is compiled
+const JIT64_MAX_BLOCK_INSTRS: usize = 32; // hard cap per compiled block
+// Fall-through superblocks: decode past a conditional branch up to this many
+// instructions (0 in jit64_set_block_limit means JIT64_MAX_BLOCK_INSTRS).
+static mut JIT64_SUPERBLOCKS: bool = true;
+static mut JIT64_BLOCK_LIMIT: usize = 16;
 
-// Reserved for the 32-bit JIT: it asserts when the shared table runs out.
-const JIT64_MAX_BLOCKS: usize = 3000;
+// Long-mode block cache cap (configurable so tests can force eviction).
+static mut JIT64_MAX_BLOCKS: usize = 28000;
+// Diagnostic self-check: re-run each block in the interpreter and compare.
+static mut JIT64_SELFCHECK: bool = false;
+static mut LAST_COMPILED_END_RIP: u64 = 0;
+static mut LAST_COMPILED_LEN: u16 = 0;
+// Set for blocks that must not be self-checked (MMIO/RDTSC/port I/O).
+static mut BLOCK_NO_SELFCHECK: bool = false;
+static mut LAST_COMPILED_NO_SELFCHECK: bool = false;
+// Only self-check blocks at least this long (the J7 failure needs >= 15).
+static mut SELFCHECK_MIN_INSTRS: u16 = 15;
+// Check the first N executions of a block (diagnostics).
+static mut SELFCHECK_REPEAT: u16 = 1;
 
-// Evict a quarter of the cap per trim.
-const JIT64_EVICT_BATCH: usize = JIT64_MAX_BLOCKS / 4;
+fn max_blocks() -> usize { unsafe { JIT64_MAX_BLOCKS } }
 
 const COMPILE_BUF_SIZE: usize = 65536;
 static mut COMPILE_BUF: [u8; COMPILE_BUF_SIZE] = [0; COMPILE_BUF_SIZE];
+// Scratch for a block's code bytes (avoids a per-block allocation).
+const CODE_BUF_SIZE: usize = 0x1000;
+static mut CODE_BUF: [u8; CODE_BUF_SIZE] = [0; CODE_BUF_SIZE];
 static mut JIT64_MEMORY_FAULT: u8 = 0;
 // Lets tests and benchmarks run the same code with the JIT off.
 static mut JIT64_ENABLED: bool = true;
@@ -3448,13 +3777,30 @@ static mut JIT64_ENABLED: bool = true;
 static mut JIT64_INLINE_MEMORY: bool = true;
 // Separate switch for inline stores (self-modifying code makes them riskier).
 static mut JIT64_INLINE_MEMORY_WRITE: bool = true;
-// SSE2 codegen remains opt-in while boot validation is incomplete.
-static mut JIT64_SSE: bool = false;
+// compile the decodable prefix, resume at the undecodable instruction.
+static mut JIT64_PARTIAL_BLOCKS: bool = true;
+// read a block's page with one translation (A/B).
+static mut JIT64_DIRECT_CODE_READ: bool = true;
+// Count interpreted hotness in a direct-mapped cache; off uses the map.
+static mut JIT64_HOT_CACHE: bool = true;
+
+// SSE2 codegen (movdqa/movdqu/pxor), validated by the differential suite.
+static mut JIT64_SSE: bool = true;
 // Dispatch counters (diagnostics; see jit64_stat).
 static mut JIT64_RUN_HITS: u64 = 0;
 static mut JIT64_RUN_MISSES: u64 = 0;
 static mut JIT64_INTERP: u64 = 0;
 static mut JIT64_COMPILES: u64 = 0;
+// blocks entered directly from a predecessor block (not the main loop).
+static mut JIT64_CHAIN_HOPS: u64 = 0;
+// Memory slow-path (helper) calls and how many were cross-page (profiling).
+static mut JIT64_MEM_SLOW_READ: u64 = 0;
+static mut JIT64_MEM_SLOW_WRITE: u64 = 0;
+static mut JIT64_MEM_SLOW_CROSS: u64 = 0;
+// JIT block exit reasons: fallthrough, jmp, jcc taken/not, call, ret, hlt.
+static mut JIT64_EXIT_REASON: [u64; 8] = [0; 8];
+// Compile-time gate: blocks compiled while this is set count their exits.
+static mut JIT64_EXIT_STATS: bool = false;
 
 // Bisect switch: classes of instructions whose blocks are left to the
 // interpreter (see jit64_set_bail).
@@ -3469,12 +3815,15 @@ static mut JIT64_BAIL_LINK_HI: u64 = 0;
 // Synchronous delivery marks the active block so it exits at the next helper check.
 static mut IN_JIT_BLOCK: bool = false;
 
-// Set when an exception was delivered synchronously from inside a compiled
-// block (e.g. a #GP from an unprivileged port access). The block must stop
-// immediately: the delivery changed *rip and pushed a frame on the stack, so
-// letting the rest of the block run (and write its registers back) would
-// discard the exception and leak the frame.
+// Set when a block delivered an exception (e.g. #GP): it must stop, since *rip
+// changed and a frame was pushed.
 static mut EXCEPTION_IN_BLOCK: bool = false;
+
+// Set when a guest write invalidates a code page (SMC); blocks check it after
+// each store and stop before running stale instructions.
+static mut JIT64_CODE_WRITE_BAIL: bool = false;
+// A/B switch for the SMC bail (diagnostics).
+static mut JIT64_SMC_BAIL: bool = true;
 
 pub unsafe fn note_exception_in_block() {
     EXCEPTION_IN_BLOCK = true;
@@ -3483,10 +3832,8 @@ pub unsafe fn note_exception_in_block() {
 #[no_mangle]
 pub unsafe fn jit64_hlt() {
     *crate::cpu::global_pointers::in_hlt = true;
-    // Parity with the interpreter's hlt: when interrupts are enabled the main
-    // loop runs the timers and delivers a due IRQ (so don't do it here, it is
-    // far too hot); when they are not, execution can never resume and the host
-    // has to be told, exactly like instr_F4 does.
+    // Like the interpreter's hlt: the main loop delivers the IRQ; otherwise tell
+    // the host that execution cannot resume.
     if *crate::cpu::global_pointers::flags & crate::cpu::cpu::FLAG_INTERRUPT == 0 {
         crate::cpu::cpu::cpu_event_halt();
     }
@@ -3502,14 +3849,58 @@ pub unsafe fn jit64_exception_delivered() -> u32 {
     v as u32
 }
 
+// A code page was written: stop the block before it runs stale instructions.
+#[no_mangle]
+pub unsafe fn jit64_code_write_bail() -> u32 {
+    let v = JIT64_CODE_WRITE_BAIL;
+    JIT64_CODE_WRITE_BAIL = false;
+    v as u32
+}
+
 #[no_mangle]
 pub unsafe fn jit64_in_block() -> u32 { IN_JIT_BLOCK as u32 }
 
 static mut JIT64_COMPILE_FAILS: u64 = 0;
+// Diagnostic: first byte of blocks that failed to decode, by opcode.
+static mut JIT64_FAIL_OP: [u32; 256] = [0; 256];
+// Diagnostic: why a hot block did not register.
+static mut JIT64_COMPILE_NO_TRANSLATE: u64 = 0;
+static mut JIT64_COMPILE_TOO_BIG: u64 = 0;
+static mut JIT64_COMPILE_NO_INDEX: u64 = 0;
+static mut JIT64_REGISTERED: u64 = 0;
+static mut JIT64_REPLACED: u64 = 0;
+// Diagnostic: why blocks were dropped.
+static mut JIT64_FORGET_EVICT: u64 = 0;
+static mut JIT64_FORGET_STALE: u64 = 0;
+static mut JIT64_FORGET_SMC: u64 = 0;
+static mut JIT64_FORGET_INVLPG: u64 = 0;
 static mut JIT64_FAULTS: u64 = 0;
-static mut HOTNESS: *mut HashMap<u64, u32> = std::ptr::null_mut();
+static mut HOTNESS: *mut FastMap<u64, u32> = std::ptr::null_mut();
+// Direct-mapped hotness cache (avoids a map op per interpretation); colliding
+// RIPs fall back to the map.
+const HOT_CACHE_SIZE: usize = 1 << 13;
+static mut HOT_CACHE_RIP: [u64; HOT_CACHE_SIZE] = [u64::MAX; HOT_CACHE_SIZE];
+static mut HOT_CACHE_COUNT: [u32; HOT_CACHE_SIZE] = [0; HOT_CACHE_SIZE];
+
+#[inline]
+fn hot_slot(rip: u64) -> usize { (rip >> 2) as usize & (HOT_CACHE_SIZE - 1) }
+
+unsafe fn hot_cache_reset(rip: u64) {
+    let slot = hot_slot(rip);
+    if HOT_CACHE_RIP[slot] == rip {
+        HOT_CACHE_RIP[slot] = u64::MAX;
+        HOT_CACHE_COUNT[slot] = 0;
+    }
+}
 // Block-cap trim request; run from try_run, outside hotness borrows.
 static mut EVICT_PENDING: bool = false;
+// Remaining chain dispatches for this loop entry; zero disables chaining.
+static mut CHAIN_BUDGET: u32 = 0;
+static mut JIT64_CHAIN_BUDGET: u32 = 0;
+// Whether blocks emit the chain hand-off at exits (off costs nothing).
+static mut JIT64_CHAIN_CODEGEN: bool = false;
+// Whether the prologue (flags + exception flag) runs in wasm; default host.
+static mut JIT64_BLOCK_PROLOGUE: bool = false;
 // Compilation order for the clock hand; stale rips are skipped lazily.
 static mut ORDER: *mut Vec<u64> = std::ptr::null_mut();
 static mut HAND: usize = 0;
@@ -3520,42 +3911,72 @@ struct BlockInfo {
     index: u16,
     // Physical page it was compiled from.
     phys_page: u32,
+    // Decoded end RIP and instruction count (self-check only).
+    end_rip: u64,
+    instr_count: u16,
+    // Self-check budget left (diagnostics only).
+    check_left: u16,
+    no_selfcheck: bool,
     // Second-chance bit for the clock eviction below.
     used: bool,
 }
 
-static mut BLOCKS: *mut HashMap<u64, BlockInfo> = std::ptr::null_mut();
+static mut BLOCKS: *mut FastMap<u64, Box<BlockInfo>> = std::ptr::null_mut();
+
+// Direct-mapped block entry cache; forget()/clear_cache() invalidate slots, the
+// `rip` tag catches reuse.
+const ENTRY_CACHE_SIZE: usize = 1 << 12;
+#[derive(Copy, Clone)]
+struct EntrySlot {
+    rip: u64,
+    info: *mut BlockInfo,
+}
+static mut ENTRY_CACHE: [EntrySlot; ENTRY_CACHE_SIZE] = [EntrySlot {
+    rip: 0,
+    info: std::ptr::null_mut(),
+}; ENTRY_CACHE_SIZE];
+static mut JIT64_ENTRY_CACHE: bool = true;
+
+#[inline]
+fn entry_slot(rip: u64) -> usize { (rip >> 2) as usize & (ENTRY_CACHE_SIZE - 1) }
+
+unsafe fn entry_cache_clear_rip(rip: u64) {
+    let slot = entry_slot(rip);
+    if !ENTRY_CACHE[slot].info.is_null() && ENTRY_CACHE[slot].rip == rip {
+        ENTRY_CACHE[slot].info = std::ptr::null_mut();
+    }
+}
 // physical code page -> guest RIPs compiled from it
-static mut CODE_PAGES: *mut HashMap<u32, HashSet<u64>> = std::ptr::null_mut();
+static mut CODE_PAGES: *mut FastMap<u32, FastSet<u64>> = std::ptr::null_mut();
 // virtual code page -> guest RIPs compiled from it (INVLPG invalidation)
-static mut VIRT_PAGES: *mut HashMap<u64, HashSet<u64>> = std::ptr::null_mut();
+static mut VIRT_PAGES: *mut FastMap<u64, FastSet<u64>> = std::ptr::null_mut();
 
 unsafe fn user_access() -> bool { *crate::cpu::global_pointers::cpl == 3 }
 
-unsafe fn hotness() -> &'static mut HashMap<u64, u32> {
+unsafe fn hotness() -> &'static mut FastMap<u64, u32> {
     if HOTNESS.is_null() {
-        HOTNESS = Box::into_raw(Box::new(HashMap::new()));
+        HOTNESS = Box::into_raw(Box::new(FastMap::default()));
     }
     &mut *HOTNESS
 }
 
-unsafe fn blocks() -> &'static mut HashMap<u64, BlockInfo> {
+unsafe fn blocks() -> &'static mut FastMap<u64, Box<BlockInfo>> {
     if BLOCKS.is_null() {
-        BLOCKS = Box::into_raw(Box::new(HashMap::new()));
+        BLOCKS = Box::into_raw(Box::new(FastMap::default()));
     }
     &mut *BLOCKS
 }
 
-unsafe fn code_pages() -> &'static mut HashMap<u32, HashSet<u64>> {
+unsafe fn code_pages() -> &'static mut FastMap<u32, FastSet<u64>> {
     if CODE_PAGES.is_null() {
-        CODE_PAGES = Box::into_raw(Box::new(HashMap::new()));
+        CODE_PAGES = Box::into_raw(Box::new(FastMap::default()));
     }
     &mut *CODE_PAGES
 }
 
-unsafe fn virt_pages() -> &'static mut HashMap<u64, HashSet<u64>> {
+unsafe fn virt_pages() -> &'static mut FastMap<u64, FastSet<u64>> {
     if VIRT_PAGES.is_null() {
-        VIRT_PAGES = Box::into_raw(Box::new(HashMap::new()));
+        VIRT_PAGES = Box::into_raw(Box::new(FastMap::default()));
     }
     &mut *VIRT_PAGES
 }
@@ -3587,7 +4008,11 @@ unsafe fn evict_some(count: usize) {
                 info.used = false;
                 continue;
             },
-            Some(_) => forget(rip),
+            Some(_) =>
+            {
+                JIT64_FORGET_EVICT += 1;
+                forget(rip);
+            },
         }
         freed += 1;
     }
@@ -3598,6 +4023,8 @@ unsafe fn forget(rip: u64) {
     if let Some(info) = blocks().remove(&rip) {
         crate::jit::jit64_free_table_index(info.index);
     }
+    entry_cache_clear_rip(rip);
+    hot_cache_reset(rip);
     hotness().remove(&rip);
     if !VIRT_PAGES.is_null() {
         if let Some(rips) = virt_pages().get_mut(&(rip >> 12)) {
@@ -3609,33 +4036,60 @@ unsafe fn forget(rip: u64) {
 // Does nothing if the bytes cannot be decoded yet.
 unsafe fn compile_and_register(rip: u64) {
     // At the cap: request a trim at the next dispatch (see evict_some).
-    if blocks().len() >= JIT64_MAX_BLOCKS {
+    if blocks().len() >= max_blocks() {
         EVICT_PENDING = true;
     }
     JIT64_COMPILES += 1;
-    // Hotness is recorded after interpretation, which may have switched CR3
-    // or delivered an exception. Compilation is only a probe of the old RIP:
-    // missing mappings must not inject a second guest exception.
-    let phys_page = match crate::cpu::cpu::translate_address_64_no_side_effects(rip) {
-        Ok(phys) => phys >> 12,
-        Err(()) => return,
+    // Hotness follows interpretation (which may have raised or switched CR3);
+    // compiling is only a probe.
+    let phys = match crate::cpu::cpu::translate_address_64_no_side_effects(rip) {
+        Ok(phys) => phys,
+        Err(()) =>
+        {
+            JIT64_COMPILE_NO_TRANSLATE += 1;
+            return;
+        },
     };
-    let page_end = (rip | 0xFFF) + 1;
-    let mut bytes = Vec::new();
-    let mut addr = rip;
-    while addr < page_end {
-        match crate::cpu::cpu::translate_address_64_no_side_effects(addr) {
-            Ok(phys) => bytes.push(crate::cpu::memory::read8(phys) as u8),
-            Err(()) => break,
+    let phys_page = phys >> 12;
+    let code = std::slice::from_raw_parts_mut(
+        std::ptr::addr_of_mut!(CODE_BUF) as *mut u8,
+        CODE_BUF_SIZE,
+    );
+    let code_len = if JIT64_DIRECT_CODE_READ {
+        // A mapped page is contiguous, so translate once and read on.
+        let page_off = (rip & 0xFFF) as u32;
+        let n = (0x1000 - page_off) as usize;
+        for i in 0..n {
+            code[i] = crate::cpu::memory::read8(phys.wrapping_add(i as u32)) as u8;
         }
-        addr += 1;
+        n
     }
+    else {
+        let page_end = (rip | 0xFFF) + 1;
+        let mut addr = rip;
+        let mut n = 0;
+        while addr < page_end {
+            match crate::cpu::cpu::translate_address_64_no_side_effects(addr) {
+                Ok(p) => {
+                    code[n] = crate::cpu::memory::read8(p) as u8;
+                    n += 1;
+                },
+                Err(()) => break,
+            }
+            addr += 1;
+        }
+        n
+    };
+    let bytes = &code[..code_len];
 
-    let module = match compile_bytes(rip, &bytes) {
+    let module = match compile_bytes(rip, bytes) {
         Ok(module) => module,
         Err(e) =>
         {
             JIT64_COMPILE_FAILS += 1;
+            if let Some(&first) = bytes.first() {
+                JIT64_FAIL_OP[first as usize] += 1;
+            }
             if LOGGED_FAILS.fetch_add(1, Ordering::Relaxed) < 40
             {
                 dbg_log!("jit64: cannot compile 0x{:x}: {}", rip, e);
@@ -3644,12 +4098,14 @@ unsafe fn compile_and_register(rip: u64) {
         },
     };
     if module.len() > COMPILE_BUF_SIZE {
+        JIT64_COMPILE_TOO_BIG += 1;
         return;
     }
     let index = match crate::jit::jit64_allocate_table_index() {
         Some(index) => index,
         None => {
             // No slot free: re-arm hotness so the block is retried later.
+            JIT64_COMPILE_NO_INDEX += 1;
             hotness().remove(&rip);
             return;
         },
@@ -3665,7 +4121,23 @@ unsafe fn compile_and_register(rip: u64) {
         std::ptr::addr_of_mut!(COMPILE_BUF) as *mut u8 as u32,
         len as u32,
     );
-    blocks().insert(rip, BlockInfo { index, phys_page, used: false });
+    JIT64_REGISTERED += 1;
+    if let Some(old) = blocks().insert(
+        rip,
+        Box::new(BlockInfo {
+            index,
+            phys_page,
+            end_rip: LAST_COMPILED_END_RIP,
+            instr_count: LAST_COMPILED_LEN,
+            check_left: SELFCHECK_REPEAT,
+            no_selfcheck: LAST_COMPILED_NO_SELFCHECK,
+            used: false,
+        }),
+    ) {
+        // Replaced block: free its table slot so it is not leaked.
+        JIT64_REPLACED += 1;
+        crate::jit::jit64_free_table_index(old.index);
+    }
     order().push(rip);
     // Compact the append-only order once stale entries dominate.
     if order().len() > blocks().len() * 4 {
@@ -3679,6 +4151,10 @@ unsafe fn compile_and_register(rip: u64) {
     // writes on this physical page fall back to the helper.
     crate::cpu::cpu::tlb_set_has_code(crate::page::Page::page_of(phys_page << 12), true);
     crate::cpu::cpu::tlb64_mark_code(phys_page, true);
+    if (BLOCK_LOG_N as usize) < BLOCK_LOG_MAX {
+        BLOCK_LOG_RIP[BLOCK_LOG_N as usize] = rip;
+        BLOCK_LOG_N += 1;
+    }
 }
 
 // Physical page backing this guest page (one-entry cache).
@@ -3708,53 +4184,459 @@ pub unsafe fn try_run(rip: u64) -> bool {
     if !JIT64_ENABLED {
         return false;
     }
+    // Refill the block-chaining budget once per main-loop entry.
+    refill_chain_budget();
     if EVICT_PENDING {
         EVICT_PENDING = false;
-        evict_some(JIT64_EVICT_BATCH);
+        evict_some(max_blocks() / 4);
     }
-    let info = match blocks().get_mut(&rip) {
-        Some(info) =>
+    match lookup_compiled(rip) {
+        Some((index, end_rip, check)) =>
         {
-            info.used = true;
-            *info
+            JIT64_RUN_HITS += 1;
+            log_exec(rip);
+            dispatch_block(index, rip, end_rip, check);
+            true
         },
         None =>
         {
             JIT64_RUN_MISSES += 1;
-            return false;
+            false
         },
+    }
+}
+
+// Resolve `rip` to a live block, validating the entry cache and physical page.
+unsafe fn lookup_compiled(rip: u64) -> Option<(u16, u64, bool)> {
+    // Fast path: an entry-cache hit skips the map lookup.
+    if JIT64_ENTRY_CACHE {
+        let entry = ENTRY_CACHE[entry_slot(rip)];
+        if !entry.info.is_null() && entry.rip == rip {
+            let info = &mut *entry.info;
+            if phys_page_of(rip) == Some(info.phys_page) {
+                info.used = true;
+                let check = JIT64_SELFCHECK
+                    && info.instr_count >= SELFCHECK_MIN_INSTRS
+                    && info.check_left > 0
+                    && !info.no_selfcheck;
+                if check {
+                    info.check_left -= 1;
+                }
+                return Some((info.index, info.end_rip, check));
+            }
+        }
+    }
+    let info_ptr: *mut BlockInfo = match blocks().get_mut(&rip) {
+        Some(info) =>
+        {
+            info.used = true;
+            &mut **info as *mut BlockInfo
+        },
+        None => return None,
     };
     // Stale block (its RIP maps elsewhere now): drop it.
-    if phys_page_of(rip) != Some(info.phys_page) {
+    if phys_page_of(rip) != Some((*info_ptr).phys_page) {
+        JIT64_FORGET_STALE += 1;
         forget(rip);
-        JIT64_RUN_MISSES += 1;
+        return None;
+    }
+    if JIT64_ENTRY_CACHE {
+        ENTRY_CACHE[entry_slot(rip)] = EntrySlot { rip, info: info_ptr };
+    }
+    let check = JIT64_SELFCHECK
+        && (*info_ptr).instr_count >= SELFCHECK_MIN_INSTRS
+        && (*info_ptr).check_left > 0
+        && !(*info_ptr).no_selfcheck;
+    if check {
+        (*info_ptr).check_left -= 1;
+    }
+    Some(((*info_ptr).index, (*info_ptr).end_rip, check))
+}
+
+// At a block's exit, run its successor directly (budget bounds wasm recursion).
+#[no_mangle]
+pub unsafe fn jit64_chain() {
+    if CHAIN_BUDGET == 0 || !JIT64_ENABLED {
+        return;
+    }
+    if EVICT_PENDING {
+        EVICT_PENDING = false;
+        evict_some(max_blocks() / 4);
+    }
+    let target = *crate::cpu::global_pointers::rip;
+    if let Some((index, end_rip, check)) = lookup_compiled(target) {
+        CHAIN_BUDGET -= 1;
+        JIT64_RUN_HITS += 1;
+        JIT64_CHAIN_HOPS += 1;
+        log_exec(target);
+        dispatch_block(index, target, end_rip, check);
+    }
+}
+
+// Refill the chaining budget per main-loop entry (disabled path costs nothing).
+#[inline]
+pub unsafe fn refill_chain_budget() {
+    if JIT64_CHAIN_CODEGEN {
+        CHAIN_BUDGET = JIT64_CHAIN_BUDGET;
+    }
+}
+
+// --- Diagnostic self-check: run each block through the interpreter too ------
+
+static mut JIT64_SELFCHECK_MISMATCH: u64 = 0;
+static mut SELFCHECK_RUNS: u64 = 0;
+static mut SELFCHECK_INSTRS: u64 = 0;
+static mut SELFCHECK_BYTES: [u8; 128] = [0; 128];
+static mut SELFCHECK_BYTES_LEN: u32 = 0;
+static mut SELFCHECK_START: u64 = 0;
+static mut SELFCHECK_END: u64 = 0;
+static mut SELFCHECK_JIT_RIP: u64 = 0;
+static mut SELFCHECK_INTERP_RIP: u64 = 0;
+static mut SELFCHECK_JIT_FLAGS: i32 = 0;
+static mut SELFCHECK_INTERP_FLAGS: i32 = 0;
+static mut SELFCHECK_REG: i32 = -1;
+static mut SELFCHECK_JIT_REG: u64 = 0;
+static mut SELFCHECK_INTERP_REG: u64 = 0;
+// Memory the block wrote, so a wrong store is caught too (not just registers).
+const SELFCHECK_LOG_MAX: usize = 64;
+static mut SELFCHECK_LOG_ENABLED: bool = false;
+static mut SELFCHECK_LOG_N: u32 = 0;
+static mut SELFCHECK_LOG_OVERFLOW: u32 = 0;
+static mut SELFCHECK_LOG_PHYS: [u64; SELFCHECK_LOG_MAX] = [0; SELFCHECK_LOG_MAX];
+static mut SELFCHECK_LOG_PRE: [u64; SELFCHECK_LOG_MAX] = [0; SELFCHECK_LOG_MAX];
+static mut SELFCHECK_LOG_WIDTH: [u8; SELFCHECK_LOG_MAX] = [0; SELFCHECK_LOG_MAX];
+static mut SELFCHECK_MEM_MISMATCH: u64 = 0;
+static mut SELFCHECK_SKIPPED_FAULT: u64 = 0;
+static mut SELFCHECK_MEM_PHYS: u64 = 0;
+static mut SELFCHECK_MEM_JIT: u64 = 0;
+static mut SELFCHECK_MEM_INTERP: u64 = 0;
+static mut SELFCHECK_MEM_WIDTH: u8 = 0;
+static mut SELFCHECK_PRE_REG: u64 = 0;
+static mut SELFCHECK_RETIRED: u32 = 0;
+
+unsafe fn sc_read_mem(phys: u32, width: u8) -> u64 {
+    match width {
+        8 => crate::cpu::memory::read8(phys) as u8 as u64,
+        16 => crate::cpu::memory::read16(phys) as u16 as u64,
+        32 => crate::cpu::memory::read32s(phys) as u32 as u64,
+        _ => crate::cpu::memory::read64s(phys) as u64,
+    }
+}
+
+unsafe fn sc_write_mem(phys: u32, value: u64, width: u8) {
+    match width {
+        8 => crate::cpu::memory::write8(phys, value as i32),
+        16 => crate::cpu::memory::write16(phys, value as i32),
+        32 => crate::cpu::memory::write32(phys, value as i32),
+        _ =>
+        {
+            crate::cpu::memory::write32(phys, value as u32 as i32);
+            crate::cpu::memory::write32(phys + 4, (value >> 32) as u32 as i32);
+        },
+    }
+}
+
+// Called before every generated store while a block is being self-checked.
+#[no_mangle]
+pub unsafe fn jit64_selfcheck_log_write(vaddr: u64, _value: u64, width: u32) {
+    if !SELFCHECK_LOG_ENABLED {
+        return;
+    }
+    let bytes = width / 8;
+    if bytes == 0 || bytes > 8 || (vaddr as usize & 0xFFF) + bytes as usize > 0x1000 {
+        SELFCHECK_LOG_OVERFLOW += 1;
+        return;
+    }
+    let n = SELFCHECK_LOG_N as usize;
+    if n >= SELFCHECK_LOG_MAX {
+        SELFCHECK_LOG_OVERFLOW += 1;
+        return;
+    }
+    let phys = match crate::cpu::cpu::translate_address_64_no_side_effects(vaddr) {
+        Ok(phys) => phys,
+        Err(_) =>
+        {
+            SELFCHECK_LOG_OVERFLOW += 1;
+            return;
+        },
+    };
+    SELFCHECK_LOG_PHYS[n] = phys as u64;
+    SELFCHECK_LOG_PRE[n] = sc_read_mem(phys, width as u8);
+    SELFCHECK_LOG_WIDTH[n] = width as u8;
+    SELFCHECK_LOG_N += 1;
+}
+
+// 0 count, 1..6 first mismatch info, 7..9 first differing register.
+#[no_mangle]
+pub unsafe fn jit64_selfcheck_info(i: u32) -> u64 {
+    match i {
+        0 => JIT64_SELFCHECK_MISMATCH,
+        1 => SELFCHECK_START,
+        2 => SELFCHECK_END,
+        3 => SELFCHECK_JIT_RIP,
+        4 => SELFCHECK_INTERP_RIP,
+        5 => SELFCHECK_JIT_FLAGS as u32 as u64,
+        6 => SELFCHECK_INTERP_FLAGS as u32 as u64,
+        7 => SELFCHECK_REG as u64,
+        8 => SELFCHECK_JIT_REG,
+        9 => SELFCHECK_INTERP_REG,
+        10 => SELFCHECK_RUNS,
+        11 => SELFCHECK_INSTRS,
+        12 => SELFCHECK_BYTES_LEN as u64,
+        13..=28 => {
+            let w = (i - 13) as usize;
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&SELFCHECK_BYTES[w * 8..w * 8 + 8]);
+            u64::from_le_bytes(b)
+        },
+        29 => SELFCHECK_MEM_MISMATCH,
+        30 => SELFCHECK_MEM_PHYS,
+        31 => SELFCHECK_MEM_JIT,
+        32 => SELFCHECK_MEM_INTERP,
+        33 => SELFCHECK_MEM_WIDTH as u64,
+        34 => SELFCHECK_SKIPPED_FAULT,
+        35 => SELFCHECK_PRE_REG,
+        36 => SELFCHECK_RETIRED as u64,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_set_selfcheck(enabled: u32) { JIT64_SELFCHECK = enabled != 0; }
+#[no_mangle]
+pub unsafe fn jit64_set_selfcheck_min(n: u32) { SELFCHECK_MIN_INSTRS = n.min(255) as u16; }
+#[no_mangle]
+pub unsafe fn jit64_set_selfcheck_repeat(n: u32) { SELFCHECK_REPEAT = n.min(65535) as u16; }
+
+#[derive(Copy, Clone)]
+struct GuestSnap {
+    regs: [u64; 16],
+    flags: i32,
+    rip: u64,
+    xmm: [u64; 32],
+}
+
+// AF is undefined for logic/shift/inc/dec, so ignore it even in registers.
+fn guest_eq(a: &GuestSnap, b: &GuestSnap) -> bool {
+    const UNDEFINED_FLAGS: i32 = 1 << 4;
+    if a.rip != b.rip || a.xmm != b.xmm {
         return false;
     }
-    JIT64_RUN_HITS += 1;
-    let indirect = info.index as i32 + crate::cpu::cpu::WASM_TABLE_OFFSET as i32;
+    if (a.flags & !UNDEFINED_FLAGS) != (b.flags & !UNDEFINED_FLAGS) {
+        return false;
+    }
+    let af = ((a.flags ^ b.flags) & UNDEFINED_FLAGS) as u64;
+    for i in 0..16usize {
+        if (a.regs[i] ^ b.regs[i]) & !af != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn snap_guest() -> GuestSnap {
+    use crate::cpu::global_pointers::*;
+    // Materialise lazy flags so the raw word is current.
+    jit64_sync_flags();
+    let mut regs = [0u64; 16];
+    for i in 0..8usize {
+        regs[i] = *reg32.add(i) as u32 as u64 | ((*reg_high.add(i) as u64) << 32);
+    }
+    for i in 0..8usize {
+        regs[8 + i] = *reg64_ext.add(i);
+    }
+    let mut xmm = [0u64; 32];
+    for i in 0..16usize {
+        let v = crate::cpu::cpu::read_xmm128s(i as i32);
+        xmm[i * 2] = v.u64[0];
+        xmm[i * 2 + 1] = v.u64[1];
+    }
+    GuestSnap { regs, flags: *flags, rip: *rip, xmm }
+}
+
+unsafe fn restore_guest(s: &GuestSnap) {
+    use crate::cpu::global_pointers::*;
+    for i in 0..8usize {
+        *reg32.add(i) = s.regs[i] as u32 as i32;
+        *reg_high.add(i) = (s.regs[i] >> 32) as u32;
+    }
+    for i in 0..8usize {
+        *reg64_ext.add(i) = s.regs[8 + i];
+    }
+    for i in 0..16usize {
+        crate::cpu::cpu::write_xmm128_2(i as i32, s.xmm[i * 2], s.xmm[i * 2 + 1]);
+    }
+    *flags = s.flags;
+    *flags_changed = 0;
+    *rip = s.rip;
+}
+
+// Run the block, re-run it in the interpreter from the pre-state, then compare.
+unsafe fn run_block_selfcheck(index: u16, start: u64, end: u64) {
+    use crate::cpu::global_pointers::*;
+    SELFCHECK_RUNS += 1;
+    let pre = snap_guest();
+    let ic0 = *instruction_counter;
+    SELFCHECK_LOG_N = 0;
+    SELFCHECK_LOG_OVERFLOW = 0;
+    SELFCHECK_LOG_ENABLED = true;
+    let faults0 = JIT64_FAULTS;
+    run_block(index);
+    let jit_faulted = JIT64_FAULTS != faults0;
+    SELFCHECK_LOG_ENABLED = false;
+    let ic1 = *instruction_counter;
+    if jit_faulted
+    {
+        // A faulting block is not comparable (delivery differs); leave it.
+        SELFCHECK_SKIPPED_FAULT += 1;
+        return;
+    }
+    let post_jit = snap_guest();
+    // Snapshot the JIT's memory, then restore the pre-state for the re-run.
+    let nlog = SELFCHECK_LOG_N as usize;
+    let mut jit_mem = [0u64; SELFCHECK_LOG_MAX];
+    for i in 0..nlog {
+        let w = SELFCHECK_LOG_WIDTH[i];
+        jit_mem[i] = sc_read_mem(SELFCHECK_LOG_PHYS[i] as u32, w);
+    }
+    for i in (0..nlog).rev() {
+        let w = SELFCHECK_LOG_WIDTH[i];
+        sc_write_mem(SELFCHECK_LOG_PHYS[i] as u32, SELFCHECK_LOG_PRE[i], w);
+    }
+    // Re-run exactly as many instructions as the block retired.
+    restore_guest(&pre);
+    *instruction_counter = ic0;
+    let n = ic1.wrapping_sub(ic0).min(256);
+    SELFCHECK_INSTRS += n as u64;
+    for _ in 0..n {
+        crate::cpu::interp64::run_one();
+    }
+    let post_interp = snap_guest();
+    *instruction_counter = ic1;
+    let mut mem_bad = false;
+    for i in 0..nlog {
+        let w = SELFCHECK_LOG_WIDTH[i];
+        let interp_mem = sc_read_mem(SELFCHECK_LOG_PHYS[i] as u32, w);
+        if interp_mem != jit_mem[i] && !mem_bad {
+            mem_bad = true;
+            SELFCHECK_MEM_PHYS = SELFCHECK_LOG_PHYS[i];
+            SELFCHECK_MEM_JIT = jit_mem[i];
+            SELFCHECK_MEM_INTERP = interp_mem;
+            SELFCHECK_MEM_WIDTH = w;
+        }
+    }
+    if !guest_eq(&post_jit, &post_interp) || mem_bad {
+        if mem_bad {
+            SELFCHECK_MEM_MISMATCH += 1;
+        }
+        if JIT64_SELFCHECK_MISMATCH == 0 {
+            SELFCHECK_START = start;
+            SELFCHECK_END = end;
+            SELFCHECK_JIT_RIP = post_jit.rip;
+            SELFCHECK_INTERP_RIP = post_interp.rip;
+            SELFCHECK_JIT_FLAGS = post_jit.flags;
+            SELFCHECK_INTERP_FLAGS = post_interp.flags;
+            SELFCHECK_REG = -1;
+            let blen = ((end.wrapping_sub(start)) as usize).min(128);
+            for i in 0..blen {
+                SELFCHECK_BYTES[i] = match crate::cpu::cpu::translate_address_64_no_side_effects(start + i as u64) {
+                    Ok(p) => crate::cpu::memory::read8(p) as u8,
+                    Err(_) => 0,
+                };
+            }
+            SELFCHECK_BYTES_LEN = blen as u32;
+            SELFCHECK_RETIRED = n as u32;
+            for r in 0..16usize {
+                let af = ((post_jit.flags ^ post_interp.flags) & (1 << 4)) as u64;
+                if (post_jit.regs[r] ^ post_interp.regs[r]) & !af != 0 {
+                    SELFCHECK_REG = r as i32;
+                    SELFCHECK_JIT_REG = post_jit.regs[r];
+                    SELFCHECK_INTERP_REG = post_interp.regs[r];
+                    break;
+                }
+            }
+            if SELFCHECK_REG == -1 {
+                // 100 + n identifies xmm_n.
+                for r in 0..16usize {
+                    if post_jit.xmm[r * 2] != post_interp.xmm[r * 2]
+                        || post_jit.xmm[r * 2 + 1] != post_interp.xmm[r * 2 + 1]
+                    {
+                        SELFCHECK_REG = 100 + r as i32;
+                        SELFCHECK_JIT_REG = post_jit.xmm[r * 2];
+                        SELFCHECK_INTERP_REG = post_interp.xmm[r * 2];
+                        break;
+                    }
+                }
+            }
+            if (0..16).contains(&SELFCHECK_REG) {
+                SELFCHECK_PRE_REG = pre.regs[SELFCHECK_REG as usize];
+            }
+        }
+        JIT64_SELFCHECK_MISMATCH += 1;
+        *crate::cpu::global_pointers::in_hlt = true;
+    }
+    restore_guest(&post_jit);
+}
+
+unsafe fn dispatch_block(index: u16, rip: u64, end_rip: u64, check: bool) {
+    if check {
+        run_block_selfcheck(index, rip, end_rip);
+    }
+    else {
+        run_block(index);
+    }
+}
+
+unsafe fn run_block(index: u16) {
+    let indirect = index as i32 + crate::cpu::cpu::WASM_TABLE_OFFSET as i32;
+    if !JIT64_BLOCK_PROLOGUE {
+        // Entry setup (emit_block_prologue): sync flags, clear exception flag.
+        jit64_sync_flags();
+        jit64_clear_exception_flag();
+    }
+    // Clear any code-write bail left by an earlier block, so this one can run.
+    JIT64_CODE_WRITE_BAIL = false;
     IN_JIT_BLOCK = true;
     wasm::call_indirect1(indirect, 0);
     IN_JIT_BLOCK = false;
     jit64_finish_fault();
-    true
 }
 
 pub unsafe fn note_interpreted(rip: u64) {
     if !JIT64_ENABLED {
         return;
     }
+    // The STI-shadow path can reach here with a compiled RIP; skip recompiling.
     if blocks().contains_key(&rip) {
         return;
     }
     JIT64_INTERP += 1;
-    // End the hotness borrow before compile_and_register(): it touches the map.
-    let should_compile = {
-        let count = hotness().entry(rip).or_insert(0);
-        *count += 1;
-        // Compile once; retrying an undecodable block is expensive.
-        *count == JIT64_THRESHOLD
+    let count = if JIT64_HOT_CACHE {
+        let slot = hot_slot(rip);
+        if HOT_CACHE_RIP[slot] == rip {
+            let c = HOT_CACHE_COUNT[slot].wrapping_add(1);
+            HOT_CACHE_COUNT[slot] = c;
+            c
+        }
+        else if HOT_CACHE_RIP[slot] == u64::MAX {
+            HOT_CACHE_RIP[slot] = rip;
+            HOT_CACHE_COUNT[slot] = 1;
+            1
+        }
+        else {
+            // Slot held by another RIP: keep the exact count in the map.
+            let e = hotness().entry(rip).or_insert(0);
+            *e += 1;
+            *e
+        }
+    }
+    else {
+        let e = hotness().entry(rip).or_insert(0);
+        *e += 1;
+        *e
     };
-    if should_compile {
+    // Compile once; retrying an undecodable block is expensive.
+    if count == JIT64_THRESHOLD {
         compile_and_register(rip);
     }
 }
@@ -3763,12 +4645,24 @@ pub unsafe fn clear_cache() {
     if !HOTNESS.is_null() {
         hotness().clear();
     }
+    let hot_rip = std::ptr::addr_of_mut!(HOT_CACHE_RIP) as *mut u64;
+    let hot_count = std::ptr::addr_of_mut!(HOT_CACHE_COUNT) as *mut u32;
+    for i in 0..HOT_CACHE_SIZE {
+        *hot_rip.add(i) = u64::MAX;
+        *hot_count.add(i) = 0;
+    }
     if !BLOCKS.is_null() {
         let indices: Vec<u16> = blocks().drain().map(|(_, info)| info.index).collect();
         for index in indices {
             crate::jit::jit64_free_table_index(index);
         }
     }
+    let cache = std::ptr::addr_of_mut!(ENTRY_CACHE) as *mut EntrySlot;
+    for i in 0..ENTRY_CACHE_SIZE {
+        (*cache.add(i)).info = std::ptr::null_mut();
+    }
+    BLOCK_LOG_N = 0;
+    EXEC_LOG_N = 0;
     if !CODE_PAGES.is_null() {
         code_pages().clear();
     }
@@ -3787,7 +4681,12 @@ pub unsafe fn invalidate_physical_page(page: u32) {
         Some(rips) => rips,
         None => return,
     };
+    // This page's block may hold stale instructions: make it stop.
+    if JIT64_SMC_BAIL {
+        JIT64_CODE_WRITE_BAIL = true;
+    }
     for rip in rips {
+        JIT64_FORGET_SMC += 1;
         forget(rip);
     }
     crate::cpu::cpu::tlb64_mark_code(page, false);
@@ -3808,12 +4707,182 @@ pub unsafe fn invalidate_virtual_page(vaddr: u64) {
         None => return,
     };
     for rip in rips {
+        JIT64_FORGET_INVLPG += 1;
         forget(rip);
     }
 }
 
+// Diagnostic (tests): RIPs of compiled blocks in compile order.
+const BLOCK_LOG_MAX: usize = 256;
+static mut BLOCK_LOG_N: u32 = 0;
+static mut BLOCK_LOG_RIP: [u64; BLOCK_LOG_MAX] = [0; BLOCK_LOG_MAX];
+
+// Diagnostic (tests): RIPs of executed blocks in execution order.
+const EXEC_LOG_MAX: usize = 8192;
+static mut EXEC_LOG: [u64; EXEC_LOG_MAX] = [0; EXEC_LOG_MAX];
+static mut EXEC_LOG_N: u32 = 0;
+
+unsafe fn log_exec(rip: u64) {
+    if (EXEC_LOG_N as usize) < EXEC_LOG_MAX {
+        EXEC_LOG[EXEC_LOG_N as usize] = rip;
+        EXEC_LOG_N += 1;
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_exec_log_len() -> u32 { EXEC_LOG_N }
+
+#[no_mangle]
+pub unsafe fn jit64_exec_log(i: u32) -> u64 {
+    if i >= EXEC_LOG_N || i as usize >= EXEC_LOG_MAX {
+        return u64::MAX;
+    }
+    EXEC_LOG[i as usize]
+}
+
+#[no_mangle]
+pub unsafe fn jit64_block_log_len() -> u32 { BLOCK_LOG_N }
+
+#[no_mangle]
+pub unsafe fn jit64_block_log_rip(i: u32) -> u64 {
+    if i >= BLOCK_LOG_N || i as usize >= BLOCK_LOG_MAX {
+        return u64::MAX;
+    }
+    BLOCK_LOG_RIP[i as usize]
+}
+
+// Diagnostic (tests): decode the block at `rip`; (end_rip << 16) | count.
+#[no_mangle]
+pub unsafe fn jit64_probe_block(rip: u64) -> u64 {
+    let phys = match crate::cpu::cpu::translate_address_64_no_side_effects(rip) {
+        Ok(phys) => phys,
+        Err(()) => return u64::MAX,
+    };
+    let page_off = (rip & 0xFFF) as u32;
+    let mut bytes = Vec::with_capacity((0x1000 - page_off) as usize);
+    for i in 0..0x1000 - page_off {
+        bytes.push(crate::cpu::memory::read8(phys.wrapping_add(i)) as u8);
+    }
+    match decode_block_with_rips(rip, &bytes) {
+        Ok(d) => (d.end_rip << 16) | d.instrs.len() as u64,
+        Err(_) => u64::MAX,
+    }
+}
+
+// Diagnostic (tests): compile `rip` with the given partial-prefix setting.
+static mut PROBE_LEN: u32 = 0;
+static mut PROBE_BUF: [u8; 65536] = [0; 65536];
+
+#[no_mangle]
+pub unsafe fn jit64_compile_probe(rip: u64, partial: u32) -> u32 {
+    let saved = JIT64_PARTIAL_BLOCKS;
+    JIT64_PARTIAL_BLOCKS = partial != 0;
+    let module = match crate::cpu::cpu::translate_address_64_no_side_effects(rip) {
+        Ok(phys) =>
+        {
+            let page_off = (rip & 0xFFF) as u32;
+            let mut bytes = Vec::with_capacity((0x1000 - page_off) as usize);
+            for i in 0..0x1000 - page_off {
+                bytes.push(crate::cpu::memory::read8(phys.wrapping_add(i)) as u8);
+            }
+            compile_bytes(rip, &bytes).ok()
+        },
+        Err(()) => None,
+    };
+    JIT64_PARTIAL_BLOCKS = saved;
+    match module {
+        Some(m) =>
+        {
+            let len = m.len().min(PROBE_BUF.len());
+            std::ptr::copy_nonoverlapping(
+                m.as_ptr(),
+                std::ptr::addr_of_mut!(PROBE_BUF) as *mut u8,
+                len,
+            );
+            PROBE_LEN = len as u32;
+            std::ptr::addr_of!(PROBE_BUF) as u32
+        },
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_compile_probe_len() -> u32 { PROBE_LEN }
+
+#[no_mangle]
+pub unsafe fn jit64_fail_op(op: u32) -> u32 {
+    if op < 256 { JIT64_FAIL_OP[op as usize] } else { 0 }
+}
+
+// Recent blocks at or above the superblock threshold (diagnostics).
+const BIG_BLOCK_MAX: usize = 64;
+static mut BIG_BLOCK_RIP: [u64; BIG_BLOCK_MAX] = [0; BIG_BLOCK_MAX];
+static mut BIG_BLOCK_LEN: [u32; BIG_BLOCK_MAX] = [0; BIG_BLOCK_MAX];
+static mut BIG_BLOCK_N: u32 = 0;
+static mut BIG_BLOCK_BYTES: [u8; 128] = [0; 128];
+static mut BIG_BLOCK_BYTES_LEN: u32 = 0;
+static mut BIG_BLOCK_LO: u64 = u64::MAX;
+static mut BIG_BLOCK_HI: u64 = 0;
+static mut LAST_BIG_BLOCK_LOCALS: u32 = 0;
+
+#[no_mangle]
+pub unsafe fn jit64_last_big_block_locals() -> u32 { LAST_BIG_BLOCK_LOCALS }
+
+#[no_mangle]
+pub unsafe fn jit64_big_block_lo() -> u64 { BIG_BLOCK_LO }
+#[no_mangle]
+pub unsafe fn jit64_big_block_hi() -> u64 { BIG_BLOCK_HI }
+
+#[no_mangle]
+pub unsafe fn jit64_big_block_bytes(i: u32) -> u32 {
+    if (i as usize) < BIG_BLOCK_BYTES.len() { BIG_BLOCK_BYTES[i as usize] as u32 } else { 0 }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_big_block_bytes_len() -> u32 { BIG_BLOCK_BYTES_LEN }
+
+#[no_mangle]
+pub unsafe fn jit64_big_block_count() -> u32 { BIG_BLOCK_N }
+
+#[no_mangle]
+pub unsafe fn jit64_big_block_rip(i: u32) -> u64 {
+    if (i as usize) < BIG_BLOCK_MAX { BIG_BLOCK_RIP[i as usize] } else { 0 }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_big_block_len(i: u32) -> u32 {
+    if (i as usize) < BIG_BLOCK_MAX { BIG_BLOCK_LEN[i as usize] } else { 0 }
+}
+
 #[no_mangle]
 pub unsafe fn jit64_compiled_count() -> u32 { blocks().len() as u32 }
+
+// Block exit reason histogram (see emit_exit_stat).
+#[no_mangle]
+pub unsafe fn jit64_note_exit(reason: u32) {
+    if (reason as usize) < JIT64_EXIT_REASON.len() {
+        JIT64_EXIT_REASON[reason as usize] += 1;
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_exit_reason(i: u32) -> u64 {
+    if (i as usize) < JIT64_EXIT_REASON.len() { JIT64_EXIT_REASON[i as usize] } else { 0 }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_set_exit_stats(enabled: u32) {
+    JIT64_EXIT_STATS = enabled != 0;
+    clear_cache();
+}
+
+// Test helper: zero all XMM registers so both engines start alike.
+#[no_mangle]
+pub unsafe fn jit64_clear_xmm() {
+    for r in 0..16 {
+        crate::cpu::cpu::write_xmm128_2(r, 0, 0);
+    }
+}
 
 // Diagnostics: 0 run hits, 1 run misses, 2 interpreted, 3 compiles, 4 failures,
 // 5 compiled block count.
@@ -3827,6 +4896,19 @@ pub unsafe fn jit64_stat(index: u32) -> u64 {
         4 => JIT64_COMPILE_FAILS,
         5 => blocks().len() as u64,
         6 => JIT64_FAULTS,
+        7 => JIT64_COMPILE_NO_TRANSLATE,
+        8 => JIT64_COMPILE_TOO_BIG,
+        9 => JIT64_COMPILE_NO_INDEX,
+        10 => JIT64_REGISTERED,
+        11 => JIT64_REPLACED,
+        12 => JIT64_FORGET_EVICT,
+        13 => JIT64_FORGET_STALE,
+        14 => JIT64_FORGET_SMC,
+        15 => JIT64_FORGET_INVLPG,
+        16 => JIT64_CHAIN_HOPS,
+        17 => JIT64_MEM_SLOW_READ,
+        18 => JIT64_MEM_SLOW_WRITE,
+        19 => JIT64_MEM_SLOW_CROSS,
         _ => 0,
     }
 }
@@ -3843,6 +4925,53 @@ pub unsafe fn jit64_set_inline_write(enabled: u32) { JIT64_INLINE_MEMORY_WRITE =
 
 #[no_mangle]
 pub unsafe fn jit64_set_sse(enabled: u32) { JIT64_SSE = enabled != 0; }
+
+#[no_mangle]
+pub unsafe fn jit64_set_partial_blocks(enabled: u32) { JIT64_PARTIAL_BLOCKS = enabled != 0; }
+
+#[no_mangle]
+pub unsafe fn jit64_set_entry_cache(enabled: u32) { JIT64_ENTRY_CACHE = enabled != 0; }
+
+#[no_mangle]
+pub unsafe fn jit64_set_max_blocks(blocks: u32) { JIT64_MAX_BLOCKS = blocks as usize; }
+
+#[no_mangle]
+pub unsafe fn jit64_set_direct_code_read(enabled: u32) { JIT64_DIRECT_CODE_READ = enabled != 0; }
+
+#[no_mangle]
+pub unsafe fn jit64_set_hot_cache(enabled: u32) { JIT64_HOT_CACHE = enabled != 0; }
+
+#[no_mangle]
+pub unsafe fn jit64_set_chain_budget(n: u32) {
+    JIT64_CHAIN_BUDGET = n;
+    JIT64_CHAIN_CODEGEN = n > 0;
+    // Blocks compiled without the hand-off call cannot chain, so drop them.
+    clear_cache();
+}
+
+#[no_mangle]
+pub unsafe fn jit64_set_block_prologue(enabled: u32) {
+    JIT64_BLOCK_PROLOGUE = enabled != 0;
+    clear_cache();
+}
+
+#[no_mangle]
+pub unsafe fn jit64_set_superblocks(enabled: u32) {
+    JIT64_SUPERBLOCKS = enabled != 0;
+    clear_cache();
+}
+
+#[no_mangle]
+pub unsafe fn jit64_set_block_limit(n: u32) {
+    JIT64_BLOCK_LIMIT = if n == 0 { JIT64_MAX_BLOCK_INSTRS } else { n as usize };
+    clear_cache();
+}
+
+#[no_mangle]
+pub unsafe fn jit64_set_smc_bail(enabled: u32) {
+    JIT64_SMC_BAIL = enabled != 0;
+    clear_cache();
+}
 
 #[no_mangle]
 pub unsafe fn jit64_clear_cache() { clear_cache(); }
@@ -3868,6 +4997,7 @@ pub unsafe fn jit64_translate(vaddr: u64, for_writing: u32) -> u64 {
 #[no_mangle]
 pub unsafe fn jit64_mem_read(vaddr: u64, width: u32) -> u64 {
     JIT64_MEMORY_FAULT = 0;
+    JIT64_MEM_SLOW_READ += 1;
     let bytes = (width / 8) as usize;
     if bytes == 0 || bytes > 8 {
         JIT64_MEMORY_FAULT = 1;
@@ -3893,6 +5023,7 @@ pub unsafe fn jit64_mem_read(vaddr: u64, width: u32) -> u64 {
             Err(()) => { JIT64_MEMORY_FAULT = 1; return 0; },
         };
     }
+    JIT64_MEM_SLOW_CROSS += 1;
     let mut value = 0;
     for offset in 0..bytes {
         value |= (crate::cpu::memory::read8(physical[offset]) as u8 as u64) << (offset * 8);
@@ -4041,6 +5172,7 @@ pub unsafe fn jit64_adc_sbb(dst: u64, src: u64, encoded: u32) -> u64 {
 #[no_mangle]
 pub unsafe fn jit64_mem_write(vaddr: u64, value: u64, width: u32) {
     JIT64_MEMORY_FAULT = 0;
+    JIT64_MEM_SLOW_WRITE += 1;
     let bytes = (width / 8) as usize;
     if bytes == 0 || bytes > 8 {
         JIT64_MEMORY_FAULT = 1;
@@ -4074,6 +5206,7 @@ pub unsafe fn jit64_mem_write(vaddr: u64, value: u64, width: u32) {
             Err(()) => { JIT64_MEMORY_FAULT = 1; return; },
         };
     }
+    JIT64_MEM_SLOW_CROSS += 1;
     for offset in 0..bytes {
         crate::cpu::memory::write8(
             physical[offset],
@@ -4101,9 +5234,7 @@ pub unsafe fn jit64_finish_fault() {
 #[no_mangle]
 pub unsafe fn jit64_in(port: u64, width: u32) -> u64 {
     let port = port as i32;
-    // `width` is in bits, as everywhere else here (the decode uses
-    // operand_width). Matching on bytes silently turned `in al, dx` into a
-    // 32-bit read.
+    // `width` is in bits; treating it as bytes made `in al, dx` read 32 bits.
     if !crate::cpu::cpu::test_privileges_for_io(port, (width / 8) as i32) {
         return 0;
     }

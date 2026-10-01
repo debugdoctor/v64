@@ -142,11 +142,27 @@ static mut FETCH_PAGE: u64 = u64::MAX;
 static mut FETCH_PHYS: u32 = 0;
 // Runtime A/B switch (tests/benchmarks).
 pub static mut INTERP64_FETCH_CACHE: bool = true;
-// Same-page accesses translate once (P2). Runtime A/B switch.
+// Same-page accesses translate once. Runtime A/B switch.
 pub static mut INTERP64_MEM_SINGLE: bool = true;
 
 #[no_mangle]
 pub unsafe fn interp64_set_fetch_cache(enabled: u32) { INTERP64_FETCH_CACHE = enabled != 0; }
+
+// Diagnostic: interpreted opcode histogram (what still falls back to interp).
+#[no_mangle]
+pub static mut INTERP64_OPCODE: [u32; 256] = [0; 256];
+#[no_mangle]
+pub static mut INTERP64_OPCODE_0F: [u32; 256] = [0; 256];
+
+#[no_mangle]
+pub unsafe fn interp64_opcode_count(op: u32) -> u32 {
+    if op < 256 { INTERP64_OPCODE[op as usize] } else { 0 }
+}
+
+#[no_mangle]
+pub unsafe fn interp64_opcode0f_count(op: u32) -> u32 {
+    if op < 256 { INTERP64_OPCODE_0F[op as usize] } else { 0 }
+}
 
 #[no_mangle]
 pub unsafe fn interp64_set_mem_single(enabled: u32) { INTERP64_MEM_SINGLE = enabled != 0; }
@@ -750,10 +766,9 @@ unsafe fn sse_read(operand: Operand) -> OrPageFault<reg128> {
 // Returns true if `opcode` was an SSE instruction.
 // SSE2 packed integer, lane-wise (0F D0-0xFF and part of 0x60-0x7F).
 // cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/paddb
-unsafe fn sse_int(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
-    let (modrm, operand) = decode_operand(pfx)?;
-    let src = sse_read(operand)?;
-    let mut dst = xmm_get(modrm.reg);
+// Apply integer SSE2 op to `dst`/`src`; None if not an integer SSE op. Shared
+// with the JIT so both engines agree.
+unsafe fn sse_int_apply(opcode: u8, mut dst: reg128, src: reg128) -> Option<reg128> {
     match opcode {
         // 8-bit lanes
         0xFC => for i in 0..16 { dst.u8[i] = dst.u8[i].wrapping_add(src.u8[i]); },
@@ -845,9 +860,45 @@ unsafe fn sse_int(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
             dst.u64[1] = 0;
         },
 
-        _ => crate::cpu::cpu::trigger_ud(),
+        _ => return None,
     }
-    xmm_set(modrm.reg, dst);
+    Some(dst)
+}
+
+// JIT helper: apply an integer SSE op to xmm[dst]; source as two u64 halves.
+#[no_mangle]
+pub unsafe fn jit64_sse_int(op: i32, src_lo: u64, src_hi: u64, dst: i32) -> i32 {
+    let src = reg128 { u64: [src_lo, src_hi] };
+    let current = xmm_get(dst as u8);
+    match sse_int_apply(op as u8, current, src) {
+        Some(result) => xmm_set(dst as u8, result),
+        None => crate::cpu::cpu::trigger_ud(),
+    }
+    0
+}
+
+// JIT helper: packed shift-by-imm on xmm[dst]; `encoded` = opcode|group|imm8.
+#[no_mangle]
+pub unsafe fn jit64_sse_shift_imm(encoded: i32, lo: u64, hi: u64, dst: i32) -> i32 {
+    let op = (encoded & 0xFF) as u8;
+    let group = (encoded >> 8 & 0xFF) as u8;
+    let count = (encoded >> 16 & 0xFF) as u64;
+    let value = reg128 { u64: [lo, hi] };
+    match sse_shift_imm_apply(op, group, count, value) {
+        Some(result) => xmm_set(dst as u8, result),
+        None => crate::cpu::cpu::trigger_ud(),
+    }
+    0
+}
+
+unsafe fn sse_int(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let dst = xmm_get(modrm.reg);
+    match sse_int_apply(opcode, dst, src) {
+        Some(result) => xmm_set(modrm.reg, result),
+        None => crate::cpu::cpu::trigger_ud(),
+    }
     Ok(())
 }
 
@@ -877,11 +928,14 @@ fn sse_shift(value: u64, count: u64, width: u32, kind: u8) -> u64 {
 
 // PSLLW/D/Q, PSRLW/D/Q, PSRAW/D and PSRLDQ/PSLLDQ with an immediate count
 // (0F 71/72/73). cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/psllw
-unsafe fn sse_shift_imm(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
-    let (modrm, operand) = decode_operand(pfx)?;
-    let count = fetch8()? as u64;
-    let group = modrm.reg & 7;
-    let mut dst = sse_read(operand)?;
+// Apply packed shift-by-imm (0F 71/72/73); None if group unsupported. Shared
+// with the JIT.
+unsafe fn sse_shift_imm_apply(
+    opcode: u8,
+    group: u8,
+    count: u64,
+    mut dst: reg128,
+) -> Option<reg128> {
     let (width, kind) = match (opcode, group) {
         (0x71, 2) => (16, 0), // PSRLW
         (0x71, 4) => (16, 1), // PSRAW
@@ -907,12 +961,9 @@ unsafe fn sse_shift_imm(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
             };
             dst.u64[0] = r as u64;
             dst.u64[1] = (r >> 64) as u64;
-            return sse_shift_imm_store(operand, dst);
+            return Some(dst);
         },
-        _ => {
-            crate::cpu::cpu::trigger_ud();
-            return Ok(());
-        },
+        _ => return None,
     };
     let lanes = 128 / width;
     for i in 0..lanes {
@@ -923,7 +974,22 @@ unsafe fn sse_shift_imm(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
         let index = (shift / 64) as usize;
         dst.u64[index] = dst.u64[index] & !(mask << (shift % 64)) | (result << (shift % 64));
     }
-    sse_shift_imm_store(operand, dst)
+    Some(dst)
+}
+
+unsafe fn sse_shift_imm(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let count = fetch8()? as u64;
+    let group = modrm.reg & 7;
+    let dst = sse_read(operand)?;
+    match sse_shift_imm_apply(opcode, group, count, dst) {
+        Some(result) => sse_shift_imm_store(operand, result),
+        None =>
+        {
+            crate::cpu::cpu::trigger_ud();
+            Ok(())
+        },
+    }
 }
 
 unsafe fn sse_shift_imm_store(operand: Operand, value: reg128) -> OrPageFault<()> {
@@ -1487,17 +1553,15 @@ unsafe fn sse_shuf(pfx: &Prefixes) -> OrPageFault<()> {
 
 // PSHUFD/PSHUFHW/PSHUFLW (0F 70).
 // cf. Intel SDM Vol. 2: https://www.felixcloutier.com/x86/pshufd
-unsafe fn sse_pshuf(pfx: &Prefixes) -> OrPageFault<()> {
-    let (modrm, operand) = decode_operand(pfx)?;
-    let src = sse_read(operand)?;
-    let control = fetch8()? as u8;
+// variant: 0=PSHUFD, 1=PSHUFHW, 2=PSHUFLW. Shared with the JIT.
+unsafe fn sse_pshuf_apply(variant: u8, control: u8, src: reg128) -> reg128 {
     let mut result = src;
-    if pfx.f3 {
+    if variant == 1 {
         for i in 0..4 {
             result.u16[i] = src.u16[((control >> (i * 2)) & 3) as usize];
         }
     }
-    else if pfx.f2 {
+    else if variant == 2 {
         for i in 0..4 {
             result.u16[i + 4] = src.u16[4 + ((control >> (i * 2)) & 3) as usize];
         }
@@ -1507,8 +1571,24 @@ unsafe fn sse_pshuf(pfx: &Prefixes) -> OrPageFault<()> {
             result.u32[i] = src.u32[((control >> (i * 2)) & 3) as usize];
         }
     }
-    xmm_set(modrm.reg, result);
+    result
+}
+
+unsafe fn sse_pshuf(pfx: &Prefixes) -> OrPageFault<()> {
+    let (modrm, operand) = decode_operand(pfx)?;
+    let src = sse_read(operand)?;
+    let control = fetch8()? as u8;
+    let variant = if pfx.f3 { 1 } else if pfx.f2 { 2 } else { 0 };
+    xmm_set(modrm.reg, sse_pshuf_apply(variant, control, src));
     Ok(())
+}
+
+// JIT helper: PSHUFD xmm[dst], xmm/m128, imm8 (66 0F 70).
+#[no_mangle]
+pub unsafe fn jit64_sse_pshuf(control: i32, lo: u64, hi: u64, dst: i32) -> i32 {
+    let src = reg128 { u64: [lo, hi] };
+    xmm_set(dst as u8, sse_pshuf_apply(0, control as u8, src));
+    0
 }
 
 unsafe fn run_sse(opcode: u8, pfx: &Prefixes) -> OrPageFault<bool> {
@@ -2470,7 +2550,13 @@ unsafe fn group2(opcode: u8, pfx: &Prefixes, operand_size: OpSize) -> OrPageFaul
         },
     };
 
-    set_logic_flags(result, size);
+    // Rotates (groups 0-3) leave SF/ZF/PF; shifts (4-7) also set them.
+    if modrm.reg & 7 >= 4 {
+        set_logic_flags(result, size);
+    }
+    else {
+        *flags_changed = 0;
+    }
     *flags &= !(FLAG_CF | FLAG_OF) as i32;
     if cf {
         *flags |= FLAG_CF as i32;
@@ -3085,6 +3171,7 @@ pub unsafe fn boot64(cr3: u32, entry: u64, boot_params: u64) {
 
 unsafe fn run_one_inner() -> OrPageFault<()> {
     let (pfx, opcode) = decode_prefixes()?;
+    INTERP64_OPCODE[opcode as usize] = INTERP64_OPCODE[opcode as usize].wrapping_add(1);
 
     if opcode == 0x0F {
         return run_0f(&pfx);
@@ -3827,6 +3914,7 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
 
 unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
     let opcode = fetch8()?;
+    INTERP64_OPCODE_0F[opcode as usize] = INTERP64_OPCODE_0F[opcode as usize].wrapping_add(1);
     let size = pfx.operand_size();
 
     if run_sse(opcode, pfx)? {

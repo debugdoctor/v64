@@ -44,6 +44,9 @@ emulator.add_listener("emulator-loaded", () => {
         jit64_clear_exception_flag: ex.jit64_clear_exception_flag,
         jit64_hlt: () => view.setUint8(IN_HLT, 1),
     } });
+    // This test calls the block directly, so do the entry setup here.
+    ex.jit64_sync_flags();
+    ex.jit64_clear_exception_flag();
     instance.exports.f(0);
 
     // mov rax,0; cmp rax,1 (CF=1); inc rax preserves CF; jc +2 -> target 21

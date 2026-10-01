@@ -126,6 +126,41 @@ emulator.add_listener("emulator-loaded", () => {
         assert.ok(cpu.flags[0] & 1 << 6, "ZF set");
     }
 
+    // Test 5b: rotates only affect CF/OF; SF/ZF/PF are preserved.
+    {
+        load([
+            0x31, 0xC0, // xor eax, eax  -> ZF=1, PF=1
+            0xB0, 0x01, // mov al, 1
+            0xD0, 0xC8, // ror al, 1     -> al=0x80, CF=1
+            0xF4,
+        ], 3);
+        assert.equal(reg64(0) & 0xFFn, 0x80n, "al after ror");
+        assert.ok(cpu.flags[0] & 1 << 6, "ZF preserved by ror");
+        assert.ok(cpu.flags[0] & 1 << 2, "PF preserved by ror");
+        assert.ok(cpu.flags[0] & 1, "CF set by ror");
+    }
+    {
+        load([
+            0x31, 0xC0, // xor eax, eax
+            0xB0, 0x80, // mov al, 0x80
+            0xD0, 0xC0, // rol al, 1  -> al=1, CF=1
+            0xF4,
+        ], 3);
+        assert.equal(reg64(0) & 0xFFn, 1n, "al after rol");
+        assert.ok(cpu.flags[0] & 1 << 6, "ZF preserved by rol");
+        assert.ok(cpu.flags[0] & 1, "CF set by rol");
+    }
+    {
+        load([
+            0x31, 0xC0, // xor eax, eax
+            0xB0, 0x01, // mov al, 1
+            0xD0, 0xE8, // shr al, 1  -> al=0, ZF set
+            0xF4,
+        ], 3);
+        assert.equal(reg64(0) & 0xFFn, 0n, "al after shr");
+        assert.ok(cpu.flags[0] & 1 << 6, "ZF set by shr");
+    }
+
     // Test 6: sub + cmp + je (taken)
     {
         load([
