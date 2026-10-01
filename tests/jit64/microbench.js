@@ -225,6 +225,7 @@ emulator.add_listener("emulator-loaded", () => {
     if(process.env.INLINE_WRITE === "0") ex.jit64_set_inline_write(0);
     if(process.env.INTERP_CACHE === "0") ex.interp64_set_fetch_cache(0);
     if(process.env.INTERP_MEM_SINGLE === "0") ex.interp64_set_mem_single(0);
+    if(process.env.INTERP_BATCH === "0") ex.interp64_set_batch(0);
     if(process.env.PARTIAL_BLOCKS === "0") ex.jit64_set_partial_blocks(0);
     if(process.env.ENTRY_CACHE === "0") ex.jit64_set_entry_cache(0);
     if(process.env.HOT_CACHE === "0") ex.jit64_set_hot_cache(0);

@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
+use crate::hash::{FastMap, FastSet};
 use std::iter::FromIterator;
 use std::mem::{self, MaybeUninit};
 use std::ops::{Deref, DerefMut};
@@ -121,26 +122,26 @@ struct PageInfo {
 }
 
 enum CompilingPageState {
-    Compiling { pages: HashMap<Page, PageInfo> },
+    Compiling { pages: FastMap<Page, PageInfo> },
     CompilingWritten,
 }
 
 struct JitState {
     wasm_builder: WasmBuilder,
 
-    // as an alternative to HashSet, we could use a bitmap of 4096 bits here
+    // as an alternative to FastSet, we could use a bitmap of 4096 bits here
     // (faster, but uses much more memory)
     // or a compressed bitmap (likely faster)
-    // or HashSet<u32> rather than nested
-    entry_points: HashMap<Page, (u32, HashSet<u16>)>,
-    pages: HashMap<Page, PageInfo>,
+    // or FastSet<u32> rather than nested
+    entry_points: FastMap<Page, (u32, FastSet<u16>)>,
+    pages: FastMap<Page, PageInfo>,
     wasm_table_index_free_list: Vec<WasmTableIndex>,
     compiling: Option<(WasmTableIndex, CompilingPageState)>,
     // table indices held by the long-mode JIT (jit64); it uses the same table
     // but its blocks are not part of the 32-bit page cache
-    jit64_table_indices: HashSet<WasmTableIndex>,
+    jit64_table_indices: FastSet<WasmTableIndex>,
     #[cfg(debug_assertions)]
-    wasm_table_index_to_page: HashMap<WasmTableIndex, HashSet<Page>>,
+    wasm_table_index_to_page: FastMap<WasmTableIndex, FastSet<Page>>,
 }
 
 fn check_jit_state_invariants(ctx: &mut JitState) {
@@ -155,10 +156,10 @@ fn check_jit_state_invariants(ctx: &mut JitState) {
         _ => {},
     }
 
-    let free: HashSet<WasmTableIndex> =
-        HashSet::from_iter(ctx.wasm_table_index_free_list.iter().copied());
-    let used = HashSet::from_iter(ctx.pages.values().map(|info| info.wasm_table_index));
-    let compiling = HashSet::from_iter(ctx.compiling.as_ref().map(|&(index, _)| index));
+    let free: FastSet<WasmTableIndex> =
+        FastSet::from_iter(ctx.wasm_table_index_free_list.iter().copied());
+    let used = FastSet::from_iter(ctx.pages.values().map(|info| info.wasm_table_index));
+    let compiling = FastSet::from_iter(ctx.compiling.as_ref().map(|&(index, _)| index));
     dbg_assert!(free.intersection(&used).next().is_none());
     dbg_assert!(used.intersection(&compiling).next().is_none());
     dbg_assert!(
@@ -168,7 +169,7 @@ fn check_jit_state_invariants(ctx: &mut JitState) {
     dbg_assert!(free.intersection(&ctx.jit64_table_indices).next().is_none());
     dbg_assert!(used.intersection(&ctx.jit64_table_indices).next().is_none());
 
-    let hidden: HashSet<WasmTableIndex> = ctx
+    let hidden: FastSet<WasmTableIndex> = ctx
         .pages
         .values()
         .flat_map(|info| info.hidden_wasm_table_indices.iter().copied())
@@ -226,15 +227,15 @@ impl JitState {
         JitState {
             wasm_builder: WasmBuilder::new(),
 
-            entry_points: HashMap::new(),
-            pages: HashMap::new(),
+            entry_points: FastMap::default(),
+            pages: FastMap::default(),
 
             wasm_table_index_free_list: Vec::from_iter(wasm_table_indices),
             compiling: None,
-            jit64_table_indices: HashSet::new(),
+            jit64_table_indices: FastSet::default(),
 
             #[cfg(debug_assertions)]
-            wasm_table_index_to_page: HashMap::new(),
+            wasm_table_index_to_page: FastMap::default(),
         }
     }
 }
@@ -437,16 +438,16 @@ pub fn jit_find_cache_entry_in_page(
 
 fn jit_find_basic_blocks(
     ctx: &mut JitState,
-    entry_points: HashSet<i32>,
+    entry_points: FastSet<i32>,
     cpu: CpuContext,
 ) -> Vec<BasicBlock> {
     fn follow_jump(
         virt_target: i32,
         ctx: &mut JitState,
-        pages: &mut HashSet<Page>,
-        page_blacklist: &mut HashSet<Page>,
+        pages: &mut FastSet<Page>,
+        page_blacklist: &mut FastSet<Page>,
         max_pages: u32,
-        marked_as_entry: &mut HashSet<i32>,
+        marked_as_entry: &mut FastSet<i32>,
         to_visit_stack: &mut Vec<i32>,
     ) -> Option<u32> {
         if is_near_end_of_page(virt_target as u32) {
@@ -473,9 +474,9 @@ fn jit_find_basic_blocks(
             if let Some((hotness, entry_points)) = ctx.entry_points.get_mut(&phys_page) {
                 let existing_entry_points = match ctx.pages.get(&phys_page) {
                     Some(PageInfo { entry_points, .. }) => {
-                        HashSet::from_iter(entry_points.iter().map(|x| x.0))
+                        FastSet::from_iter(entry_points.iter().map(|x| x.0))
                     },
-                    None => HashSet::new(),
+                    None => FastSet::default(),
                 };
 
                 if entry_points
@@ -516,10 +517,10 @@ fn jit_find_basic_blocks(
     }
 
     let mut to_visit_stack: Vec<i32> = Vec::new();
-    let mut marked_as_entry: HashSet<i32> = HashSet::new();
+    let mut marked_as_entry: FastSet<i32> = FastSet::default();
     let mut basic_blocks: BTreeMap<u32, BasicBlock> = BTreeMap::new();
-    let mut pages: HashSet<Page> = HashSet::new();
-    let mut page_blacklist = HashSet::new();
+    let mut pages: FastSet<Page> = FastSet::default();
+    let mut page_blacklist = FastSet::default();
 
     // 16-bit doesn't work correctly, most likely due to instruction pointer wrap-around
     let max_pages = if cpu.state_flags.is_32() { unsafe { MAX_PAGES } } else { 1 };
@@ -777,7 +778,7 @@ fn jit_find_basic_blocks(
     }
 
     // delete edges pointing to blocks that were dropped (currently only due to STI near the end of a page)
-    let known_addresses: HashSet<u32> = basic_blocks.keys().copied().collect();
+    let known_addresses: FastSet<u32> = basic_blocks.keys().copied().collect();
     for block in basic_blocks.values_mut() {
         match &mut block.ty {
             BasicBlockType::Normal {
@@ -862,8 +863,8 @@ fn jit_analyze_and_generate(
     };
 
     let existing_entry_points = match ctx.pages.get(&page) {
-        Some(PageInfo { entry_points, .. }) => HashSet::from_iter(entry_points.iter().map(|x| x.0)),
-        None => HashSet::new(),
+        Some(PageInfo { entry_points, .. }) => FastSet::from_iter(entry_points.iter().map(|x| x.0)),
+        None => FastSet::default(),
     };
 
     if entry_points
@@ -898,13 +899,13 @@ fn jit_analyze_and_generate(
         cpu::translate_address_read_no_side_effects(virt_entry_point).unwrap() == phys_entry_point
     );
     let virt_page = Page::page_of(virt_entry_point as u32);
-    let entry_points: HashSet<i32> = entry_points
+    let entry_points: FastSet<i32> = entry_points
         .iter()
         .map(|e| virt_page.to_address() as i32 | *e as i32)
         .collect();
     let basic_blocks = jit_find_basic_blocks(ctx, entry_points, cpu.clone());
 
-    let mut pages = HashSet::new();
+    let mut pages = FastSet::default();
 
     for b in basic_blocks.iter() {
         // Remove this assertion once page-crossing jit is enabled
@@ -1020,7 +1021,7 @@ fn jit_analyze_and_generate(
     dbg_assert!(!pages.is_empty());
     dbg_assert!(pages.len() <= unsafe { MAX_PAGES } as usize);
 
-    let basic_block_by_addr: HashMap<u32, BasicBlock> =
+    let basic_block_by_addr: FastMap<u32, BasicBlock> =
         basic_blocks.into_iter().map(|b| (b.addr, b)).collect();
 
     let entries = jit_generate_module(
@@ -1033,7 +1034,7 @@ fn jit_analyze_and_generate(
     );
     dbg_assert!(!entries.is_empty());
 
-    let mut page_info = HashMap::new();
+    let mut page_info = FastMap::default();
     for &p in &pages {
         page_info.entry(p).or_insert_with(|| PageInfo {
             wasm_table_index,
@@ -1043,7 +1044,7 @@ fn jit_analyze_and_generate(
         });
         ctx.entry_points
             .entry(p)
-            .or_insert_with(|| (0, HashSet::new()));
+            .or_insert_with(|| (0, FastSet::default()));
     }
     for &(addr, state) in &entries {
         let code = page_info.get_mut(&Page::page_of(addr)).unwrap();
@@ -1137,7 +1138,7 @@ pub fn codegen_finalize_finished(
             .insert(wasm_table_index, pages.keys().copied().collect());
     }
 
-    let mut check_for_unused_wasm_table_index = HashSet::new();
+    let mut check_for_unused_wasm_table_index = FastSet::default();
 
     for (page, mut info) in pages {
         if let Some(old_entry) = ctx.pages.remove(&page) {
@@ -1218,7 +1219,7 @@ pub fn set_tlb_code(
 
 fn jit_generate_module(
     structure: Vec<WasmStructure>,
-    basic_blocks: &HashMap<u32, BasicBlock>,
+    basic_blocks: &FastMap<u32, BasicBlock>,
     mut cpu: CpuContext,
     builder: &mut WasmBuilder,
     wasm_table_index: WasmTableIndex,
@@ -1296,7 +1297,7 @@ fn jit_generate_module(
         result
     };
 
-    let mut index_for_addr = HashMap::new();
+    let mut index_for_addr = FastMap::default();
     for (i, &addr) in entry_blocks.iter().enumerate() {
         dbg_assert!(i < 0x10000);
         index_for_addr.insert(addr, i as u16);
@@ -1309,19 +1310,19 @@ fn jit_generate_module(
         }
     }
 
-    let mut label_for_addr: HashMap<u32, (Label, Option<u16>)> = HashMap::new();
+    let mut label_for_addr: FastMap<u32, (Label, Option<u16>)> = FastMap::default();
 
     enum Work {
         WasmStructure(WasmStructure),
         BlockEnd {
             label: Label,
             targets: Vec<u32>,
-            olds: HashMap<u32, (Label, Option<u16>)>,
+            olds: FastMap<u32, (Label, Option<u16>)>,
         },
         LoopEnd {
             label: Label,
             entries: Vec<u32>,
-            olds: HashMap<u32, (Label, Option<u16>)>,
+            olds: FastMap<u32, (Label, Option<u16>)>,
         },
     }
     let mut work: VecDeque<Work> = structure
@@ -1884,9 +1885,9 @@ fn jit_generate_module(
                 else {
                     // generate a if target == block.addr then br block.label ...
                     codegen::gen_profiler_stat_increment(ctx.builder, stat::DISPATCHER_SMALL);
-                    let nexts: HashSet<u32> = next_addr
+                    let nexts: FastSet<u32> = next_addr
                         .as_ref()
-                        .map_or(HashSet::new(), |nexts| nexts.iter().copied().collect());
+                        .map_or(FastSet::default(), |nexts| nexts.iter().copied().collect());
                     for &addr in &entries {
                         if nexts.contains(&addr) {
                             continue;
@@ -1928,7 +1929,7 @@ fn jit_generate_module(
                     }
                 }
 
-                let mut olds = HashMap::new();
+                let mut olds = FastMap::default();
                 for &target in entries.iter() {
                     let index = if entries.len() == 1 {
                         None
@@ -1972,7 +1973,7 @@ fn jit_generate_module(
 
                 let targets = next_addr.clone().unwrap();
                 let label = ctx.builder.block_void();
-                let mut olds = HashMap::new();
+                let mut olds = FastMap::default();
                 for &target in targets.iter() {
                     let index = if targets.len() == 1 {
                         None
@@ -2177,7 +2178,7 @@ pub fn jit_increase_hotness_and_maybe_compile(
     let (hotness, entry_points) = ctx.entry_points.entry(page).or_insert_with(|| {
         cpu::tlb_set_has_code(page, true);
         profiler::stat_increment(stat::RUN_INTERPRETED_NEW_PAGE);
-        (0, HashSet::new())
+        (0, FastSet::default())
     });
 
     if !is_near_end_of_page(phys_address) {
@@ -2387,7 +2388,13 @@ pub fn jit_dirty_cache(start_addr: u32, end_addr: u32) {
 
 #[no_mangle]
 pub fn jit_dirty_page(page: Page) {
-    jit_dirty_page_ctx(&mut get_jit_state(), page);
+    {
+        let mut ctx = get_jit_state();
+        // Most writes land on a page with no 32-bit JIT code: skip the map.
+        if !ctx.pages.is_empty() || !ctx.entry_points.is_empty() || ctx.compiling.is_some() {
+            jit_dirty_page_ctx(&mut ctx, page);
+        }
+    }
     unsafe { crate::jit64::invalidate_physical_page(page.to_u32()); }
 }
 
@@ -2398,17 +2405,21 @@ pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
     let start_page = Page::page_of(start_addr);
     let end_page = Page::page_of(end_addr - 1);
 
-    let mut ctx = get_jit_state();
-    jit_dirty_page_ctx(&mut ctx, start_page);
+    {
+        let mut ctx = get_jit_state();
+        // Most writes land on a page with no 32-bit JIT code: skip the map.
+        if !ctx.pages.is_empty() || !ctx.entry_points.is_empty() || ctx.compiling.is_some() {
+            jit_dirty_page_ctx(&mut ctx, start_page);
 
-    // Note: This can't happen when paging is enabled, as writes across
-    //       boundaries are split up on two pages
-    if start_page != end_page {
-        dbg_assert!(start_page.to_u32() + 1 == end_page.to_u32());
-        jit_dirty_page_ctx(&mut ctx, end_page);
+            // Note: This can't happen when paging is enabled, as writes across
+            //       boundaries are split up on two pages
+            if start_page != end_page {
+                dbg_assert!(start_page.to_u32() + 1 == end_page.to_u32());
+                jit_dirty_page_ctx(&mut ctx, end_page);
+            }
+        }
     }
     // release the jit state lock: jit64 invalidation takes it again
-    drop(ctx);
     unsafe {
         crate::jit64::invalidate_physical_page(start_page.to_u32());
         if start_page != end_page {
@@ -2421,7 +2432,7 @@ pub fn jit_dirty_cache_small(start_addr: u32, end_addr: u32) {
 pub fn jit_clear_cache_js() { jit_clear_cache(&mut get_jit_state()) }
 
 fn jit_clear_cache(ctx: &mut JitState) {
-    let mut pages_with_code = HashSet::new();
+    let mut pages_with_code = FastSet::default();
 
     for &p in ctx.entry_points.keys() {
         pages_with_code.insert(p);

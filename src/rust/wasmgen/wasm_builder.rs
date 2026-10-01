@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::hash::FastMap;
 use std::mem::transmute;
 
 use crate::leb::{
@@ -87,7 +87,7 @@ pub struct WasmBuilder {
     // label for referencing block/if/loop constructs directly via branch instructions
     next_label: Label,
     label_stack: Vec<Label>,
-    label_to_depth: HashMap<Label, usize>,
+    label_to_depth: FastMap<Label, usize>,
 
     free_locals_i32: Vec<WasmLocal>,
     free_locals_i64: Vec<WasmLocalI64>,
@@ -141,7 +141,7 @@ impl WasmBuilder {
 
             initial_static_size: 0,
 
-            label_to_depth: HashMap::new(),
+            label_to_depth: FastMap::default(),
             label_stack: Vec::new(),
             next_label: Label::ZERO,
 

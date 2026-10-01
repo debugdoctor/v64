@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use crate::hash::FastSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
 
@@ -8,7 +8,7 @@ use crate::profiler;
 const ENTRY_NODE_ID: u32 = 0xffff_ffff;
 
 // this code works fine with either BTree or Hash Maps/Sets
-// - HashMap / HashSet: slightly faster
+// - FastMap / FastSet: slightly faster
 // - BTreeMap / BTreeSet: stable iteration order (graphs don't change between rust versions, required for expect tests)
 type Set = BTreeSet<u32>;
 type Graph = BTreeMap<u32, Set>;
@@ -112,8 +112,8 @@ impl WasmStructure {
         }
     }
 
-    fn branches(&self, edges: &Graph) -> HashSet<u32> {
-        fn handle(block: &WasmStructure, edges: &Graph, result: &mut HashSet<u32>) {
+    fn branches(&self, edges: &Graph) -> FastSet<u32> {
+        fn handle(block: &WasmStructure, edges: &Graph, result: &mut FastSet<u32>) {
             match block {
                 WasmStructure::BasicBlock(addr) => result.extend(edges.get(&addr).unwrap()),
                 WasmStructure::Dispatcher(entries) => result.extend(entries),
@@ -125,7 +125,7 @@ impl WasmStructure {
             }
         }
 
-        let mut result = HashSet::new();
+        let mut result = FastSet::default();
         handle(self, edges, &mut result);
         result
     }
@@ -188,7 +188,7 @@ fn scc(edges: &Graph, rev_edges: &Graph) -> Vec<Vec<u32>> {
         node: u32,
         edges: &Graph,
         rev_edges: &Graph,
-        visited: &mut HashSet<u32>,
+        visited: &mut FastSet<u32>,
         l: &mut Vec<u32>,
     ) {
         if visited.contains(&node) {
@@ -202,7 +202,7 @@ fn scc(edges: &Graph, rev_edges: &Graph) -> Vec<Vec<u32>> {
     }
 
     let mut l = Vec::new();
-    let mut visited = HashSet::new();
+    let mut visited = FastSet::default();
     for &node in edges.keys() {
         visit(node, edges, rev_edges, &mut visited, &mut l);
     }
@@ -211,7 +211,7 @@ fn scc(edges: &Graph, rev_edges: &Graph) -> Vec<Vec<u32>> {
         node: u32,
         edges: &Graph,
         rev_edges: &Graph,
-        assigned: &mut HashSet<u32>,
+        assigned: &mut FastSet<u32>,
         group: &mut Vec<u32>,
     ) {
         if assigned.contains(&node) {
@@ -225,7 +225,7 @@ fn scc(edges: &Graph, rev_edges: &Graph) -> Vec<Vec<u32>> {
             }
         }
     }
-    let mut assigned = HashSet::new();
+    let mut assigned = FastSet::default();
     let mut assignment = Vec::new();
     for &node in l.iter().rev() {
         let mut group = Vec::new();
@@ -345,7 +345,7 @@ pub fn loopify(nodes: &Graph) -> Vec<WasmStructure> {
 }
 
 pub fn blockify(blocks: &mut Vec<WasmStructure>, edges: &Graph) {
-    let mut cached_branches: Vec<HashSet<u32>> = Vec::new();
+    let mut cached_branches: Vec<FastSet<u32>> = Vec::new();
     for i in 0..blocks.len() {
         cached_branches.push(blocks[i].branches(edges));
     }
@@ -407,8 +407,8 @@ pub fn blockify(blocks: &mut Vec<WasmStructure>, edges: &Graph) {
         }
 
         {
-            let replacement = HashSet::new();
-            let children: Vec<HashSet<u32>> = cached_branches
+            let replacement = FastSet::default();
+            let children: Vec<FastSet<u32>> = cached_branches
                 .splice(source..i, iter::once(replacement))
                 .collect();
             dbg_assert!(cached_branches[source].len() == 0);

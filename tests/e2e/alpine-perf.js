@@ -74,6 +74,7 @@ emulator.add_listener("emulator-loaded", async () =>
     if(process.env.INTERP) ex.jit64_set_enabled(0);
     if(process.env.INTERP_CACHE === "0") ex.interp64_set_fetch_cache(0);
     if(process.env.INTERP_MEM_SINGLE === "0") ex.interp64_set_mem_single(0);
+    if(process.env.INTERP_BATCH === "0") ex.interp64_set_batch(0);
     if(process.env.BLOCK_PROLOGUE !== undefined) ex.jit64_set_block_prologue(parseInt(process.env.BLOCK_PROLOGUE, 10));
     if(process.env.EXIT_STATS === "1") ex.jit64_set_exit_stats(1);
     if(process.env.SUPERBLOCKS !== undefined) ex.jit64_set_superblocks(parseInt(process.env.SUPERBLOCKS, 10));

@@ -30,6 +30,7 @@ The following components are distributed with the repository under their own lic
 - [ktock/qemu-wasm](https://github.com/ktock/qemu-wasm)
 - [xarantolus/ax](https://github.com/xarantolus/ax) (MIT)
 - [r3bb1t/rusty_box](https://github.com/r3bb1t/rusty_box) (LGPL-2.1)
+- [rustc-hash](https://github.com/rust-lang/rustc-hash) (Apache-2.0 OR MIT) — the in-tree `FastHasher` follows FxHash's design (multiplier, add-and-multiply, rotating finalizer, word-at-a-time byte hashing)
 - QEMU
 
 Used as references for principles and architecture only; no code was copied.

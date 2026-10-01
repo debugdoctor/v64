@@ -23,7 +23,7 @@ use crate::profiler::stat;
 use crate::softfloat;
 use crate::state_flags::CachedStateFlags;
 
-use std::collections::HashSet;
+use crate::hash::FastSet;
 use std::ptr;
 
 mod wasm {
@@ -2785,7 +2785,7 @@ pub fn tlb_set_has_code(physical_page: Page, has_code: bool) {
 
     check_tlb_invariants();
 }
-pub fn tlb_set_has_code_multiple(physical_pages: &HashSet<Page>, has_code: bool) {
+pub fn tlb_set_has_code_multiple(physical_pages: &FastSet<Page>, has_code: bool) {
     let physical_pages: Vec<Page> = physical_pages.into_iter().copied().collect();
     for i in 0..unsafe { valid_tlb_entries_count } {
         let page = unsafe { valid_tlb_entries[i as usize] };
@@ -3428,18 +3428,9 @@ pub unsafe fn cycle_internal() {
             crate::cpu::interp64::run_one();
             crate::jit64::note_interpreted(current_rip);
             *instruction_counter = (*instruction_counter).wrapping_add(1);
-            if INTERRUPT_SHADOW != 0 {
-                INTERRUPT_SHADOW -= 1;
-                if INTERRUPT_SHADOW == 0 {
-                    handle_irqs();
-                }
-            }
-            else if !interrupts_were_enabled && *flags & FLAG_INTERRUPT != 0 {
-                // POPFQ/IRETQ have no STI shadow. Deliver already-pending IRQs
-                // at this boundary, before the next timer batch can raise a
-                // higher-priority IRQ again and starve the pending request.
-                handle_irqs();
-            }
+            // POPFQ/IRETQ have no STI shadow: deliver already-pending IRQs at
+            // this boundary before the next timer batch can starve them.
+            let _ = interp_step_irqs(interrupts_were_enabled);
         }
         return;
     }
@@ -3743,6 +3734,16 @@ pub unsafe fn run_exact_instructions(n: u32) {
 
 pub unsafe fn do_many_cycles_native() {
     profiler::stat_increment(stat::DO_MANY_CYCLES);
+    // Interpreter-only long mode: run a tight batch instead of one dispatch per
+    // instruction. run_exact_instructions() still steps via cycle_internal, so
+    // diagnostics that need exact instruction counts are unaffected.
+    if *long_mode
+        && crate::cpu::interp64::INTERP64_BATCH
+        && !crate::jit64::jit64_is_enabled()
+    {
+        crate::cpu::interp64::interp64_run(LOOP_COUNTER as u32);
+        return;
+    }
     let initial_instruction_counter = *instruction_counter;
     let mut dispatches = 0;
     while (*instruction_counter).wrapping_sub(initial_instruction_counter) < LOOP_COUNTER as u32
@@ -5111,6 +5112,24 @@ pub unsafe fn set_sti_shadow() { INTERRUPT_SHADOW = 2; }
 pub unsafe fn handle_irqs() {
     // Blocks check for synchronous delivery after helpers, preserving the frame.
     handle_irqs_impl();
+}
+
+// Per-instruction interrupt bookkeeping for interp64_run's batch loop. Mirrors
+// the interpreted path of cycle_internal; returns true when the batch should
+// stop because handle_irqs may have redirected execution.
+pub unsafe fn interp_step_irqs(interrupts_were_enabled: bool) -> bool {
+    if INTERRUPT_SHADOW != 0 {
+        INTERRUPT_SHADOW -= 1;
+        if INTERRUPT_SHADOW == 0 {
+            handle_irqs();
+            return true;
+        }
+    }
+    else if !interrupts_were_enabled && *flags & FLAG_INTERRUPT != 0 {
+        handle_irqs();
+        return true;
+    }
+    false
 }
 
 unsafe fn handle_irqs_impl() {

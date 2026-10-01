@@ -15,6 +15,7 @@ mod config;
 mod control_flow;
 mod cpu_context;
 mod gen;
+mod hash;
 mod jit;
 mod jit64;
 mod jit_instructions;

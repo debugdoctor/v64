@@ -144,6 +144,8 @@ static mut FETCH_PHYS: u32 = 0;
 pub static mut INTERP64_FETCH_CACHE: bool = true;
 // Same-page accesses translate once. Runtime A/B switch.
 pub static mut INTERP64_MEM_SINGLE: bool = true;
+// Interpreter-only tight batch loop (see interp64_run). Runtime A/B switch.
+pub static mut INTERP64_BATCH: bool = true;
 
 #[no_mangle]
 pub unsafe fn interp64_set_fetch_cache(enabled: u32) { INTERP64_FETCH_CACHE = enabled != 0; }
@@ -166,6 +168,9 @@ pub unsafe fn interp64_opcode0f_count(op: u32) -> u32 {
 
 #[no_mangle]
 pub unsafe fn interp64_set_mem_single(enabled: u32) { INTERP64_MEM_SINGLE = enabled != 0; }
+
+#[no_mangle]
+pub unsafe fn interp64_set_batch(enabled: u32) { INTERP64_BATCH = enabled != 0; }
 
 #[inline(always)]
 unsafe fn fetch_phys(address: u64) -> OrPageFault<u32> {
@@ -513,10 +518,7 @@ unsafe fn mem_write(address: u64, size: OpSize, value: u64) -> OrPageFault<()> {
             OpSize::S8 => memory::write8(phys, value as i32),
             OpSize::S16 => memory::write16(phys, value as i32),
             OpSize::S32 => memory::write32(phys, value as i32),
-            OpSize::S64 => {
-                memory::write32(phys, value as i32);
-                memory::write32(phys.wrapping_add(4), (value >> 32) as i32);
-            },
+            OpSize::S64 => memory::write64(phys, value),
         }
         return Ok(());
     }
@@ -3126,6 +3128,24 @@ pub unsafe fn run_one() {
     *instruction_pointer = *rip as u32 as i32;
 }
 
+// Tight interpreter-only batch: run up to `max` instructions without returning
+// to the main loop, so the JIT dispatch and cycle bookkeeping are amortised.
+// Only used while the JIT is disabled. Stops early on hlt and whenever
+// handle_irqs ran (it may have redirected execution).
+pub unsafe fn interp64_run(max: u32) -> u32 {
+    let mut n = 0;
+    while n < max && !*in_hlt {
+        let interrupts_were_enabled = *flags & FLAG_INTERRUPT != 0;
+        run_one();
+        *instruction_counter = (*instruction_counter).wrapping_add(1);
+        n += 1;
+        if crate::cpu::cpu::interp_step_irqs(interrupts_were_enabled) {
+            break;
+        }
+    }
+    n
+}
+
 #[no_mangle]
 pub unsafe fn interp64_run_one() {
     *rip = *instruction_pointer as u32 as u64;
@@ -3912,6 +3932,7 @@ unsafe fn run_one_inner() -> OrPageFault<()> {
     Ok(())
 }
 
+#[inline(always)]
 unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
     let opcode = fetch8()?;
     INTERP64_OPCODE_0F[opcode as usize] = INTERP64_OPCODE_0F[opcode as usize].wrapping_add(1);

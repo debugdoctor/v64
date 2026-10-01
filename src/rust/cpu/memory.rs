@@ -236,6 +236,18 @@ pub unsafe fn write32_no_mmap_or_dirty_check(addr: u32, value: i32) {
     ptr::write_unaligned(mem8.offset(addr as isize) as *mut i32, value)
 }
 
+pub unsafe fn write64(addr: u32, value: u64) {
+    if addr <= u32::MAX - 8 && !in_mapped_range(addr) && !in_mapped_range(addr + 4) {
+        jit::jit_dirty_cache_small(addr, addr + 8);
+        write64_no_mmap_or_dirty_check(addr, value);
+    }
+    else {
+        // MMIO/device or a wrapping address: keep the per-half semantics.
+        write32(addr, value as i32);
+        write32(addr.wrapping_add(4), (value >> 32) as i32);
+    }
+}
+
 pub unsafe fn write64_no_mmap_or_dirty_check(addr: u32, value: u64) {
     ptr::write_unaligned(mem8.offset(addr as isize) as *mut u64, value)
 }

@@ -3715,32 +3715,7 @@ mod wasm {
     }
 }
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasherDefault, Hasher};
-
-// Cheap integer hash for the RIP/page-keyed maps (SipHash showed in profiles).
-#[derive(Default)]
-struct FastHasher(u64);
-
-impl Hasher for FastHasher {
-    #[inline]
-    fn finish(&self) -> u64 { self.0 }
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        for b in bytes {
-            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x100000001B3);
-        }
-    }
-    #[inline]
-    fn write_u32(&mut self, n: u32) { self.write_u64(n as u64); }
-    #[inline]
-    fn write_u64(&mut self, n: u64) { self.0 = n.wrapping_mul(0x9E37_79B9_7F4A_7C15); }
-    #[inline]
-    fn write_usize(&mut self, n: usize) { self.write_u64(n as u64); }
-}
-
-type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
-type FastSet<K> = HashSet<K, BuildHasherDefault<FastHasher>>;
+use crate::hash::{FastMap, FastSet};
 
 const JIT64_THRESHOLD: u32 = 500; // interpreted runs before a block is compiled
 const JIT64_MAX_BLOCK_INSTRS: usize = 32; // hard cap per compiled block
@@ -4916,6 +4891,7 @@ pub unsafe fn jit64_stat(index: u32) -> u64 {
 // Enable or disable block compilation and dispatch (used by tests/benchmarks).
 #[no_mangle]
 pub unsafe fn jit64_set_enabled(enabled: u32) { JIT64_ENABLED = enabled != 0; }
+pub unsafe fn jit64_is_enabled() -> bool { JIT64_ENABLED }
 
 #[no_mangle]
 pub unsafe fn jit64_set_inline_memory(enabled: u32) { JIT64_INLINE_MEMORY = enabled != 0; }
