@@ -61,7 +61,7 @@ export function VirtioNet(cpu, bus, preserve_mac_from_state_image, mtu = MTU_DEF
     this.virtio = new VirtIO(cpu,
     {
         name: "virtio-net",
-        pci_id: 0x0A << 3,
+        pci_id: 0x04 << 3,
         device_id: 0x1041,
         subsystem_device_id: 1,
         common:

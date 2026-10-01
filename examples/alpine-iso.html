@@ -104,6 +104,7 @@ const emulator = new v64({
     serial_container_xtermjs: document.getElementById("terminal"),
     bios: { url: "../bios/bochs-bios.bin" },
     cdrom: { buffer: await load_patched_iso() },
+    net_device: { type: "virtio" },
     boot_order: 0x213, // CD / floppy / hard disk
     log_level: 0,      // else every RTC/PCI access goes through console.log
     autostart: true,
