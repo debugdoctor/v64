@@ -396,7 +396,21 @@ fn decode_block_with_rips(base: u64, bytes: &[u8]) -> Result<DecodedBlock, Strin
         let addr_size = if prefix_67 { 32 } else { 64 };
 
         match opcode {
-            0x90 => out.push(Instr::Nop),
+            // xchg rAX, r (0x90 is NOP only when the other register is rAX;
+            // with REX.B it exchanges with r8-r15)
+            0x90..=0x97 => {
+                let r = (opcode - 0x90) | rex_b << 3;
+                if r == 0 {
+                    out.push(Instr::Nop);
+                }
+                else {
+                    out.push(Instr::XchgRegReg {
+                        a: 0,
+                        b: r,
+                        width: operand_width(prefix_66, rex_w),
+                    });
+                }
+            },
 
             // mov r, imm
             0xB8..=0xBF => {
