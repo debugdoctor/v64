@@ -2719,27 +2719,6 @@ pub unsafe fn exit_jit64() {
 ///   and finally calls exit_jit, which does the interrupt
 ///
 /// Non-jit resets the instruction pointer and does the PF interrupt directly
-// Diagnostic: guest state at the last low-address user page fault. Read from
-// the host through fault_regs_ptr() to debug wild user pointers.
-pub static mut FAULT_REGS: [u64; 24] = [0; 24];
-pub static mut FAULT_RIP_RING: [u64; 256] = [0; 256];
-pub static mut FAULT_RIP_POS: u64 = 0;
-
-#[no_mangle]
-pub unsafe fn fault_regs_ptr() -> u32 {
-    std::ptr::addr_of!(FAULT_REGS) as u32
-}
-
-#[no_mangle]
-pub unsafe fn fault_rip_ptr() -> u32 {
-    std::ptr::addr_of!(FAULT_RIP_RING) as u32
-}
-
-#[no_mangle]
-pub unsafe fn fault_rip_pos() -> u64 {
-    FAULT_RIP_POS
-}
-
 pub unsafe fn trigger_pagefault(addr: i32, present: bool, write: bool, user: bool, jit: bool) {
     trigger_pagefault_lin(addr as u32 as u64, present, write, user, jit);
 }
@@ -2757,21 +2736,6 @@ pub unsafe fn trigger_pagefault_lin(addr: u64, present: bool, write: bool, user:
             addr
         );
         dbg_trace();
-    }
-    if user && addr < 0x10000 {
-        FAULT_RIP_POS = crate::cpu::interp64::RIP_RING_POS;
-        for i in 0..256 {
-            FAULT_RIP_RING[i] = crate::cpu::interp64::RIP_RING[i];
-        }
-        for i in 0..16 {
-            FAULT_REGS[i as usize] = read_reg64(i);
-        }
-        FAULT_REGS[16] = *previous_ip as u64;
-        FAULT_REGS[17] = *rip;
-        FAULT_REGS[18] = addr;
-        FAULT_REGS[19] = *flags as u32 as u64;
-        FAULT_REGS[20] = *cr.offset(3) as u32 as u64; // cr3
-        FAULT_REGS[21] = *cpl as u64;
     }
     profiler::stat_increment(stat::PAGE_FAULT);
     *cr.offset(2) = addr as i32;
