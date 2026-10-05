@@ -99,7 +99,7 @@ export function read_elf(buffer)
 {
     const view = new DataView(buffer);
 
-    const [header, offset] = read_struct(view, Header);
+    const [header, offset]: [any, number] = read_struct(view, Header);
     console.assert(offset === 52);
 
     if(DEBUG)
@@ -182,7 +182,7 @@ export function read_elf(buffer)
     };
 }
 
-function read_struct(view, Struct)
+function read_struct(view, Struct): [any, number]
 {
     const result = {};
     let offset = 0;
@@ -199,7 +199,7 @@ function read_struct(view, Struct)
     return [result, offset];
 }
 
-function read_structs(view, Struct, count)
+function read_structs(view, Struct, count): [any[], number]
 {
     const result = [];
     let offset = 0;
@@ -215,7 +215,7 @@ function read_structs(view, Struct, count)
 }
 
 /** @param {number=} length */
-function view_slice(view, offset, length)
+function view_slice(view, offset, length?)
 {
     return new DataView(view.buffer, view.byteOffset + offset, length);
 }

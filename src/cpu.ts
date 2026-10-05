@@ -13,6 +13,7 @@ import {
 } from "./const.js";
 import { h, view, pads, Bitmap, dump_file } from "./lib.js";
 import { dbg_assert, dbg_log } from "./log.js";
+import { set_cpu_config, JIT_DISABLE_32, JIT_DISABLE_64 } from "./config.js";
 
 import { SB16 } from "./sb16.js";
 import { ACPI } from "./acpi.js";
@@ -365,8 +366,6 @@ CPU.prototype.wasm_patch = function()
     this.handle_irqs = get_import("handle_irqs");
 
     this.main_loop = get_import("main_loop");
-
-    this.set_jit_config = get_import("set_jit_config");
 
     this.read8 = get_import("read8");
     this.read16 = get_import("read16");
@@ -1024,7 +1023,10 @@ CPU.prototype.init = function(settings, device_bus)
 
     if(settings.disable_jit)
     {
-        this.set_jit_config(0, 1);
+        // `disable_jit` is a bitmask of JITs to turn off; `true` turns off all.
+        const all = JIT_DISABLE_32 | JIT_DISABLE_64;
+        const jit_mask = settings.disable_jit === true ? all : (+settings.disable_jit & all);
+        set_cpu_config(this.wm.exports, "JIT_DISABLE", jit_mask);
     }
 
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
@@ -1353,12 +1355,12 @@ CPU.prototype.load_multiboot_option_rom = function(buffer, initrd, cmdline)
 
     if(buffer.byteLength < MULTIBOOT_SEARCH_BYTES)
     {
-        var buf32 = new Int32Array(MULTIBOOT_SEARCH_BYTES / 4);
+        var buf32: Int32Array<ArrayBuffer> = new Int32Array(MULTIBOOT_SEARCH_BYTES / 4);
         new Uint8Array(buf32.buffer).set(new Uint8Array(buffer));
     }
     else
     {
-        var buf32 = new Int32Array(buffer, 0, MULTIBOOT_SEARCH_BYTES / 4);
+        var buf32: Int32Array<ArrayBuffer> = new Int32Array(buffer as ArrayBuffer, 0, MULTIBOOT_SEARCH_BYTES / 4);
     }
 
     for(var offset = 0; offset < MULTIBOOT_SEARCH_BYTES; offset += 4)
@@ -1474,7 +1476,7 @@ CPU.prototype.load_multiboot_option_rom = function(buffer, initrd, cmdline)
                 else
                 {
                     dbg_assert(load_end_addr >= load_addr);
-                    var length = load_end_addr - load_addr;
+                    var length: any = load_end_addr - load_addr;
                 }
 
                 const blob = new Uint8Array(buffer, file_start, length);
@@ -2545,7 +2547,7 @@ CPU.prototype.debug_dump_code = function(is_32, buffer, start)
     }
     catch(e)
     {
-        dbg_log("Could not disassemble: " + Array.from(buffer).map(x => h(x, 2)).join(" "));
+        dbg_log("Could not disassemble: " + Array.from(buffer).map(x => h(x as number, 2)).join(" "));
     }
 };
 

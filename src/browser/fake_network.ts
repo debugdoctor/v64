@@ -67,6 +67,8 @@ function iptolong(parts) {
 
 class GrowableRingbuffer
 {
+    [key: string]: any;
+
     /**
      * @param {number} initial_capacity
      * @param {number} maximum_capacity
@@ -286,7 +288,7 @@ function handle_fake_tcp(packet, adapter)
         dbg_log(`I dont know about ${tuple}, so resetting`, LOG_FETCH);
         let bop = packet.tcp.ackn;
         if(packet.tcp.fin || packet.tcp.syn) bop += 1;
-        let reply = {};
+        let reply: any = {};
         reply.eth = { ethertype: ETHERTYPE_IPV4, src: adapter.router_mac, dest: packet.eth.src };
         reply.ipv4 = {
             proto: IPV4_PROTO_TCP,
@@ -311,7 +313,7 @@ function handle_fake_tcp(packet, adapter)
 
 function handle_fake_dns_static(packet, adapter)
 {
-    let reply = {};
+    let reply: any = {};
     reply.eth = { ethertype: ETHERTYPE_IPV4, src: adapter.router_mac, dest: packet.eth.src };
     reply.ipv4 = {
         proto: IPV4_PROTO_UDP,
@@ -360,7 +362,7 @@ function handle_fake_dns_doh(packet, adapter)
         headers: [["content-type", "application/dns-message"]],
         body: packet.udp.data
     };
-    fetch(fetch_url, fetch_opts).then(async (resp) => {
+    fetch(fetch_url, fetch_opts as any).then(async (resp) => {
         const reply = {
             eth: {
                 ethertype: ETHERTYPE_IPV4,
@@ -398,7 +400,7 @@ function handle_fake_ntp(packet, adapter) {
     let now_n = now + NTP_EPOC_DIFF;
     let now_n_f = TWO_TO_32 * ((now_n % 1000) / 1000);
 
-    let reply = {};
+    let reply: any = {};
     reply.eth = { ethertype: ETHERTYPE_IPV4, src: adapter.router_mac, dest: packet.eth.src };
     reply.ipv4 = {
         proto: IPV4_PROTO_UDP,
@@ -425,7 +427,7 @@ function handle_fake_ntp(packet, adapter) {
 }
 
 function handle_fake_dhcp(packet, adapter) {
-    let reply = {};
+    let reply: any = {};
     reply.eth = { ethertype: ETHERTYPE_IPV4, src: adapter.router_mac, dest: packet.eth.src };
     reply.ipv4 = {
         proto: IPV4_PROTO_UDP,
@@ -479,7 +481,7 @@ function handle_fake_dhcp(packet, adapter) {
 }
 
 export function handle_fake_networking(data, adapter) {
-    let packet = {};
+    let packet: any = {};
     parse_eth(data, packet);
 
     if(packet.ipv4) {
@@ -772,7 +774,7 @@ function parse_dns(data, o) {
         offset += 4;
     }
     for(let i = 0; i < ancount; i++) {
-        let ans = {
+        let ans: any = {
             name: read_dstr(),
             type: view.getInt16(offset),
             class: view.getUint16(offset + 2),
@@ -937,7 +939,7 @@ function write_ntp(spec, out) {
 function parse_tcp(data, o) {
     let view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 
-    let tcp = {
+    let tcp: any = {
         sport: view.getUint16(0),
         dport: view.getUint16(2),
         seq: view.getUint32(4),
@@ -1085,7 +1087,7 @@ TCPConnection.prototype.emit = function(event, ...args) {
 
 
 TCPConnection.prototype.ipv4_reply = function() {
-    let reply = {};
+    let reply: any = {};
     reply.eth = { ethertype: ETHERTYPE_IPV4, src: this.hsrc, dest: this.hdest };
     reply.ipv4 = {
         proto: IPV4_PROTO_TCP,
@@ -1432,7 +1434,7 @@ function arp_whohas(packet, adapter) {
     }
 
     // Reply to ARP Whohas
-    let reply = {};
+    let reply: any = {};
     reply.eth = { ethertype: ETHERTYPE_ARP, src: adapter.router_mac, dest: packet.eth.src };
     reply.arp = {
         htype: 1,
@@ -1447,7 +1449,7 @@ function arp_whohas(packet, adapter) {
 }
 
 function handle_fake_ping(packet, adapter) {
-    let reply = {};
+    let reply: any = {};
     reply.eth = { ethertype: ETHERTYPE_IPV4, src: adapter.router_mac, dest: packet.eth.src };
     reply.ipv4 = {
         proto: IPV4_PROTO_ICMP,
@@ -1464,7 +1466,7 @@ function handle_fake_ping(packet, adapter) {
 
 function handle_udp_echo(packet, adapter) {
     // UDP Echo Server
-    let reply = {};
+    let reply: any = {};
     reply.eth = { ethertype: ETHERTYPE_IPV4, src: adapter.router_mac, dest: packet.eth.src };
     reply.ipv4 = {
         proto: IPV4_PROTO_UDP,

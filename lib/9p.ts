@@ -795,7 +795,7 @@ Virtio9p.prototype.ReceiveRequest = async function (bufchain) {
             }
             var walk = marshall.Unmarshall(wnames, buffer, state);
             var idx = this.fids[fid].inodeid;
-            var offset = 7+2;
+            var offset: any = 7+2;
             var nwidx = 0;
             //console.log(idx, this.fs.GetInode(idx));
             dbg_log("walk in dir " + this.fids[fid].dbg_name  + " to: " + walk.toString(), LOG_9P);

@@ -1668,7 +1668,7 @@ IDEInterface.prototype.atapi_handle = function()
             break;
 
         case ATAPI_CMD_READ_TOC_PMA_ATIP:
-            var length = this.data[8] | this.data[7] << 8;
+            var length: any = this.data[8] | this.data[7] << 8;
             var format = this.data[9] >> 6;
             // Read the MSF flag before data_allocate() overwrites this.data.
             const toc_msf = (this.data[1] & 2) !== 0;
@@ -1722,7 +1722,7 @@ IDEInterface.prototype.atapi_handle = function()
             break;
 
         case ATAPI_CMD_GET_CONFIGURATION:
-            var length = Math.min(this.data[8] | this.data[7] << 8, 32);
+            var length: any = Math.min(this.data[8] | this.data[7] << 8, 32);
             dbg_log_extra = "length=" + length;
             this.data_allocate(length);
             this.data_end = this.data_length;
@@ -1747,7 +1747,7 @@ IDEInterface.prototype.atapi_handle = function()
             break;
 
         case ATAPI_CMD_MODE_SENSE_10:
-            var length = this.data[8] | this.data[7] << 8;
+            var length: any = this.data[8] | this.data[7] << 8;
             var page_code = this.data[2];
             dbg_log_extra = "page_code=" + h(page_code) + " length=" + length;
             if(page_code === 0x2A)
@@ -2677,7 +2677,7 @@ IDEInterface.prototype.get_count = function(is_lba48)
     }
     else
     {
-        var count = this.sector_count_reg & 0xFF;
+        var count: any = this.sector_count_reg & 0xFF;
         if(count === 0) count = 0x100;
         return count;
     }

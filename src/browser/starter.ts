@@ -39,7 +39,7 @@ import { FS } from "../../lib/filesystem.js";
     }} options
  * @constructor
  */
-export function v64(options)
+export function v64(options: any)
 {
     if(typeof options.log_level === "number")
     {
@@ -127,40 +127,8 @@ export function v64(options)
                 return;
             }
             const t1 = performance.now();
-            // Pass the wasm exports directly instead of JS wrappers: every guest
-            // memory access in a compiled block calls these, and a JS wrapper
-            // would make each one a wasm -> JS -> wasm round trip.
-            const jit64 = cpu.wm.exports;
-            const instance = new WebAssembly.Instance(module, { e: {
-                m: wasm_memory,
-                jit64_translate: jit64.jit64_translate,
-                jit64_mem_read: jit64.jit64_mem_read,
-                jit64_mem_probe: jit64.jit64_mem_probe,
-                jit64_mem_write: jit64.jit64_mem_write,
-                jit64_memory_faulted: jit64.jit64_memory_faulted,
-                jit64_imul: jit64.jit64_imul,
-                jit64_bswap: jit64.jit64_bswap,
-                jit64_shift: jit64.jit64_shift,
-                jit64_sse_int: jit64.jit64_sse_int,
-                jit64_sse_shift_imm: jit64.jit64_sse_shift_imm,
-                jit64_sse_pshuf: jit64.jit64_sse_pshuf,
-                jit64_adc_sbb: jit64.jit64_adc_sbb,
-                jit64_cpuid: jit64.jit64_cpuid,
-                jit64_bt: jit64.jit64_bt,
-                jit64_rdtsc: jit64.jit64_rdtsc,
-                jit64_in: jit64.jit64_in,
-                jit64_out: jit64.jit64_out,
-                jit64_cli: jit64.jit64_cli,
-                jit64_sync_flags: jit64.jit64_sync_flags,
-                jit64_chain: jit64.jit64_chain,
-                jit64_pushfq: jit64.jit64_pushfq,
-                jit64_hlt: jit64.jit64_hlt,
-                jit64_clear_exception_flag: jit64.jit64_clear_exception_flag,
-                jit64_exception_delivered: jit64.jit64_exception_delivered,
-                jit64_note_exit: jit64.jit64_note_exit,
-                jit64_code_write_bail: jit64.jit64_code_write_bail,
-                jit64_selfcheck_log_write: jit64.jit64_selfcheck_log_write,
-            } });
+            // Shared with the 32-bit JIT; never inline the names, Closure renames them.
+            const instance = new WebAssembly.Instance(module, { "e": cpu.jit_imports });
             wasm_table.set(index + WASM_TABLE_OFFSET, instance.exports.f);
             const t2 = performance.now();
             cpu.jit64_compile_ms = (cpu.jit64_compile_ms || 0) + (t2 - t0);
@@ -264,7 +232,7 @@ v64.prototype.continue_init = async function(emulator, options)
         this.screen_adapter.continue();
     }, this);
 
-    var settings = {};
+    var settings: any = {};
 
     const boot_order =
         options.boot_order ? options.boot_order :
@@ -329,7 +297,7 @@ v64.prototype.continue_init = async function(emulator, options)
         }
         else
         {
-            this.network_adapter = new NetworkAdapter(relay_url, this.bus);
+            this.network_adapter = new (NetworkAdapter as any)(relay_url, this.bus);
         }
     }
 
@@ -398,11 +366,11 @@ v64.prototype.continue_init = async function(emulator, options)
     if(settings.serial_console?.type === "xtermjs")
     {
         const xterm_lib = settings.serial_console.xterm_lib || window["Terminal"];
-        this.serial_adapter = new SerialAdapterXtermJS(settings.serial_console.container, this.bus, xterm_lib);
+        this.serial_adapter = new (SerialAdapterXtermJS as any)(settings.serial_console.container, this.bus, xterm_lib);
     }
     else if(settings.serial_console?.type === "textarea")
     {
-        this.serial_adapter = new SerialAdapter(settings.serial_console.container, this.bus);
+        this.serial_adapter = new (SerialAdapter as any)(settings.serial_console.container, this.bus);
         //this.recording_adapter = new SerialRecordingAdapter(this.bus);
     }
 
@@ -411,11 +379,11 @@ v64.prototype.continue_init = async function(emulator, options)
     if(virtio_console_settings?.type === "xtermjs")
     {
         const xterm_lib = virtio_console_settings.xterm_lib || window["Terminal"];
-        this.virtio_console_adapter = new VirtioConsoleAdapterXtermJS(virtio_console_settings.container, this.bus, xterm_lib);
+        this.virtio_console_adapter = new (VirtioConsoleAdapterXtermJS as any)(virtio_console_settings.container, this.bus, xterm_lib);
     }
     else if(virtio_console_settings?.type === "textarea")
     {
-        this.virtio_console_adapter = new VirtioConsoleAdapter(virtio_console_settings.container, this.bus);
+        this.virtio_console_adapter = new (VirtioConsoleAdapter as any)(virtio_console_settings.container, this.bus);
     }
 
     if(settings.modem)
@@ -777,7 +745,7 @@ v64.prototype.zstd_decompress_worker = async function(decompressed_size, src)
             {
                 if(!wasm)
                 {
-                    const env = Object.fromEntries([
+                    const env: any = Object.fromEntries([
                         "cpu_exception_hook", "run_hardware_timers",
                         "cpu_event_halt", "microtick", "get_rand_int", "stop_idling",
                         "io_port_read8", "io_port_read16", "io_port_read32",
@@ -811,7 +779,7 @@ v64.prototype.zstd_decompress_worker = async function(decompressed_size, src)
 
                 exports["zstd_free_ctx"](zstd_context);
 
-                postMessage({ result, id }, [result]);
+                postMessage({ result, id }, [result] as any);
             };
         }
 
@@ -890,7 +858,7 @@ v64.prototype.stop = async function()
         return;
     }
 
-    await new Promise(resolve => {
+    await new Promise<void>(resolve => {
         const listener = () => {
             this.remove_listener("emulator-stopped", listener);
             resolve();
@@ -1015,7 +983,7 @@ v64.prototype.set_fda = async function(file)
     const fda = this.v86.cpu.devices.fdc.drives[0];
     if(file.url && !file.async)
     {
-        await new Promise(resolve => {
+        await new Promise<void>(resolve => {
             load_file(file.url, {
                 done: result =>
                 {
@@ -1044,7 +1012,7 @@ v64.prototype.set_fdb = async function(file)
     const fdb = this.v86.cpu.devices.fdc.drives[1];
     if(file.url && !file.async)
     {
-        await new Promise(resolve => {
+        await new Promise<void>(resolve => {
             load_file(file.url, {
                 done: result =>
                 {
@@ -1234,7 +1202,7 @@ v64.prototype.screen_go_fullscreen = function()
         // This is necessary, because otherwise chromium keyboard doesn't work anymore.
         // Might (but doesn't seem to) break something else
         var focus_element = document.getElementsByClassName("phone_keyboard")[0];
-        focus_element && focus_element.focus();
+        focus_element && (focus_element as any).focus();
     }
 
     try {
@@ -1575,7 +1543,7 @@ v64.prototype.wait_until_vga_screen_contains = async function(expected, options)
             const screen_line = this.screen_adapter.get_text_row(row);
             if(match_multi)
             {
-                screen_lines[row] = screen_line.trimRight();
+                (screen_lines as any)[row as number] = screen_line.trimRight();
             }
             else if(contains_expected(screen_line, expected))
             {
@@ -1620,7 +1588,7 @@ v64.prototype.write_memory = function(blob, offset)
 v64.prototype.set_serial_container_xtermjs = function(element, xterm_lib = window["Terminal"])
 {
     this.serial_adapter && this.serial_adapter.destroy && this.serial_adapter.destroy();
-    this.serial_adapter = new SerialAdapterXtermJS(element, this.bus, xterm_lib);
+    this.serial_adapter = new (SerialAdapterXtermJS as any)(element, this.bus, xterm_lib);
     this.serial_adapter.show();
 };
 
@@ -1631,7 +1599,7 @@ v64.prototype.set_serial_container_xtermjs = function(element, xterm_lib = windo
 v64.prototype.set_virtio_console_container_xtermjs = function(element, xterm_lib = window["Terminal"])
 {
     this.virtio_console_adapter && this.virtio_console_adapter.destroy && this.virtio_console_adapter.destroy();
-    this.virtio_console_adapter = new VirtioConsoleAdapterXtermJS(element, this.bus, xterm_lib);
+    this.virtio_console_adapter = new (VirtioConsoleAdapterXtermJS as any)(element, this.bus, xterm_lib);
     this.virtio_console_adapter.show();
 };
 
@@ -1658,7 +1626,7 @@ FileExistsError.prototype = Error.prototype;
  *
  * @param {string=} message
  */
-function FileNotFoundError(message)
+function FileNotFoundError(message?)
 {
     this.message = message || "File not found";
 }

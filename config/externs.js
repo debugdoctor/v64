@@ -1,5 +1,12 @@
 var global = {};
-var process = { hrtime: function() {} };
+var process = {
+    hrtime: function() {},
+    /**
+     * @param {string} name
+     * @return {?}
+     */
+    getBuiltinModule: function(name) {},
+};
 
 /**
  * @param {string} name

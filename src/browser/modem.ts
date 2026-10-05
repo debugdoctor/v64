@@ -699,7 +699,7 @@ Modem.prototype.cli_exec = function(cmdline)
 
     dbg_log(`executing command line "${cmdline}"`, LOG_MODEM);
 
-    let response_code = true;
+    let response_code: any = true;
     while(offset < length && response_code === true)
     {
         let cmd = cmdline[offset++].toUpperCase();

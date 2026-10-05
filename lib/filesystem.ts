@@ -59,7 +59,7 @@ const texten = new TextEncoder();
  * @param {!FileStorageInterface} storage
  * @param {{ last_qidnumber: number }=} qidcounter Another fs's qidcounter to synchronise with.
  */
-export function FS(storage, qidcounter) {
+export function FS(storage, qidcounter?) {
     /** @type {Array.<!Inode>} */
     this.inodes = [];
 

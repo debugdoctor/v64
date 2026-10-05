@@ -215,7 +215,7 @@ const SECTOR_SIZE_CODE  = 2;    // sector size code 2: 512 bytes/sector
  *
  *   fdc_config = { fdb: { drive_type: 0 } }
  */
-export function FloppyController(cpu, fda_image, fdb_image, fdc_config)
+export function FloppyController(cpu, fda_image, fdb_image, fdc_config?)
 {
     /** @const @type {IO|undefined} */
     this.io = cpu.io;

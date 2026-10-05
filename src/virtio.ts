@@ -769,7 +769,7 @@ VirtIO.prototype.init_capabilities = function(capabilities)
         }
 
         const bar_offset = 0x10 + 4 * cap.bar;
-        this.pci_space[bar_offset] = (cap.port & 0xFE) | !cap.use_mmio;
+        this.pci_space[bar_offset] = (cap.port & 0xFE) | (!cap.use_mmio ? 1 : 0);
         this.pci_space[bar_offset + 1] = (cap.port >>> 8) & 0xFF;
         this.pci_space[bar_offset + 2] = (cap.port >>> 16) & 0xFF;
         this.pci_space[bar_offset + 3] = (cap.port >>> 24) & 0xFF;

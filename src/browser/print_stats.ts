@@ -1,4 +1,5 @@
 import { pads } from "../lib.js";
+import { get_cpu_config } from "../config.js";
 
 export function stats_to_string(cpu)
 {
@@ -151,10 +152,11 @@ function print_misc_stats(cpu)
     text += "wasm memory size: " + (cpu.wasm_memory.buffer.byteLength >> 20) + "m\n";
 
     text += "Config:\n";
-    text += "JIT_DISABLED=" + cpu.wm.exports["get_jit_config"](0) + "\n";
-    text += "MAX_PAGES=" + cpu.wm.exports["get_jit_config"](1) + "\n";
-    text += "JIT_USE_LOOP_SAFETY=" + Boolean(cpu.wm.exports["get_jit_config"](2)) + "\n";
-    text += "MAX_EXTRA_BASIC_BLOCKS=" + cpu.wm.exports["get_jit_config"](3) + "\n";
+    // Keys are shared with the Rust switchboard; see src/config.js.
+    for(const name of ["JIT_DISABLE", "MAX_PAGES", "LOOP_SAFETY", "EXTRA_BASIC_BLOCKS"])
+    {
+        text += name + "=" + get_cpu_config(cpu.wm.exports, name) + "\n";
+    }
 
     return text;
 }

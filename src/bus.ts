@@ -1,6 +1,6 @@
 import { dbg_assert } from "./log.js";
 
-export var Bus = {};
+export var Bus: any = {};
 
 /** @constructor */
 export function BusConnector()

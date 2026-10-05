@@ -534,7 +534,7 @@ SB16.prototype.port2xE_read = function()
     {
         this.lower_irq(SB_IRQ_8BIT);
     }
-    var ready = this.read_buffer.length && !this.dsp_highspeed;
+    var ready = (this.read_buffer.length && !this.dsp_highspeed) ? 1 : 0;
     return (ready << 7) | 0x7F;
 };
 
@@ -715,7 +715,7 @@ SB16.prototype.port3x1_read = function()
 
     var status = 0;
     status |= 0x40 * 0; // Output Ready
-    status |= 0x80 * !this.mpu_read_buffer.length; // Input Ready
+    status |= 0x80 * Number(!this.mpu_read_buffer.length); // Input Ready
 
     return status;
 };
@@ -761,7 +761,7 @@ SB16.prototype.dsp_default_handler = function()
  * @param {number} size
  * @param {function()=} handler
  */
-function register_dsp_command(commands, size, handler)
+function register_dsp_command(commands, size, handler?)
 {
     if(!handler)
     {
@@ -1240,7 +1240,7 @@ SB16.prototype.mixer_full_update = function()
  * @param{number} address
  * @param{function():number=} handler
  */
-function register_mixer_read(address, handler)
+function register_mixer_read(address, handler?)
 {
     if(!handler)
     {
@@ -1253,7 +1253,7 @@ function register_mixer_read(address, handler)
  * @param{number} address
  * @param{function(number)=} handler
  */
-function register_mixer_write(address, handler)
+function register_mixer_write(address, handler?)
 {
     if(!handler)
     {
@@ -1540,7 +1540,7 @@ SB16.prototype.fm_default_write = function(data, register, address)
  * @param{Array} addresses
  * @param{function(number, number, number)=} handler
  */
-function register_fm_write(addresses, handler)
+function register_fm_write(addresses, handler?)
 {
     if(!handler)
     {
@@ -1589,7 +1589,7 @@ function get_fm_operator(register, offset)
 
 register_fm_write([0x01], function(bits, register, address)
 {
-    this.fm_waveform_select_enable[register] = bits & 0x20 > 0;
+    this.fm_waveform_select_enable[register] = bits & ((0x20 > 0) as any);
     this.fm_update_waveforms();
 });
 
@@ -1891,5 +1891,5 @@ function audio_normalize(value, amplitude, offset)
 
 function audio_clip(value, low, high)
 {
-    return (value < low) * low + (value > high) * high + (low <= value && value <= high) * value;
+    return ((value < low) ? 1 : 0) * low + ((value > high) ? 1 : 0) * high + ((low <= value && value <= high) ? 1 : 0) * value;
 }

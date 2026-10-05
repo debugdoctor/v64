@@ -353,8 +353,8 @@ PS2.prototype.mouse_send_click = function(left, middle, right)
 PS2.prototype.send_mouse_packet = function(dx, dy)
 {
     var info_byte =
-            (dy < 0) << 5 |
-            (dx < 0) << 4 |
+            ((dy < 0) ? 1 : 0) << 5 |
+            ((dx < 0) ? 1 : 0) << 4 |
             1 << 3 |
             this.mouse_clicks,
         delta_x = dx,

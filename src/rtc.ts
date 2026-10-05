@@ -368,7 +368,7 @@ RTC.prototype.cmos_port_write = function(data_byte)
                     hours, minutes, seconds
                 ));
 
-                const ms_from_now = alarm_date - now;
+                const ms_from_now = alarm_date.getTime() - now.getTime();
                 dbg_log("RTC alarm scheduled for " + alarm_date +
                         " hh:mm:ss=" + hours + ":" + minutes + ":" + seconds +
                         " ms_from_now=" + ms_from_now, LOG_RTC);

@@ -27,13 +27,13 @@ export var view = function(constructor, memory, offset, length)
                 {
                     return x.bind(b);
                 }
-                dbg_assert(/^\d+$/.test(property) || property === "buffer" || property === "length" ||
+                dbg_assert(/^\d+$/.test(property as string) || property === "buffer" || property === "length" ||
                     property === "BYTES_PER_ELEMENT" || property === "byteOffset");
                 return x;
             },
             set: function(target, property, value, receiver)
             {
-                dbg_assert(/^\d+$/.test(property));
+                dbg_assert(/^\d+$/.test(property as string));
                 new constructor(memory.buffer, offset, length)[property] = value;
                 return true;
             },
@@ -46,7 +46,7 @@ export var view = function(constructor, memory, offset, length)
  * @param {number=} len
  * @return {string}
  */
-export function h(n, len)
+export function h(n: number, len?: number)
 {
     if(!n)
     {
@@ -135,14 +135,16 @@ else if(typeof require !== "undefined")
     };
 }
 else if(typeof process !== "undefined")
+{
+    // Pure-ESM Node has no `require`; getBuiltinModule is synchronous, so no
+    // dynamic import reaches the Closure AST (which rejects it).
+    const crypto = process.getBuiltinModule("crypto");
+
+    get_rand_int = function()
     {
-        import("node:" + "crypto").then(crypto => {
-            get_rand_int = function()
-            {
-                return crypto["randomBytes"](4)["readInt32LE"](0);
-            };
-        });
-    }
+        return crypto["randomBytes"](4)["readInt32LE"](0);
+    };
+}
 else
 {
     dbg_assert(false, "Unsupported platform: No cryptographic random values");
@@ -529,13 +531,14 @@ if(typeof XMLHttpRequest === "undefined" ||
     const get_fs = async function()
     {
         // Electron renderers with nodeIntegration have process.versions.node but
-        // a browser module loader, so dynamic import of node: URLs fails. require() works.
+        // a browser module loader, so require() is checked first. Pure-ESM Node
+        // falls back to the synchronous builtin accessor, which keeps the dynamic
+        // import out of the Closure AST.
         if(typeof require !== "undefined")
         {
             return require("fs")["promises"];
         }
-        // string concat to work around closure compiler 'Invalid module path "node:fs/promises" for resolution mode'
-        return import("node:" + "fs/promises");
+        return process.getBuiltinModule("fs")["promises"];
     };
 
     /**
@@ -762,7 +765,7 @@ export function read_sized_string_from_mem(mem, offset, len)
  *
  * @type {Object<string, string>}
  */
-const CHARMAPS =
+const CHARMAPS: any =
 {
     cp437: " ☺☻♥♦♣♠•◘○◙♂♀♪♫☼►◄↕‼¶§▬↨↑↓→←∟↔▲▼ !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~⌂ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ",
     cp858: "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜø£Ø×ƒáíóúñÑªº¿®¬½¼¡«»░▒▓│┤ÁÂÀ©╣║╗╝¢¥┐└┴┬├─┼ãÃ╚╔╩╦╠═╬¤ðÐÊËÈ€ÍÎÏ┘┌█▄¦Ì▀ÓßÔÒõÕµþÞÚÛÙýÝ¯´­±‗¾¶§÷¸°¨·¹³²■ "

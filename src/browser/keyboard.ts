@@ -464,7 +464,7 @@ export function KeyboardAdapter(bus)
                 deferred_timeout_id = setTimeout(() => {
                     handle_event(deferred_event, deferred_keydown);
                     deferred_event = null;
-                }, 10);
+                }, 10) as any;
                 return false;
             }
         }
@@ -495,7 +495,7 @@ export function KeyboardAdapter(bus)
      * @param {boolean} keydown
      * @param {boolean=} is_repeat
      */
-    function handle_code(code, keydown, is_repeat)
+    function handle_code(code, keydown, is_repeat?)
     {
         if(keydown)
         {

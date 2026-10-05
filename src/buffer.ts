@@ -705,7 +705,7 @@ AsyncFileBuffer.prototype.get_buffer = function(fn)
 AsyncFileBuffer.prototype.get_as_file = function(name)
 {
     var parts = [];
-    var existing_blocks = Array.from(this.block_cache.keys()).sort(function(x, y) { return x - y; });
+    var existing_blocks: any[] = Array.from(this.block_cache.keys() as any).sort(function(x: number, y: number) { return x - y; });
 
     var current_offset = 0;
 
@@ -973,7 +973,7 @@ AsyncOPFSBuffer.prototype.do_flush = async function()
 
     // Snapshot the dirty blocks and clear the marks. A write that arrives while
     // the flush is running re-marks its block; the next flush commits it.
-    const indices = Array.from(this.block_cache_is_write).sort((a, b) => a - b);
+    const indices: any[] = Array.from(this.block_cache_is_write as any).sort((a: number, b: number) => a - b);
     this.block_cache_is_write.clear();
 
     const runs = [];

@@ -50,7 +50,7 @@ export function FetchNetworkAdapter(bus, config)
     this.tcp_conn = {};
     this.mtu = config.mtu;
     this.eth_encoder_buf = create_eth_encoder_buf(this.mtu);
-    this.fetch = (...args) => fetch(...args);
+    this.fetch = (...args: any[]) => (fetch as any)(...args);
 
     // Ex: 'https://corsproxy.io/?'
     this.cors_proxy = config.cors_proxy;
@@ -199,7 +199,7 @@ async function on_data_http(data)
     dbg_log("HTTP Dispatch: " + target.href, LOG_FETCH);
     this.name = target.href;
 
-    const opts = {
+    const opts: any = {
         method: first_line[0],
         headers: req_headers,
     };

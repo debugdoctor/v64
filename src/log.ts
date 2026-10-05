@@ -16,13 +16,14 @@ export var LOG_TO_FILE = false;
 export var LOG_LEVEL = LOG_ALL & ~LOG_PS2 & ~LOG_PIT & ~LOG_VIRTIO & ~LOG_9P & ~LOG_PIC &
                           ~LOG_DMA & ~LOG_SERIAL & ~LOG_NET & ~LOG_FLOPPY & ~LOG_DISK & ~LOG_VGA & ~LOG_SB16;
 
-export function set_log_level(level) {
+export function set_log_level(level: number): void
+{
     LOG_LEVEL = level;
 }
 
-export var log_data = [];
+export var log_data: (string | number)[] = [];
 
-function do_the_log(message)
+function do_the_log(message: string | number): void
 {
     if(LOG_TO_FILE)
     {
@@ -34,10 +35,8 @@ function do_the_log(message)
     }
 }
 
-/**
- * @type {function((string|number), number=)}
- */
-export const dbg_log = (function()
+/** @type {function((string|number), number=)} */
+export const dbg_log: (stuff: string | number, level?: number) => void = (function()
 {
     if(!DEBUG)
     {
@@ -45,7 +44,7 @@ export const dbg_log = (function()
     }
 
     /** @type {Object.<number, string>} */
-    const dbg_names = LOG_NAMES.reduce(function(a, x)
+    const dbg_names: { [level: number]: string } = LOG_NAMES.reduce(function(a: { [level: number]: string }, x: [number, string])
     {
         a[x[0]] = x[1];
         return a;
@@ -54,10 +53,8 @@ export const dbg_log = (function()
     var log_last_message = "";
     var log_message_repetitions = 0;
 
-    /**
-     * @param {number=} level
-     */
-    function dbg_log_(stuff, level)
+    /** @param {number=} level */
+    function dbg_log_(stuff: string | number, level?: number)
     {
         if(!DEBUG) return;
 
@@ -106,10 +103,8 @@ export const dbg_log = (function()
     return dbg_log_;
 })();
 
-/**
- * @param {number=} level
- */
-export function dbg_trace(level)
+/** @param {number=} level */
+export function dbg_trace(level?: number): void
 {
     if(!DEBUG) return;
 
@@ -118,10 +113,11 @@ export function dbg_trace(level)
 
 /**
  * console.assert is fucking slow
+ * @param {*} cond
  * @param {string=} msg
  * @param {number=} level
  */
-export function dbg_assert(cond, msg, level)
+export function dbg_assert(cond: unknown, msg?: string, level?: number): void
 {
     if(!DEBUG) return;
 
@@ -132,7 +128,7 @@ export function dbg_assert(cond, msg, level)
 }
 
 
-export function dbg_assert_failed(msg)
+export function dbg_assert_failed(msg?: string): never
 {
     debugger;
     console.trace();

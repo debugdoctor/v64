@@ -8,7 +8,6 @@ import * as iso9660 from "../iso9660.js";
 
 const ON_LOCALHOST = !location.hostname.endsWith("copy.sh");
 
-const DEFAULT_NETWORKING_PROXIES = ["wss://relay.widgetry.org/", "ws://localhost:8080/"];
 const DEFAULT_MEMORY_SIZE = 128;
 const DEFAULT_VGA_MEMORY_SIZE = 8;
 const DEFAULT_BOOT_ORDER = 0;
@@ -27,7 +26,7 @@ function set_title(text)
 {
     document.title = text + " - v86" +  (DEBUG ? " - debug" : "");
     const description = document.querySelector("meta[name=description]");
-    description && (description.content = "Running " + text);
+    description && ((description as any).content = "Running " + text);
 }
 
 function bool_arg(x)
@@ -112,7 +111,7 @@ function show_progress(e)
     el.textContent = line;
 }
 
-function $(id)
+function $(id: string): any
 {
     return document.getElementById(id);
 }
@@ -158,14 +157,62 @@ function onload()
     if(DEBUG && ON_LOCALHOST)
     {
         // don't use online relay in debug mode
-        $("relay_url").value = "ws://localhost:8080/";
+        $("relay_url").value = "wisp://127.0.0.1:8080/";
     }
 
     const query_args = new URLSearchParams(location.search);
     const host = query_args.get("cdn") || (ON_LOCALHOST ? "images/" : "//i.copy.sh/");
 
     // Abandonware OS images are from https://winworldpc.com/library/operating-systems
-    const oses = [
+    const oses: any[] = [
+        {
+            // Booted by the full test suite; see `make test-images` and
+            // images/README.md.
+            id: "alpine",
+            name: "Alpine Linux",
+            cdrom: {
+                url: host + "alpine-virt-3.24.2-x86_64.iso",
+                size: 69206016,
+                async: false,
+            },
+            memory_size: 1024 * 1024 * 1024,
+            vga_memory_size: 8 * 1024 * 1024,
+            boot_order: 0x213,
+            cmdline: "console=ttyS0 modules=loop,squashfs,sd-mod,usb-storage",
+            net_device_type: "virtio",
+            relay_url: "wisp://127.0.0.1:8080/",
+            homepage: "https://alpinelinux.org/",
+        },
+        {
+            // Local image only; see images/README.md.
+            id: "tinycorepure64",
+            name: "Tiny Core Pure64",
+            cdrom: {
+                url: "images/TinyCorePure64-17.1.iso",
+                size: 44040192,
+                async: false,
+            },
+            memory_size: 256 * 1024 * 1024,
+            vga_memory_size: 8 * 1024 * 1024,
+            net_device_type: "virtio",
+            homepage: "http://www.tinycorelinux.net/",
+        },
+        {
+            // The upstream combined image written for a 128 MB disk; p2 is
+            // resized to 64 MB by the Makefile so the file stays small. It
+            // still formats its ext4 overlay in the free space after squashfs.
+            id: "openwrt",
+            name: "OpenWrt 24.10",
+            hda: {
+                url: "images/openwrt-24.10.5-x86-64-squashfs.img",
+                size: 67108864,
+                async: false,
+            },
+            memory_size: 256 * 1024 * 1024,
+            vga_memory_size: 8 * 1024 * 1024,
+            net_device_type: "virtio",
+            homepage: "https://openwrt.org/",
+        },
         {
             id: "archlinux",
             name: "Arch Linux",
@@ -1152,13 +1199,13 @@ function onload()
             homepage: "http://www.sebastianmihai.com/snowdrop/",
         },
         {
-            id: "openwrt",
+            id: "openwrt18",
             hda: {
                 url: host + "openwrt-18.06.1-x86-legacy-combined-squashfs.img",
                 size: 19846474,
                 async: false,
             },
-            name: "OpenWrt",
+            name: "OpenWrt 18.06",
         },
         {
             id: "qnx",
@@ -1762,7 +1809,7 @@ function onload()
 
         fetch(base + "/profile.json")
             .catch(e => alert("Profile not found: " + profile))
-            .then(response => response.json())
+            .then((response: any) => response.json())
             .then(p => {
                 function handle_image(o)
                 {
@@ -1831,7 +1878,7 @@ function onload()
                 {
                     option.selected = true;
                 }
-                option.value = n_bytes;
+                option.value = String(n_bytes);
                 select.appendChild(option);
             }
             // TODO (when closure compiler supports it): parent.parentNode.replaceChildren(...);
@@ -1872,7 +1919,7 @@ function onload()
         return {
             element,
             size,
-            graphical: element.children[2].firstChild.className === "gui_icon",
+            graphical: (element.children[2].firstChild as any).className === "gui_icon",
             family: element.children[3].textContent.replace(/-like/, ""),
             arch: element.children[4].textContent,
             status: element.children[5].textContent,
@@ -1916,6 +1963,7 @@ function onload()
         [   // Arch:
             { id: "16bit", condition: os => os.arch === "16-bit" },
             { id: "32bit", condition: os => os.arch === "32-bit" },
+            { id: "64bit", condition: os => os.arch === "64-bit" },
         ],
         [   // Lang:
             { id: "asm", condition: os => os.languages.has("ASM") },
@@ -1928,7 +1976,7 @@ function onload()
     const defined_filter = [];
     for(const known_category of known_filter)
     {
-        const category = known_category.filter(filter => {
+        const category = known_category.filter((filter: any) => {
             const element = document.getElementById(`filter_${filter.id}`);
             if(element)
             {
@@ -1956,7 +2004,7 @@ function onload()
         }
         for(const os of os_info)
         {
-            os.element.style.display = conjunction.every(disjunction => disjunction.some(filter => filter.condition(os))) ? "" : "none";
+            (os.element as any).style.display = conjunction.every(disjunction => disjunction.some(filter => filter.condition(os))) ? "" : "none";
         }
     }
 
@@ -1966,7 +2014,7 @@ function onload()
         {
             for(const element of document.querySelectorAll("#filter input[type=checkbox]"))
             {
-                element.checked = false;
+                (element as any).checked = false;
             }
             update_filters();
         };
@@ -1985,6 +2033,9 @@ function onload()
     set_proxy_value("network_fetch", "fetch");
     set_proxy_value("network_relay", "wss://relay.widgetry.org/");
     set_proxy_value("network_wisp", "wisps://wisp.mercurywork.shop/v86/");
+    // Local backends: `make relay` (tools/relay) and tools/serve.py's /proxy.
+    set_proxy_value("network_local_relay", "wisp://127.0.0.1:8080/");
+    set_proxy_value("network_local_proxy", "fetch:http://localhost:8000/proxy?url=");
 }
 
 function debug_onload()
@@ -2017,7 +2068,7 @@ function debug_onload()
         {
             input.checked = true;
         }
-        input.mask = mask;
+        (input as any).mask = mask;
 
         label.append(input, pads(name, 4) + " ");
         log_levels.appendChild(label);
@@ -2046,6 +2097,118 @@ function debug_onload()
     };
 }
 
+/**
+ * @typedef {{version: string, fields: !Array<string>, files: !Array<!Array<(string|number)>>}}
+ */
+let RelayManifest;
+
+// Offers the prebuilt relays from build/relay/. Stays hidden unless a manifest
+// is there, so a checkout that never ran `make relay-dist` shows nothing.
+//
+// Fields are read by index, not by name: Closure ADVANCED renames property
+// accesses, and parsed JSON keeps the literal keys, so `file.os` ends up
+// undefined in the release bundle. Array indices cannot be renamed.
+//
+// The list is not filtered by platform: client-side architecture detection is
+// unreliable (Apple Silicon reports MacIntel), and a wrong guess is worse than
+// a labelled list.
+async function setup_relay_download()
+{
+    const list = $("relay_list");
+    const empty = $("relay_empty");
+    if(!list)
+    {
+        return;
+    }
+
+    /** @type {!RelayManifest} */
+    let manifest;
+    try
+    {
+        const response = await fetch("build/relay/manifest.json");
+        if(!response.ok)
+        {
+            if(empty) empty.hidden = false;
+            return;
+        }
+        manifest = /** @type {!RelayManifest} */ (await response.json());
+    }
+    catch(e)
+    {
+        if(empty) empty.hidden = false;
+        return;
+    }
+    if(!manifest.files || !manifest.files.length)
+    {
+        if(empty) empty.hidden = false;
+        return;
+    }
+
+    const label = (os, arch) =>
+        (os === "darwin" ? "macOS" : os === "windows" ? "Windows" : "Linux") +
+        " (" + (arch === "amd64" ? "x86-64" : "ARM64") + ")";
+    const size = bytes => (bytes / 1024 / 1024).toFixed(1) + " MB";
+
+    for(const file of manifest.files)
+    {
+        const [name, os, arch, bytes, sha256] = file;
+
+        const a = document.createElement("a");
+        a.href = "build/relay/" + name;
+        a.download = name;
+        a.textContent = String(name);
+
+        const row = list.insertRow();
+        row.insertCell().textContent = label(String(os), String(arch));
+        row.insertCell().append(a);
+        row.insertCell().textContent = size(Number(bytes));
+        const sum = row.insertCell();
+        sum.className = "relay-sum";
+        sum.textContent = String(sha256);
+        sum.title = String(sha256);
+    }
+}
+
+// Folder-style tabs on the boot screen: quick start / custom setup / proxy.
+function setup_folder_tabs()
+{
+    const tabs = Array.from(document.querySelectorAll(".folder-tab"));
+    const panels = Array.from(document.querySelectorAll(".folder-panel"));
+    if(!tabs.length || !panels.length)
+    {
+        return;
+    }
+
+    function activate(name)
+    {
+        for(const tab of tabs)
+        {
+            tab.classList.toggle("is-active", tab.getAttribute("data-folder") === name);
+        }
+        for(const panel of panels)
+        {
+            panel.classList.toggle("is-active", panel.getAttribute("data-folder") === name);
+        }
+    }
+
+    for(const tab of tabs)
+    {
+        tab.addEventListener("click", () => activate(tab.getAttribute("data-folder")));
+    }
+
+    const skip = $("skip_to_setup");
+    if(skip)
+    {
+        skip.onclick = event =>
+        {
+            event.preventDefault();
+            activate("setup");
+        };
+    }
+}
+
+window.addEventListener("load", setup_folder_tabs, false);
+window.addEventListener("load", setup_relay_download, false);
 window.addEventListener("load", onload, false);
 
 // old webkit fires popstate on every load, fuck webkit
@@ -2076,7 +2239,7 @@ function start_emulation(profile, query_args)
     const new_query_args = new Map();
     new_query_args.set("profile", profile?.id || "custom");
 
-    const settings = {};
+    const settings: any = {};
 
     if(profile)
     {
@@ -2226,8 +2389,13 @@ function start_emulation(profile, query_args)
 
     if(!settings.relay_url)
     {
-        settings.relay_url = $("relay_url").value;
-        if(!DEFAULT_NETWORKING_PROXIES.includes(settings.relay_url)) new_query_args.set("relay_url", settings.relay_url);
+        // A profile may carry a default proxy; an explicit input wins.
+        settings.relay_url = $("relay_url").value || (profile && profile.relay_url) || "";
+    }
+    // Carry the proxy in the URL so the choice survives a reload or a share.
+    if(settings.relay_url)
+    {
+        new_query_args.set("relay_url", settings.relay_url);
     }
     if(settings.relay_url.startsWith("fetch:"))
     {
@@ -3039,7 +3207,7 @@ function init_ui(profile, settings, emulator)
             {
                 files2.push({
                     name: file.name,
-                    contents: new Uint8Array(await read_file(file)),
+                    contents: new Uint8Array((await read_file(file)) as any),
                 });
 
             }
@@ -3263,7 +3431,7 @@ function init_ui(profile, settings, emulator)
         // allow text selection
         if(window.getSelection().isCollapsed)
         {
-            const phone_keyboard = document.getElementsByClassName("phone_keyboard")[0];
+            const phone_keyboard: any = document.getElementsByClassName("phone_keyboard")[0];
 
             phone_keyboard.style.top = window.scrollY + e.clientY + 20 + "px";
             phone_keyboard.style.left = window.scrollX + e.clientX + "px";
@@ -3274,7 +3442,7 @@ function init_ui(profile, settings, emulator)
         }
     };
 
-    const phone_keyboard = document.getElementsByClassName("phone_keyboard")[0];
+    const phone_keyboard: any = document.getElementsByClassName("phone_keyboard")[0];
 
     phone_keyboard.setAttribute("autocorrect", "off");
     phone_keyboard.setAttribute("autocapitalize", "off");

@@ -76,7 +76,7 @@ export function MouseAdapter(bus, screen_container)
         window.removeEventListener("mousemove", mousemove_handler, false);
         window.removeEventListener("mousedown", mousedown_handler, false);
         window.removeEventListener("mouseup", mouseup_handler, false);
-        window.removeEventListener("wheel", mousewheel_handler, { passive: false });
+        window.removeEventListener("wheel", mousewheel_handler, false);
         window.removeEventListener("contextmenu", contextmenu_handler, false);
         document.removeEventListener("pointerlockchange", pointerlockchange_handler, false);
     };

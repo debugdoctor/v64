@@ -33,7 +33,7 @@ export const
 /**
  * @type {Array<Array<string|number>>}
  */
-export const LOG_NAMES = [
+export const LOG_NAMES: [number, string][] = [
     [1, ""],
     [LOG_CPU, "CPU"],
     [LOG_DISK, "DISK"],

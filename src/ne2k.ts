@@ -295,7 +295,7 @@ function dump_packet(packet, prefix)
  * @param {Boolean} mac_address_translation
  * @param {number} [id=0] id
  */
-export function Ne2k(cpu, bus, preserve_mac_from_state_image, mac_address_translation, id)
+export function Ne2k(cpu, bus, preserve_mac_from_state_image, mac_address_translation, id?)
 {
     /** @const @type {CPU} */
     this.cpu = cpu;
