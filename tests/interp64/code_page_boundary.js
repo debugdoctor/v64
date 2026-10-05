@@ -22,7 +22,7 @@ const PHYS_B = 0x1A0000;   // backs virtual page 0x3000 (not adjacent to PHYS_A)
 const emulator = new v64({
     autostart: false,
     memory_size: 2 * 1024 * 1024,
-    disable_jit: 1,
+    disable_jit: true,
     log_level: 0,
     wasm_path: process.env.WASM_PATH || undefined,
 });
@@ -63,7 +63,7 @@ emulator.add_listener("emulator-loaded", () => {
     cpu.cr[0] = 0;
     cpu.is_32[0] = 1;
 
-    const runAt = (vaddr, steps) =>
+    const run_at = (vaddr, steps) =>
     {
         cpu.instruction_pointer[0] = vaddr;
         u32[16 + 4] = 0x80000; // rsp
@@ -83,7 +83,7 @@ emulator.add_listener("emulator-loaded", () => {
         ex.write8(PHYS_A + 0xFFE, 0xB8);
         ex.write8(PHYS_A + 0xFFF, 0x78);
         w(PHYS_B, [0x56, 0x34, 0x12, 0xF4]);
-        runAt(0x2FFE, 1);
+        run_at(0x2FFE, 1);
         assert.equal(u32[16] >>> 0, 0x1234_5678,
             "mov eax, imm32 with the immediate starting at page end - 1");
     }
@@ -97,7 +97,7 @@ emulator.add_listener("emulator-loaded", () => {
         w(PHYS_B, [disp >> 8 & 0xFF, disp >> 16 & 0xFF, disp >> 24 & 0xFF, 0xF4]);
         ex.write8(PHYS_B + (0x3003 - 0x3000 + disp), 0x00);
         u32[16] = 0x5A; // al
-        runAt(0x2FFD, 1);
+        run_at(0x2FFD, 1);
         assert.equal(ex.read8(PHYS_B + (0x3003 - 0x3000 + disp)), 0x5A,
             "movb disp32(%rip), %al with the disp32 starting at page end - 1");
     }

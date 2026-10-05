@@ -18,7 +18,7 @@ var emulator = new v64({
     cdrom: { url: __dirname + "/../../images/linux3.iso" },
     autostart: true,
     memory_size: 1024 * 1024 * 1024,
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: 0,
 });
 

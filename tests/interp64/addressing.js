@@ -16,7 +16,7 @@ const BASE = 0x1000;
 const emulator = new v64({
     autostart: false,
     memory_size: 2 * 1024 * 1024,
-    disable_jit: 1,
+    disable_jit: true,
     log_level: 0,
     wasm_path: process.env.WASM_PATH || undefined,
 });
@@ -113,6 +113,16 @@ emulator.add_listener("emulator-loaded", () => {
     set_reg64(1, 0x1000);
     run([0x67, 0x8D, 0x04, 0x0B]);
     expect(reg64(0), 0x2234n, "32-bit address size");
+
+    // lea rax, [ebx + ecx] with 67: a 64-bit destination keeps the full
+    // effective address, so the 32-bit address size must mask the base's high
+    // half itself (the 32-bit case above only truncated in the destination).
+    active_test = "lea rax,[ebx+ecx] (67)";
+    reset();
+    set_reg64(3, 0x1_0000_1234n);
+    set_reg64(1, 0x1000);
+    run([0x67, 0x48, 0x8D, 0x04, 0x0B]);
+    expect(reg64(0), 0x2234n, "32-bit address size, 64-bit destination");
 
     // lea rax, [r13] - r13/rbp need an explicit disp8
     active_test = "lea rax,[r13]";

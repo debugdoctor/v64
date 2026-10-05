@@ -115,7 +115,7 @@ const emulator = new v64({
     bzimage: { url: __dirname + "/../../images/buildroot-bzimage68.bin" },
     autostart: true,
     memory_size: 200 * 1024 * 1024,
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     virtio_console: true,
     virtio_balloon: true,
     uart0: true,

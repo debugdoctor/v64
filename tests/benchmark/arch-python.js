@@ -22,7 +22,7 @@ const emulator = new v64({
     },
     initial_state: { url: path.join(V86_ROOT, "/images/arch_state-v2.bin.zst") },
     filesystem: { baseurl: path.join(V86_ROOT, "/images/arch/") },
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: 0,
 });
 

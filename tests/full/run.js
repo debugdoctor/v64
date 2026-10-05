@@ -1185,6 +1185,23 @@ if(cluster.isPrimary)
             actions: [{ on_text: "                   BIOS default device boot in", run: "\n", after: 5000 }],
         },
         {
+            name: "Tiny Core Pure64 17 CD",
+            skip_if_disk_image_missing: 1,
+            timeout: 10 * 60,
+            cdrom: root_path + "/images/TinyCorePure64-17.1.iso",
+            expect_graphical_mode: true,
+            expect_mouse_registered: true,
+            actions: [{ on_text: "                   BIOS default device boot in", run: "\n", after: 5000 }],
+        },
+        {
+            name: "OpenWrt 24.10 x86-64",
+            skip_if_disk_image_missing: 1,
+            timeout: 10 * 60,
+            memory_size: 256 * 1024 * 1024,
+            hda: root_path + "/images/openwrt-24.10.5-x86-64-squashfs.img",
+            expected_serial_text: ["Please press Enter to activate this console"],
+        },
+        {
             name: "Core 9 (with hard disk)",
             skip_if_disk_image_missing: 1,
             timeout: 5 * 60,
@@ -1420,7 +1437,7 @@ function run_test(test, done)
     settings.boot_order = test.boot_order;
     settings.cpuid_level = test.cpuid_level;
     settings.net_device = test.net_device;
-    settings.disable_jit = DISABLE_JIT;
+    settings.disable_jit = !!DISABLE_JIT;
 
     if(test.expected_texts)
     {

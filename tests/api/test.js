@@ -18,7 +18,7 @@ const emulator = new v64({
     memory_size: 32 * 1024 * 1024,
     filesystem: {},
     log_level: -641,
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
 });
 
 setInterval(() => {

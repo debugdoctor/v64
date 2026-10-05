@@ -22,6 +22,7 @@
 // Run with: `node tests/jit64/fillloop.js`
 
 import { v64 } from "../../src/main.js";
+import { set_cpu_config, JIT_DISABLE_64 } from "../../src/config.js";
 
 const BASE = 0x1000;
 const SCRATCH = 0x100000;
@@ -96,7 +97,7 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     const run = (program, r14, cx, jitEnabled) => {
-        ex.jit64_set_enabled(jitEnabled ? 1 : 0);
+        set_cpu_config(ex, "JIT_DISABLE", jitEnabled ? 0 : JIT_DISABLE_64);
         ex.jit64_clear_cache();
         const bytes = program.slice();
         // patch r14 (imm64 at 0x12) and cx (imm16 at 0x1C)

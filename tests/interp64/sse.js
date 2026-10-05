@@ -24,7 +24,7 @@ const MARKER = 0x6000;
 const emulator = new v64({
     autostart: false,
     memory_size: 4 * 1024 * 1024,
-    disable_jit: 1,
+    disable_jit: true,
     log_level: 0,
     wasm_path: process.env.WASM_PATH || undefined,
 });
@@ -120,6 +120,28 @@ emulator.add_listener("emulator-loaded", () => {
         return read32(MARKER) !== 0;
     };
 
+    // Same, but through the decode cache (`interp64_run`): jit64 decodes the
+    // block and `jexec` runs the cached Xmm* Instrs.
+    const run_code_cached = code => {
+        build_page_tables();
+        for(let i = 0; i < code.length; i++) ex.write8(BASE + i, code[i]);
+        ex.write8(BASE + code.length, 0xF4);
+        for(let i = 0; i < handler.length; i++) ex.write8(HANDLER + i, handler[i]);
+        write64(IDT + 6 * 16, gate(HANDLER, 0x08, 0xE));
+        write64(MARKER, 0n);
+        cpu.idtr_offset[0] = IDT;
+        cpu.idtr_size[0] = 0xFFF;
+        cpu.instruction_pointer[0] = BASE;
+        u32[16 + 4] = 0x80000;
+        u32[32 + 4] = 0;
+        cpu.in_hlt[0] = 0;
+        cpu.cpl[0] = 0;
+        ex.enter_long_mode(PML4);
+        ex.interp64_run(1000);
+        if(!cpu.in_hlt[0]) note("did not halt (cached) at 0x" + (cpu.instruction_pointer[0] >>> 0).toString(16));
+        return read32(MARKER) !== 0;
+    };
+
     const sse = (name, init, code, checks) => {
         active_test = name;
         reset_regs();
@@ -144,6 +166,19 @@ emulator.add_listener("emulator-loaded", () => {
     sse("paddd", { 0: 1, 3: 2 }, [
         0x66, 0x0F, 0x6E, 0xC0, 0x66, 0x0F, 0x6E, 0xCB, 0x66, 0x0F, 0xFE, 0xC1, 0x66, 0x0F, 0x7E, 0xC0,
     ], () => expect(reg64(0), 3n, "lane sum"));
+
+    // The same SSE2 ops through the decode cache, where jexec runs the cached
+    // Xmm* Instrs (previously unsupported, so the block fell back per-instruction).
+    active_test = "paddd (decode cache)";
+    reset_regs();
+    for(let i = 0; i < 4; i++) ex.write32(SCRATCH + i * 4, i + 1);
+    set_reg(3, SCRATCH);
+    expect(run_code_cached([
+        0x66, 0x0F, 0x6F, 0x03, // movdqa xmm0, [rbx]
+        0x66, 0x0F, 0xFE, 0xC0, // paddd xmm0, xmm0
+        0x66, 0x0F, 0x7F, 0x03, // movdqa [rbx], xmm0
+    ]), false, "not #UD");
+    for(let i = 0; i < 4; i++) expect(read32(SCRATCH + i * 4), (i + 1) * 2, "cached lane " + i);
 
     sse("psubd", { 0: 5, 3: 2 }, [
         0x66, 0x0F, 0x6E, 0xC0, 0x66, 0x0F, 0x6E, 0xCB, 0x66, 0x0F, 0xFA, 0xC1, 0x66, 0x0F, 0x7E, 0xC0,

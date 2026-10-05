@@ -89,7 +89,7 @@ const emulator = new v64({
     cdrom: { url: __dirname + "/../../images/linux4.iso" },
     autostart: true,
     memory_size: 64 * 1024 * 1024,
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     network_relay_url: "wisps://wisp.mercurywork.shop/",
     log_level: SHOW_LOGS ? 0x400000 : 0,
 });

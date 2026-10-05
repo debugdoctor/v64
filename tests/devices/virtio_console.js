@@ -23,7 +23,7 @@ const emulator = new v64({
         "console=ttyS0",
         "audit=0",
     ].join(" "),
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: SHOW_LOGS ? 0x400000 : 0,
     virtio_console: true,
 });

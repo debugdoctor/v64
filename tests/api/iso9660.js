@@ -31,7 +31,7 @@ const emulator = new v64({
     autostart: true,
     memory_size: 128 * 1024 * 1024,
     log_level: 0,
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
 });
 
 let serial_text = "";

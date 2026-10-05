@@ -17,6 +17,7 @@ import { mkdtempSync as mkdtemp_sync, readFileSync as read_file_sync, rmSync as 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { v64 } from "../../src/main.js";
+import { set_cpu_config, JIT_DISABLE_64 } from "../../src/config.js";
 
 const BASE = 0x1000;
 const LOOPS = 600;
@@ -98,7 +99,7 @@ emulator.add_listener("emulator-loaded", () => {
     write64(0x60000, 0x11223344n);
 
     const run = jitEnabled => {
-        ex.jit64_set_enabled(jitEnabled ? 1 : 0);
+        set_cpu_config(ex, "JIT_DISABLE", jitEnabled ? 0 : JIT_DISABLE_64);
         ex.jit64_clear_cache();
         for(let i = 0; i < 16; i++) ex.write8(0x80020 + i, 0);
         cpu.instruction_pointer[0] = BASE;

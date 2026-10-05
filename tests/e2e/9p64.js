@@ -68,7 +68,7 @@ fs.writeFileSync(kernel_path, bz_image(assemble()));
 const emulator = new v64({
     autostart: false,
     memory_size: 8 * 1024 * 1024,
-    disable_jit: 1,
+    disable_jit: true,
     log_level: 0,
     bzimage: { url: kernel_path, async: false },
     filesystem: {},

@@ -9,6 +9,7 @@
 
 import assert from "node:assert/strict";
 import { v64 } from "../../src/main.js";
+import { set_cpu_config, JIT_DISABLE_64 } from "../../src/config.js";
 
 const BLOCKS = +process.env.JIT64_ENTRY_BLOCKS || 4000;
 const PASSES = +process.env.JIT64_ENTRY_PASSES || 700;
@@ -30,9 +31,9 @@ const emulator = new v64({
 emulator.add_listener("emulator-loaded", () => {
     const cpu = emulator.v86.cpu;
     const ex = cpu.wm.exports;
-    if(process.env.DIRECT_CODE_READ === "0") ex.jit64_set_direct_code_read(0);
+    if(process.env.DIRECT_CODE_READ === "0") set_cpu_config(ex, "JIT64_DIRECT_CODE_READ", 0);
     // Force eviction with a small cap so the block cache actually trims.
-    ex.jit64_set_max_blocks(1000);
+    set_cpu_config(ex, "JIT64_MAX_BLOCKS", 1000);
     const write64 = (address, value) => {
         ex.write32(address, Number(value & 0xFFFFFFFFn));
         ex.write32(address + 4, Number(value >> 32n));
@@ -77,7 +78,7 @@ emulator.add_listener("emulator-loaded", () => {
     })();
 
     const run = jitEnabled => {
-        ex.jit64_set_enabled(jitEnabled ? 1 : 0);
+        set_cpu_config(ex, "JIT_DISABLE", jitEnabled ? 0 : JIT_DISABLE_64);
         ex.jit64_clear_cache();
         const view = new DataView(cpu.wasm_memory.buffer);
         // REG_LOW = 64 (low 32 bits), REG_HIGH = 128, REG_EXT = 160 (r8-r15).

@@ -14,7 +14,7 @@ const SCRATCH = 0x2000;
 const emulator = new v64({
     autostart: false,
     memory_size: 2 * 1024 * 1024,
-    disable_jit: 1,
+    disable_jit: true,
     log_level: 0,
     wasm_path: process.env.WASM_PATH || undefined,
 });
@@ -622,7 +622,7 @@ emulator.add_listener("emulator-loaded", () => {
     // PSRAD/PSRAW shift arithmetically within each lane; GCC widens int -> long
     // with `movd`/`psrad $31`/`punpckldq`. cf. Intel SDM Vol. 2, PSRAD.
     {
-        const runShift = (bytes, input) =>
+        const run_shift = (bytes, input) =>
         {
             for(let i = 0; i < 16; i++)
             {
@@ -657,7 +657,7 @@ emulator.add_listener("emulator-loaded", () => {
         ];
         for(const [name, bytes, input, want] of cases)
         {
-            assert.equal(runShift(bytes, input), want >>> 0, name);
+            assert.equal(run_shift(bytes, input), want >>> 0, name);
         }
     }
 

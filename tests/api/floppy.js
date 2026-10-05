@@ -84,7 +84,7 @@ const CONFIG_MSDOS622_HD = {
     autostart: true,
     memory_size: 32 * 1024 * 1024,
     log_level: 0,
-    disable_jit: +process.env.DISABLE_JIT
+    disable_jit: !!+process.env.DISABLE_JIT
 };
 
 const CONFIG_TINYCORE_CD = {
@@ -94,7 +94,7 @@ const CONFIG_TINYCORE_CD = {
     autostart: true,
     memory_size: 128 * 1024 * 1024,
     log_level: 0,
-    disable_jit: +process.env.DISABLE_JIT
+    disable_jit: !!+process.env.DISABLE_JIT
 };
 
 await exec_test("floppy-insert-eject", CONFIG_MSDOS622_HD, 60, async emulator =>

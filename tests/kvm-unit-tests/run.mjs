@@ -17,7 +17,7 @@ var emulator = new v64({
     multiboot: { url: process.argv[2] },
     autostart: true,
     memory_size: 64 * 1024 * 1024,
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: 0,
 });
 

@@ -5,14 +5,15 @@
 //
 // Requires `make build/v64-debug.wasm`. Options:
 //   JIT64_BENCH_ITERATIONS=500000 MICROBENCH_ONLY=load_stride_page \
-//   MICROBENCH_OUT=build/microbench.json node tests/jit64/microbench.js
+//   MICROBENCH_OUT=build/microbench.json node tests/benchmark/cpu64.js
 //
 // The measured JIT run does not clear the block cache or rewrite the code page,
 // so one-time compile cost is excluded.
 
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { writeFileSync as write_file_sync } from "node:fs";
 import { v64 } from "../../src/main.js";
+import { set_cpu_config, JIT_DISABLE_64 } from "../../src/config.js";
 
 const ITERATIONS = +process.env.JIT64_BENCH_ITERATIONS || 500000;
 
@@ -221,19 +222,18 @@ emulator.add_listener("emulator-loaded", () => {
     const ex = cpu.wm.exports;
     const buffer = ex.memory.buffer;
     const u32 = new Uint32Array(buffer);
-    if(process.env.INLINE_MEMORY === "0") ex.jit64_set_inline_memory(0);
-    if(process.env.INLINE_WRITE === "0") ex.jit64_set_inline_write(0);
-    if(process.env.INTERP_CACHE === "0") ex.interp64_set_fetch_cache(0);
-    if(process.env.INTERP_MEM_SINGLE === "0") ex.interp64_set_mem_single(0);
-    if(process.env.INTERP_BATCH === "0") ex.interp64_set_batch(0);
-    if(process.env.PARTIAL_BLOCKS === "0") ex.jit64_set_partial_blocks(0);
-    if(process.env.ENTRY_CACHE === "0") ex.jit64_set_entry_cache(0);
-    if(process.env.HOT_CACHE === "0") ex.jit64_set_hot_cache(0);
-    if(process.env.SSE === "0") ex.jit64_set_sse(0);
-    if(process.env.SSE === "1") ex.jit64_set_sse(1);
-    if(process.env.CHAIN_BUDGET !== undefined) ex.jit64_set_chain_budget(parseInt(process.env.CHAIN_BUDGET, 10));
-    if(process.env.BLOCK_PROLOGUE !== undefined) ex.jit64_set_block_prologue(parseInt(process.env.BLOCK_PROLOGUE, 10));
-    if(process.env.SUPERBLOCKS !== undefined) ex.jit64_set_superblocks(parseInt(process.env.SUPERBLOCKS, 10));
+    if(process.env.INLINE_MEMORY === "0") set_cpu_config(ex, "JIT64_INLINE_MEMORY", 0);
+    if(process.env.INLINE_WRITE === "0") set_cpu_config(ex, "JIT64_INLINE_WRITE", 0);
+    if(process.env.INTERP_MEM_SINGLE === "0") set_cpu_config(ex, "INTERP64_MEM_SINGLE", 0);
+    if(process.env.INTERP_BATCH === "0") set_cpu_config(ex, "INTERP64_BATCH", 0);
+    if(process.env.PARTIAL_BLOCKS === "0") set_cpu_config(ex, "JIT64_PARTIAL_BLOCKS", 0);
+    if(process.env.ENTRY_CACHE === "0") set_cpu_config(ex, "JIT64_ENTRY_CACHE", 0);
+    if(process.env.HOT_CACHE === "0") set_cpu_config(ex, "JIT64_HOT_CACHE", 0);
+    if(process.env.SSE === "0") set_cpu_config(ex, "JIT64_SSE", 0);
+    if(process.env.SSE === "1") set_cpu_config(ex, "JIT64_SSE", 1);
+    if(process.env.CHAIN_BUDGET !== undefined) set_cpu_config(ex, "JIT64_CHAIN_BUDGET", parseInt(process.env.CHAIN_BUDGET, 10));
+    if(process.env.BLOCK_PROLOGUE !== undefined) set_cpu_config(ex, "JIT64_BLOCK_PROLOGUE", parseInt(process.env.BLOCK_PROLOGUE, 10));
+    if(process.env.SUPERBLOCKS !== undefined) set_cpu_config(ex, "JIT64_SUPERBLOCKS", parseInt(process.env.SUPERBLOCKS, 10));
 
     const write64 = (address, value) => {
         ex.write32(address, Number(value & 0xFFFF_FFFFn));
@@ -253,7 +253,7 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     const run = (jitEnabled, clearCache) => {
-        ex.jit64_set_enabled(jitEnabled ? 1 : 0);
+        set_cpu_config(ex, "JIT_DISABLE", jitEnabled ? 0 : JIT_DISABLE_64);
         if(clearCache) ex.jit64_clear_cache();
         cpu.instruction_pointer[0] = CODE;
         u32[16 + 4] = 0x80000; // rsp
@@ -323,7 +323,7 @@ emulator.add_listener("emulator-loaded", () => {
     const out = process.env.MICROBENCH_OUT;
     if(out)
     {
-        writeFileSync(out, JSON.stringify({ iterations: ITERATIONS, workloads: results }, null, 2) + "\n");
+        write_file_sync(out, JSON.stringify({ iterations: ITERATIONS, workloads: results }, null, 2) + "\n");
         console.log("wrote " + out);
     }
     process.exit(0);

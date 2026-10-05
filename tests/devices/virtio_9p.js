@@ -1127,7 +1127,7 @@ const emulator = new v64({
     filesystem: {
         baseurl: __dirname + "/testfs/",
     },
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: SHOW_LOGS ? 0x400000 : 0,
 });
 

@@ -18,7 +18,7 @@ var emulator = new v64({
     autostart: true,
     memory_size: 32 * 1024 * 1024,
     filesystem: {},
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: 0,
 });
 

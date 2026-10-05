@@ -18,7 +18,7 @@ const CMDLINE = "console=ttyS0 root=/dev/ram0";
 const emulator = new v64({
     autostart: false,
     memory_size: 4 * 1024 * 1024,
-    disable_jit: 1,
+    disable_jit: true,
     log_level: 0,
     wasm_path: process.env.WASM_PATH || undefined,
 });

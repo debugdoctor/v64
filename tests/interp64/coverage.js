@@ -165,10 +165,10 @@ const main = async () =>
             }
             const prefixed = PREFIXED[table.name.replace(/ /g, "") + ":" + op.toString(16)];
             // many 0F opcodes are only valid with a mandatory 66/F3/F2 prefix
-            const withPrefix = p => TAILS.map(t => [p, ...table.prefix, op, ...t]);
+            const with_prefix = p => TAILS.map(t => [p, ...table.prefix, op, ...t]);
             const candidates = prefixed || [
                 ...TAILS.map(t => [...table.prefix, op, ...t]),
-                ...withPrefix(0x66), ...withPrefix(0xF3), ...withPrefix(0xF2),
+                ...with_prefix(0x66), ...with_prefix(0xF3), ...with_prefix(0xF2),
             ];
             let ok = false;
             for(const bytes of candidates)

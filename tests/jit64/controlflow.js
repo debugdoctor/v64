@@ -12,6 +12,7 @@
 // Run with: `node tests/jit64/controlflow.js`
 
 import { v64 } from "../../src/main.js";
+import { set_cpu_config, JIT_DISABLE_64 } from "../../src/config.js";
 
 const BASE = 0x1000;
 const SCRATCH = 0x100000;
@@ -200,7 +201,7 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     const run = (program, regs, memory, jitEnabled) => {
-        ex.jit64_set_enabled(jitEnabled ? 1 : 0);
+        set_cpu_config(ex, "JIT_DISABLE", jitEnabled ? 0 : JIT_DISABLE_64);
         ex.jit64_clear_cache();
         for(let i = 0; i < program.length; i++) ex.write8(BASE + i, program[i]);
         for(let i = 0; i < 16; i++) set_reg64(i, regs[i]);

@@ -4,6 +4,7 @@
 // shadow, or immediately after POPFQ/IRETQ, before the next CLI region.
 import assert from "node:assert/strict";
 import * as main from "../../src/main.js";
+import { set_cpu_config } from "../../src/config.js";
 const v64 = main.v64 || main.v64;
 
 const emulator = new v64({
@@ -46,7 +47,7 @@ emulator.add_listener("emulator-loaded", () => {
     cpu.flags[0] = 2;
     cpu.cpl[0] = 0;
     cpu.in_hlt[0] = 0;
-    ex.jit64_set_enabled(1);
+    set_cpu_config(ex, "JIT_DISABLE", 0);
     cpu.device_lower_irq(0);
     cpu.device_raise_irq(0);
     const pic = new Uint8Array(cpu.wasm_memory.buffer, cpu.get_pic_addr_master(), 12);
@@ -114,9 +115,9 @@ emulator.add_listener("emulator-loaded", () => {
         ex.run_exact_instructions(1);
         assert.equal(view.getBigUint64(232, true), 0x7000n,
             `${instruction === 0x9D ? "POPFQ" : "IRETQ"} services pending IRQ on enabling IF`);
-        const expectedSP = instruction === 0x9D ? 0x8808 : 0x9000;
-        const irqFrame = cpu.mem8.byteOffset + expectedSP - 40;
-        assert.equal(view.getBigUint64(irqFrame, true), instruction === 0x9D ? 0x5001n : 0x6000n,
+        const expected_sp = instruction === 0x9D ? 0x8808 : 0x9000;
+        const irq_frame = cpu.mem8.byteOffset + expected_sp - 40;
+        assert.equal(view.getBigUint64(irq_frame, true), instruction === 0x9D ? 0x5001n : 0x6000n,
             "IRQ saves the architectural return RIP");
     }
     console.log("interp64 interrupt windows: STI shadow (including cached JIT), POPFQ and IRETQ passed");

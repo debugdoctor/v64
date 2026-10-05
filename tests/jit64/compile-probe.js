@@ -4,6 +4,7 @@
 // unmap that instruction: attempting compilation must not inject a guest #PF.
 import assert from "node:assert/strict";
 import * as main from "../../src/main.js";
+import { set_cpu_config } from "../../src/config.js";
 const v64 = main.v64 || main.v64;
 
 const emulator = new v64({
@@ -38,7 +39,7 @@ emulator.add_listener("emulator-loaded", () => {
     write64(0x8000 + 14 * 16 + 8, 0n);
     cpu.idtr_offset[0] = 0x8000;
     cpu.idtr_size[0] = 0xFFF;
-    ex.jit64_set_enabled(1);
+    set_cpu_config(ex, "JIT_DISABLE", 0);
 
     for(let iteration = 0; iteration < 501; iteration++)
     {

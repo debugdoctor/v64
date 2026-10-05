@@ -12,6 +12,7 @@
 // Run with: `node tests/jit64/differential.js`
 
 import { v64 } from "../../src/main.js";
+import { set_cpu_config, JIT_DISABLE_64 } from "../../src/config.js";
 
 const BASE = 0x1000;
 const SCRATCH = 0x100000;
@@ -552,6 +553,37 @@ emulator.add_listener("emulator-loaded", () => {
                 0x90,                         // nop
             ],
         },
+        {
+            // VEX/AVX runs in the interpreter (the JIT calls the shared
+            // implementation), so the stored result must match the interpreter.
+            name: "avx: vmovaps/vaddps/vmovaps to scratch",
+            body: [
+                0xC4, 0xC1, 0x78, 0x28, 0x07,       // vmovaps xmm0, [r15]
+                0xC4, 0xC1, 0x78, 0x28, 0x4F, 0x10, // vmovaps xmm1, [r15+16]
+                0xC5, 0xF8, 0x58, 0xC1,             // vaddps xmm0, xmm0, xmm1
+                0xC4, 0xC1, 0x78, 0x29, 0x47, 0x10, // vmovaps [r15+16], xmm0
+            ],
+        },
+        {
+            // 256-bit: the upper YMM half must survive the JIT bridge too.
+            name: "avx: 256-bit vmovaps/vaddps/vmovaps to scratch",
+            body: [
+                0xC4, 0xC1, 0x7C, 0x28, 0x07, // vmovaps ymm0, [r15]
+                0xC4, 0xC1, 0x7C, 0x28, 0x0F, // vmovaps ymm1, [r15]
+                0xC5, 0xFC, 0x58, 0xC1,       // vaddps ymm0, ymm0, ymm1
+                0xC4, 0xC1, 0x7C, 0x29, 0x07, // vmovaps [r15], ymm0
+            ],
+        },
+        {
+            // SSE (JIT codegen) writes XMM, then AVX (interpreter bridge) reads
+            // it: the two paths must agree on the XMM file in memory.
+            name: "avx: SSE load then VEX add",
+            body: [
+                0x41, 0x0F, 0x28, 0x07,       // movaps xmm0, [r15]
+                0xC5, 0xF8, 0x58, 0xC0,       // vaddps xmm0, xmm0, xmm0
+                0xC4, 0xC1, 0x78, 0x29, 0x07, // vmovaps [r15], xmm0
+            ],
+        },
     ];
 
     const seed_regs = random => {
@@ -564,8 +596,8 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     const run = (program, regs, memory, jitEnabled) => {
-        ex.jit64_set_enabled(jitEnabled ? 1 : 0);
-        ex.jit64_set_sse(process.env.JIT64_DIFF_SSE === "0" ? 0 : 1);
+        set_cpu_config(ex, "JIT_DISABLE", jitEnabled ? 0 : JIT_DISABLE_64);
+        set_cpu_config(ex, "JIT64_SSE", process.env.JIT64_DIFF_SSE === "0" ? 0 : 1);
         const legacy = process.env.JIT64_DIFF_LEGACY === "1";
         // Leave build defaults alone unless an env overrides, to test what ships.
         const set = (env, fn) => {
@@ -573,12 +605,12 @@ emulator.add_listener("emulator-loaded", () => {
             else if(process.env[env] === "0") fn(0);
             else if(process.env[env] === "1") fn(1);
         };
-        set("JIT64_DIFF_PARTIAL", v => ex.jit64_set_partial_blocks(v));
-        set("JIT64_DIFF_ENTRY", v => ex.jit64_set_entry_cache(v));
-        set("JIT64_DIFF_HOT", v => ex.jit64_set_hot_cache(v));
-        set("JIT64_DIFF_DIRECT", v => ex.jit64_set_direct_code_read(v));
-        ex.jit64_set_chain_budget(process.env.JIT64_DIFF_CHAIN ? parseInt(process.env.JIT64_DIFF_CHAIN, 10) : 0);
-        ex.jit64_set_block_prologue(process.env.JIT64_DIFF_PROLOGUE === "1" ? 1 : 0);
+        set("JIT64_DIFF_PARTIAL", v => set_cpu_config(ex, "JIT64_PARTIAL_BLOCKS", v));
+        set("JIT64_DIFF_ENTRY", v => set_cpu_config(ex, "JIT64_ENTRY_CACHE", v));
+        set("JIT64_DIFF_HOT", v => set_cpu_config(ex, "JIT64_HOT_CACHE", v));
+        set("JIT64_DIFF_DIRECT", v => set_cpu_config(ex, "JIT64_DIRECT_CODE_READ", v));
+        set_cpu_config(ex, "JIT64_CHAIN_BUDGET", process.env.JIT64_DIFF_CHAIN ? parseInt(process.env.JIT64_DIFF_CHAIN, 10) : 0);
+        set_cpu_config(ex, "JIT64_BLOCK_PROLOGUE", process.env.JIT64_DIFF_PROLOGUE === "1" ? 1 : 0);
         if(process.env.JIT64_DIFF_BAIL)
         {
             const [lo, hi] = process.env.JIT64_DIFF_BAIL.split(",").map(x => BigInt(x));
@@ -620,8 +652,8 @@ emulator.add_listener("emulator-loaded", () => {
     // Run exactly n instructions with the given engine, for bisecting a
     // mismatch down to the instruction that first diverges.
     const step = (program, regs, memory, jitEnabled, n) => {
-        ex.jit64_set_enabled(jitEnabled ? 1 : 0);
-        ex.jit64_set_sse(process.env.JIT64_DIFF_SSE === "0" ? 0 : 1);
+        set_cpu_config(ex, "JIT_DISABLE", jitEnabled ? 0 : JIT_DISABLE_64);
+        set_cpu_config(ex, "JIT64_SSE", process.env.JIT64_DIFF_SSE === "0" ? 0 : 1);
         const legacy = process.env.JIT64_DIFF_LEGACY === "1";
         // Leave build defaults alone unless an env overrides, to test what ships.
         const set = (env, fn) => {
@@ -629,12 +661,12 @@ emulator.add_listener("emulator-loaded", () => {
             else if(process.env[env] === "0") fn(0);
             else if(process.env[env] === "1") fn(1);
         };
-        set("JIT64_DIFF_PARTIAL", v => ex.jit64_set_partial_blocks(v));
-        set("JIT64_DIFF_ENTRY", v => ex.jit64_set_entry_cache(v));
-        set("JIT64_DIFF_HOT", v => ex.jit64_set_hot_cache(v));
-        set("JIT64_DIFF_DIRECT", v => ex.jit64_set_direct_code_read(v));
-        ex.jit64_set_chain_budget(process.env.JIT64_DIFF_CHAIN ? parseInt(process.env.JIT64_DIFF_CHAIN, 10) : 0);
-        ex.jit64_set_block_prologue(process.env.JIT64_DIFF_PROLOGUE === "1" ? 1 : 0);
+        set("JIT64_DIFF_PARTIAL", v => set_cpu_config(ex, "JIT64_PARTIAL_BLOCKS", v));
+        set("JIT64_DIFF_ENTRY", v => set_cpu_config(ex, "JIT64_ENTRY_CACHE", v));
+        set("JIT64_DIFF_HOT", v => set_cpu_config(ex, "JIT64_HOT_CACHE", v));
+        set("JIT64_DIFF_DIRECT", v => set_cpu_config(ex, "JIT64_DIRECT_CODE_READ", v));
+        set_cpu_config(ex, "JIT64_CHAIN_BUDGET", process.env.JIT64_DIFF_CHAIN ? parseInt(process.env.JIT64_DIFF_CHAIN, 10) : 0);
+        set_cpu_config(ex, "JIT64_BLOCK_PROLOGUE", process.env.JIT64_DIFF_PROLOGUE === "1" ? 1 : 0);
         if(process.env.JIT64_DIFF_BAIL)
         {
             const [lo, hi] = process.env.JIT64_DIFF_BAIL.split(",").map(x => BigInt(x));
@@ -711,9 +743,9 @@ emulator.add_listener("emulator-loaded", () => {
                 console.log("  smallest diverging loop count = " + k + ": " + problems.join(", "));
                 // shrink the body: the smallest prefix of the body that still
                 // diverges ends with the offending instruction
-                const bodyCount = 12 + Math.floor(rng(seed)() * 13);
-                let last = bodyCount;
-                for(let m = 1; m <= bodyCount; m++)
+                const body_count = 12 + Math.floor(rng(seed)() * 13);
+                let last = body_count;
+                for(let m = 1; m <= body_count; m++)
                 {
                     const r3 = rng(seed);
                     const p3 = build_program(r3, ITERATIONS, m);
@@ -729,7 +761,7 @@ emulator.add_listener("emulator-loaded", () => {
                     {
                         last = m;
                         console.log("    minimal diverging body = first " + m + " instruction(s)" +
-                            " of " + bodyCount);
+                            " of " + body_count);
                         console.log("      bytes: [" + p3.slice(6, 6 + 40).join(", ") + "]");
                         break;
                     }
@@ -750,6 +782,12 @@ emulator.add_listener("emulator-loaded", () => {
         const memory = Array.from({ length: 32 }, () => Math.floor(random() * 256));
         const interpreted = run(program, regs, memory, false);
         const compiled = run(program, regs, memory, true);
+        if(test.name.startsWith("avx") && ex.jit64_compiled_count() === 0)
+        {
+            fixed_failures++;
+            console.log("FAIL fixed: " + test.name + " (block was not JIT-compiled)");
+            continue;
+        }
         const differ = !interpreted.halted || !compiled.halted ||
             interpreted.flags !== compiled.flags ||
             interpreted.regs.some((v, i) => v !== compiled.regs[i]) ||
@@ -812,7 +850,7 @@ emulator.add_listener("emulator-loaded", () => {
 
     let compiled_any = false;
     let mismatches = 0;
-    const debugSeed = +process.env.JIT64_DIFF_DEBUG_SEED || 0;
+    const debug_seed = +process.env.JIT64_DIFF_DEBUG_SEED || 0;
     for(let seed = 1; seed <= CASES; seed++)
     {
         const random = rng(seed);
@@ -824,7 +862,7 @@ emulator.add_listener("emulator-loaded", () => {
         const compiled = run(program, regs, memory, true);
         if(ex.jit64_compiled_count() > 0) compiled_any = true;
 
-        if(debugSeed && seed === debugSeed)
+        if(debug_seed && seed === debug_seed)
         {
             console.log("DEBUG seed " + seed + " program: [" + program.join(", ") + "]");
             const n = ex.jit64_block_log_len();

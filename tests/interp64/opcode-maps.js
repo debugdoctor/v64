@@ -36,7 +36,7 @@ export const TABLES = [
     { name: "xop map a", prefix: [0x8F, 0xEA, 0x78], table: XOP_MAPA },
 ];
 
-export function forEachOpcode(table, fn)
+export function for_each_opcode(table, fn)
 {
     for(let i = 0; i < table.length; i++)
     {

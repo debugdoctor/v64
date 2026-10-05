@@ -48,7 +48,7 @@ const base_config = {
     autostart: true,
     memory_size: 32 * 1024 * 1024,
     log_level: 0,
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
 };
 
 async function destroy_emulator(emulator)

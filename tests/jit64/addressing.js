@@ -12,6 +12,7 @@
 // Run with: `node tests/jit64/addressing.js`
 
 import { v64 } from "../../src/main.js";
+import { set_cpu_config, JIT_DISABLE_64 } from "../../src/config.js";
 
 const BASE = 0x1000;
 const SCRATCH = 0x100000;
@@ -261,7 +262,7 @@ emulator.add_listener("emulator-loaded", () => {
     };
 
     const run = (program, regs, memory, jitEnabled) => {
-        ex.jit64_set_enabled(jitEnabled ? 1 : 0);
+        set_cpu_config(ex, "JIT_DISABLE", jitEnabled ? 0 : JIT_DISABLE_64);
         ex.jit64_clear_cache();
         for(let i = 0; i < program.length; i++) ex.write8(BASE + i, program[i]);
         for(let i = 0; i < 16; i++) set_reg64(i, regs[i]);
@@ -354,7 +355,7 @@ emulator.add_listener("emulator-loaded", () => {
     // enumerate the cross product instead. The destination is always r13 and
     // every other register holds a distinct value, so a wrong base or index
     // shows up in the result.
-    const sibImmediate = value => {
+    const sib_immediate = value => {
         const out = [];
         for(let i = 0; i < 8; i++) out.push(Number(value >> BigInt(8 * i) & 0xFFn));
         return out;
@@ -370,7 +371,7 @@ emulator.add_listener("emulator-loaded", () => {
         {
             if(register < 8) put(0x48, 0xB8 + register);
             else put(0x49, 0xB8 + (register - 8));
-            put(...sibImmediate(value));
+            put(...sib_immediate(value));
         }
         const head = bytes.length;
         put(0x41, 0xFF, 0xCB);                                // dec r11d
@@ -385,7 +386,7 @@ emulator.add_listener("emulator-loaded", () => {
         for(let i = 0; i < 4; i++) bytes[jmp_at + 1 + i] = head - (jmp_at + 5) >> (8 * i) & 0xFF;
         return bytes;
     };
-    const sibLea = (base_low, rex_b, index_low, rex_x, scale) => [
+    const sib_lea = (base_low, rex_b, index_low, rex_x, scale) => [
         0x40 | 0x08 | 0x04 | rex_x << 1 | rex_b,  // REX.W|REX.R(dst r13)|REX.X|REX.B
         0x8D,                                      // lea
         0x80 | 5 << 3 | 4,                         // mod=10, reg=r13, rm=SIB
@@ -404,7 +405,7 @@ emulator.add_listener("emulator-loaded", () => {
                 {
                     for(let scale = 0; scale < 4; scale++)
                     {
-                        const program = build_sib_program(sibLea(base_low, rex_b, index_low, rex_x, scale));
+                        const program = build_sib_program(sib_lea(base_low, rex_b, index_low, rex_x, scale));
                         const regs = new Array(16).fill(0n);
                         const interpreted = run(program, regs, [], false);
                         const compiled = run(program, regs, [], true);
@@ -428,7 +429,7 @@ emulator.add_listener("emulator-loaded", () => {
                                 console.log("FAIL SIB base=" + base_low + " rex_b=" + rex_b +
                                     " index=" + index_low + " rex_x=" + rex_x + " scale=" + scale +
                                     ": " + problems[0]);
-                                console.log("     [0x" + sibLea(base_low, rex_b, index_low, rex_x, scale)
+                                console.log("     [0x" + sib_lea(base_low, rex_b, index_low, rex_x, scale)
                                     .map(x => x.toString(16)).join(", 0x") + "]");
                             }
                         }

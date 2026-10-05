@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { v64 } from "../../src/main.js";
+import { set_cpu_config } from "../../src/config.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const ISO = process.env.ALPINE_ISO || path.join(ROOT, "images/alpine-virt-3.24.2-x86_64.iso");
@@ -61,7 +62,8 @@ const emulator = new v64({
     bios: { url: path.join(ROOT, "bios/bochs-bios.bin"), async: false },
     cdrom: { buffer: load_patched_iso() },
     boot_order: 0x213,
-    disable_jit: process.env.INTERP ? 1 : 0,
+    net_device: { type: "virtio", relay_url: process.env.RELAY || undefined },
+    disable_jit: process.env.INTERP ? true : 0,
     log_level: 0,
 });
 
@@ -71,22 +73,21 @@ emulator.add_listener("serial0-output-byte", b => { serial += String.fromCharCod
 emulator.add_listener("emulator-loaded", async () =>
 {
     const ex = emulator.v86.cpu.wm.exports;
-    if(process.env.INTERP) ex.jit64_set_enabled(0);
-    if(process.env.INTERP_CACHE === "0") ex.interp64_set_fetch_cache(0);
-    if(process.env.INTERP_MEM_SINGLE === "0") ex.interp64_set_mem_single(0);
-    if(process.env.INTERP_BATCH === "0") ex.interp64_set_batch(0);
-    if(process.env.BLOCK_PROLOGUE !== undefined) ex.jit64_set_block_prologue(parseInt(process.env.BLOCK_PROLOGUE, 10));
-    if(process.env.EXIT_STATS === "1") ex.jit64_set_exit_stats(1);
-    if(process.env.SUPERBLOCKS !== undefined) ex.jit64_set_superblocks(parseInt(process.env.SUPERBLOCKS, 10));
-    if(process.env.BLOCK_LIMIT !== undefined) ex.jit64_set_block_limit(parseInt(process.env.BLOCK_LIMIT, 10));
-    if(process.env.INLINE_MEMORY === "0") ex.jit64_set_inline_memory(0);
-    if(process.env.INLINE_WRITE === "0") ex.jit64_set_inline_write(0);
-    if(process.env.ENTRY_CACHE === "0") ex.jit64_set_entry_cache(0);
-    if(process.env.HOT_CACHE === "0") ex.jit64_set_hot_cache(0);
-    if(process.env.SMC_BAIL !== undefined) ex.jit64_set_smc_bail(parseInt(process.env.SMC_BAIL, 10));
-    if(process.env.SELFCHECK === "1") ex.jit64_set_selfcheck(1);
-    if(process.env.SELFCHECK_MIN !== undefined) ex.jit64_set_selfcheck_min(parseInt(process.env.SELFCHECK_MIN, 10));
-    if(process.env.SELFCHECK_REPEAT !== undefined) ex.jit64_set_selfcheck_repeat(parseInt(process.env.SELFCHECK_REPEAT, 10));
+    if(process.env.INTERP_MEM_SINGLE === "0") set_cpu_config(ex, "INTERP64_MEM_SINGLE", 0);
+    if(process.env.INTERP_BATCH === "0") set_cpu_config(ex, "INTERP64_BATCH", 0);
+    if(process.env.PERF_FAIL_OPS === "1") set_cpu_config(ex, "INTERP64_OPCODE_STATS", 1);
+    if(process.env.BLOCK_PROLOGUE !== undefined) set_cpu_config(ex, "JIT64_BLOCK_PROLOGUE", parseInt(process.env.BLOCK_PROLOGUE, 10));
+    if(process.env.EXIT_STATS === "1") set_cpu_config(ex, "JIT64_EXIT_STATS", 1);
+    if(process.env.SUPERBLOCKS !== undefined) set_cpu_config(ex, "JIT64_SUPERBLOCKS", parseInt(process.env.SUPERBLOCKS, 10));
+    if(process.env.BLOCK_LIMIT !== undefined) set_cpu_config(ex, "JIT64_BLOCK_LIMIT", parseInt(process.env.BLOCK_LIMIT, 10));
+    if(process.env.INLINE_MEMORY === "0") set_cpu_config(ex, "JIT64_INLINE_MEMORY", 0);
+    if(process.env.INLINE_WRITE === "0") set_cpu_config(ex, "JIT64_INLINE_WRITE", 0);
+    if(process.env.ENTRY_CACHE === "0") set_cpu_config(ex, "JIT64_ENTRY_CACHE", 0);
+    if(process.env.HOT_CACHE === "0") set_cpu_config(ex, "JIT64_HOT_CACHE", 0);
+    if(process.env.SMC_BAIL !== undefined) set_cpu_config(ex, "JIT64_SMC_BAIL", parseInt(process.env.SMC_BAIL, 10));
+    if(process.env.SELFCHECK === "1") set_cpu_config(ex, "JIT64_SELFCHECK", 1);
+    if(process.env.SELFCHECK_MIN !== undefined) set_cpu_config(ex, "JIT64_SELFCHECK_MIN", parseInt(process.env.SELFCHECK_MIN, 10));
+    if(process.env.SELFCHECK_REPEAT !== undefined) set_cpu_config(ex, "JIT64_SELFCHECK_REPEAT", parseInt(process.env.SELFCHECK_REPEAT, 10));
     if(process.env.BAIL_RIP)
     {
         const [lo, hi] = process.env.BAIL_RIP.split(",").map(x => BigInt(x));

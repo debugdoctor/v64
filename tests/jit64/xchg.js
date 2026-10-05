@@ -7,6 +7,7 @@
 // refreshes. Each program is run enough times to be JIT-compiled.
 import assert from "node:assert/strict";
 import { v64 } from "../../src/main.js";
+import { set_cpu_config } from "../../src/config.js";
 
 const emulator = new v64({
     autostart: false,
@@ -44,7 +45,7 @@ emulator.add_listener("emulator-loaded", () => {
             0xF4,
         ];
         ex.jit64_clear_cache();
-        ex.jit64_set_enabled(1);
+        set_cpu_config(ex, "JIT_DISABLE", 0);
         cpu.mem8.set(code, BASE);
         for(let i = 0; i < 700; i++)
         {

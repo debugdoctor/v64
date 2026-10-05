@@ -4,6 +4,7 @@
 // which adds S_IFDIR to sysfs directory modes.
 import assert from "node:assert/strict";
 import { v64 } from "../../src/main.js";
+import { set_cpu_config } from "../../src/config.js";
 
 const emulator = new v64({
     autostart: false,
@@ -44,7 +45,7 @@ emulator.add_listener("emulator-loaded", () => {
         cpu.in_hlt[0] = 0;
         view.setUint32(80, 0x90000, true);
         view.setUint32(144, 0, true);
-        ex.jit64_set_enabled(1);
+        set_cpu_config(ex, "JIT_DISABLE", 0);
         ex.run_exact_instructions(10000);
         assert.equal(cpu.in_hlt[0], 1, `${name}: loop halted`);
         assert.ok(ex.jit64_compiled_count() > 0, `${name}: exercised compiled code`);

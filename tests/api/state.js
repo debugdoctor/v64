@@ -16,7 +16,7 @@ const config_async_cdrom = {
     autostart: true,
     memory_size: 64 * 1024 * 1024,
     filesystem: {},
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: 0,
 };
 
@@ -27,7 +27,7 @@ const config_sync_cdrom = {
     autostart: true,
     memory_size: 64 * 1024 * 1024,
     filesystem: {},
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: 0,
 };
 
@@ -40,7 +40,7 @@ const config_filesystem = {
     bzimage: { url: __dirname + "/../../images/buildroot-bzimage68.bin" },
     cmdline: "tsc=reliable mitigations=off random.trust_cpu=on",
     network_relay_url: "<UNUSED>",
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: 0,
 };
 
@@ -52,7 +52,7 @@ const config_large_memory = {
     memory_size: 2048 * 1024 * 1024,
     vga_memory_size: 512 * 1024 * 1024,
     network_relay_url: "<UNUSED>",
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
     log_level: 0,
 };
 

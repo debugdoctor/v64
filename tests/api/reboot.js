@@ -22,7 +22,7 @@ const config = {
     filesystem: {},
     virtio_console: true,
     log_level: 0,
-    disable_jit: +process.env.DISABLE_JIT,
+    disable_jit: !!+process.env.DISABLE_JIT,
 };
 
 const emulator = new v64(config);
