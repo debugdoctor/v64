@@ -30,8 +30,7 @@ v64 targets 64-bit Linux. The 32-bit support inherited from v86 is still in the 
 - `make`
 - Rust, with the `wasm32-unknown-unknown` target
 - A Rust-compatible version of `clang`
-- Node.js (recent; upstream is tested with v24.x)
-- `java` (for Closure Compiler; not needed for the debug build)
+- Node.js (recent; upstream is tested with v24.x) and `pnpm`
 - For tests: `nasm`, `gdb`, `qemu-system`, `gcc`, `libc-i386`, `rustfmt`
 
 ```sh
@@ -43,14 +42,15 @@ A complete Debian / WSL setup is described in [`tools/docker/test-image/Dockerfi
 ## Build
 
 ```sh
-# Debug build (output: debug.html, no java needed)
+# Debug build (output: debug.html)
 make
 
-# Optimized build (output: index.html)
+# Optimized build (output: index.html). The first run installs the pnpm
+# devDependencies (Closure Compiler and TypeScript).
 make all
 ```
 
-The first build generates `src/rust/gen/*.rs`, compiles the Rust crate for the wasm target, and bundles the JavaScript.
+The first build compiles the Rust crate for the wasm target and bundles the JavaScript. The 32-bit instruction tables under `src/rust/cpu/*.rs` are checked in, not generated at build time.
 
 ## Run
 
@@ -104,7 +104,6 @@ make tests
 
 ```
 src/            Emulator core (JS) + Rust JIT (src/rust/)
-gen/            Instruction-table generators (Node scripts -> src/rust/gen/*.rs)
 bios/           SeaBIOS / VGA BIOS binaries (bring your own)
 tools/docker/   Guest image build scripts (including alpine/)
 examples/       Embedding examples

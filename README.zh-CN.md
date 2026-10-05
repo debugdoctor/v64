@@ -30,8 +30,7 @@ v64 的目标是 64 位 Linux。继承自 v86 的 32 位支持仍在代码里，
 - `make`
 - Rust，并安装 `wasm32-unknown-unknown` target
 - 与 Rust 兼容的 `clang`
-- Node.js（较新版本，上游验证 v24.x）
-- `java`（用于 Closure Compiler；只构建 debug 版时不需要）
+- Node.js（较新版本，上游验证 v24.x）与 `pnpm`
 - 运行测试额外需要：`nasm`、`gdb`、`qemu-system`、`gcc`、`libc-i386`、`rustfmt`
 
 ```sh
@@ -43,14 +42,15 @@ rustup target add wasm32-unknown-unknown
 ## 构建
 
 ```sh
-# 调试构建（产物：debug.html，不需要 java）
+# 调试构建（产物：debug.html）
 make
 
-# 优化构建（产物：index.html）
+# 优化构建（产物：index.html）。首次会通过 pnpm 安装 devDependencies
+# （Closure Compiler 和 TypeScript）。
 make all
 ```
 
-首次构建会先生成 `src/rust/gen/*.rs`，再用 wasm target 编译 Rust，最后打包 JavaScript。
+首次构建会用 wasm target 编译 Rust，然后打包 JavaScript。32 位指令表位于 `src/rust/cpu/*.rs`，已纳入版本控制，不再于构建时生成。
 
 ## 运行
 
@@ -104,7 +104,6 @@ make tests
 
 ```
 src/            模拟器主体（JS）+ Rust JIT（src/rust/）
-gen/            指令表生成器（Node 脚本 -> src/rust/gen/*.rs）
 bios/           SeaBIOS / VGA BIOS 二进制（需自行准备）
 tools/docker/   各 guest 的镜像构建脚本（含 alpine/）
 examples/       嵌入用法示例
