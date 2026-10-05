@@ -2,8 +2,8 @@
   "name": "v64",
   "version": "0.5",
   "license": "BSD-2-Clause",
-  "description": "x86 PC emulator and x86-to-wasm JIT, running in the browser",
-  "homepage": "https://copy.sh/v86/",
+  "description": "16/32/64-bit x86 PC emulator and x86-to-wasm JIT, running in the browser",
+  "homepage": "https://github.com/debugdoctor/v64",
   "files": [
     "Readme.md",
     "LICENSE",
@@ -15,6 +15,16 @@
   ],
   "main": "build/libv64.mjs",
   "types": "v64.d.ts",
-  "repository": "github:copy/v86",
-  "type": "module"
+  "repository": "github:debugdoctor/v64",
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "eslint": "^10.11.0",
+    "google-closure-compiler": "20260920.0.0",
+    "typescript": "^7.0.2"
+  }
 }

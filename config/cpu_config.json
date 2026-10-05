@@ -1,0 +1,56 @@
+{
+  "comment": "Single source of truth for the wasm set_cpu_config/get_cpu_config keys. tools/gen_cpu_config.js injects them into the generated block of src/rust/config.rs and src/config.js. Edit this file, never the generated blocks.",
+  "groups": [
+    {
+      "name": "JIT master switch (jit.rs + jit64.rs)",
+      "keys": {
+        "JIT_DISABLE": 0
+      }
+    },
+    {
+      "name": "32-bit JIT (jit.rs)",
+      "keys": {
+        "MAX_PAGES": 1,
+        "LOOP_SAFETY": 2,
+        "EXTRA_BASIC_BLOCKS": 3
+      }
+    },
+    {
+      "name": "Long-mode JIT (jit64.rs)",
+      "keys": {
+        "JIT64_INLINE_MEMORY": 17,
+        "JIT64_INLINE_WRITE": 18,
+        "JIT64_SSE": 19,
+        "JIT64_PARTIAL_BLOCKS": 20,
+        "JIT64_ENTRY_CACHE": 21,
+        "JIT64_HOT_CACHE": 22,
+        "JIT64_DIRECT_CODE_READ": 23,
+        "JIT64_MAX_BLOCKS": 24,
+        "JIT64_CHAIN_BUDGET": 25,
+        "JIT64_BLOCK_PROLOGUE": 26,
+        "JIT64_SUPERBLOCKS": 27,
+        "JIT64_BLOCK_LIMIT": 28,
+        "JIT64_SMC_BAIL": 29,
+        "JIT64_SELFCHECK": 30,
+        "JIT64_SELFCHECK_MIN": 31,
+        "JIT64_SELFCHECK_REPEAT": 32,
+        "JIT64_EXIT_STATS": 33
+      }
+    },
+    {
+      "name": "Long-mode interpreter (interp64.rs)",
+      "keys": {
+        "INTERP64_BATCH": 48,
+        "INTERP64_MEM_SINGLE": 50,
+        "INTERP64_DECODE_CACHE": 51,
+        "INTERP64_OPCODE_STATS": 52
+      }
+    },
+    {
+      "name": "32-bit interpreter (interpreter.rs)",
+      "keys": {
+        "INTERP32_BATCH": 49
+      }
+    }
+  ]
+}

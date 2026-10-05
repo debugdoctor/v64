@@ -12,8 +12,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Run eslint
-        run: sudo npm install -g eslint; make eslint
+        run: make eslint
 
   test:
     runs-on: ubuntu-latest
@@ -26,11 +32,18 @@ jobs:
           fetch-depth: 0
           filter: tree:0
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Setup Node.js version
         uses: actions/setup-node@v6
         with:
           node-version: '24.17.0'
           registry-url: 'https://registry.npmjs.org'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Setup toolchain
         run: |
@@ -69,6 +82,8 @@ jobs:
         run: tests/kvm-unit-tests/build.sh
 
       - name: Run kvm-unit-test
+        env:
+          NODE_OPTIONS: --import ./tools/ts-register.mjs
         run: |
           tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch.flat
           tests/kvm-unit-tests/run.mjs tests/kvm-unit-tests/x86/taskswitch2.flat

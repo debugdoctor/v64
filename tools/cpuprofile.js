@@ -5,14 +5,14 @@
 //
 // Usage:
 //   node --cpu-prof --cpu-prof-dir=/tmp/v64-prof tests/e2e/alpine-perf.js
-//   node tests/e2e/cpuprofile.js /tmp/v64-prof/*.cpuprofile
+//   node tools/cpuprofile.js /tmp/v64-prof/*.cpuprofile
 
 import fs from "node:fs";
 
 const file = process.argv[2];
 if(!file)
 {
-    console.error("usage: node tests/e2e/cpuprofile.js <file.cpuprofile>");
+    console.error("usage: node tools/cpuprofile.js <file.cpuprofile>");
     process.exit(1);
 }
 

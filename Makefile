@@ -1,23 +1,20 @@
-CLOSURE_DIR=closure-compiler
-CLOSURE=$(CLOSURE_DIR)/compiler.jar
+CLOSURE=node_modules/.bin/google-closure-compiler
+TSC=node_modules/.bin/tsc
+ESLINT=node_modules/.bin/eslint
+
+# Node runs `.ts` directly but, unlike tsc, does not map a `.js` specifier to a
+# `.ts` file. The hook keeps partially migrated imports working; see
+# tools/ts-resolve.mjs.
+NODE_OPTIONS += --import ./tools/ts-register.mjs
+export NODE_OPTIONS
 NASM_TEST_DIR=./tests/nasm
-
-INSTRUCTION_TABLES=src/rust/gen/jit.rs src/rust/gen/jit0f.rs \
-		   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
-		   src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs \
-
-# Only the dependencies common to both generate_{jit,interpreter}.js
-GEN_DEPENDENCIES=$(filter-out gen/generate_interpreter.js gen/generate_jit.js gen/generate_analyzer.js, $(wildcard gen/*.js))
-JIT_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_jit.js
-INTERPRETER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_interpreter.js
-ANALYZER_DEPENDENCIES=$(GEN_DEPENDENCIES) gen/generate_analyzer.js
 
 STRIP_DEBUG_FLAG=
 ifeq ($(STRIP_DEBUG),true)
 STRIP_DEBUG_FLAG=--v86-strip-debug
 endif
 
-WASM_OPT ?= false
+WASM_OPT ?= true
 
 default: build/v64-debug.wasm
 all: build/v64_all.js build/libv64.js build/libv64.mjs build/v64.wasm
@@ -34,7 +31,7 @@ CLOSURE_SOURCE_MAP=\
 
 CLOSURE_FLAGS=\
 		--generate_exports\
-		--externs src/externs.js\
+		--externs config/externs.js\
 		--warning_level VERBOSE\
 		--jscomp_error accessControls\
 		--jscomp_error checkRegExp\
@@ -79,7 +76,7 @@ CARGO_FLAGS_SAFE=\
 
 CARGO_FLAGS=$(CARGO_FLAGS_SAFE) -C target-feature=+bulk-memory -C target-feature=+multivalue -C target-feature=+simd128
 
-CORE_FILES=cjs.js const.js io.js main.js lib.js buffer.js ide.js pci.js floppy.js \
+CORE_FILES=cjs.js const.js config.js io.js main.js lib.js buffer.js ide.js pci.js floppy.js \
 	   dma.js pit.js vga.js ps2.js rtc.js uart.js parallel.js vmware.js \
 	   acpi.js iso9660.js \
 	   state.js ne2k.js sb16.js virtio.js virtio_console.js virtio_net.js virtio_balloon.js \
@@ -92,19 +89,54 @@ BROWSER_FILES=screen.js keyboard.js mouse.js speaker.js serial.js \
 	      inbrowser_network.js fake_network.js wisp_network.js fetch_network.js \
           print_stats.js filestorage.js modem.js
 
-RUST_FILES=$(shell find src/rust/ -name '*.rs') \
-	   src/rust/gen/interpreter.rs src/rust/gen/interpreter0f.rs \
-	   src/rust/gen/jit.rs src/rust/gen/jit0f.rs \
-	   src/rust/gen/analyzer.rs src/rust/gen/analyzer0f.rs
+RUST_FILES=$(shell find src/rust/ -name '*.rs')
 
-CORE_FILES:=$(addprefix src/,$(CORE_FILES))
-LIB_FILES:=$(addprefix lib/,$(LIB_FILES))
-BROWSER_FILES:=$(addprefix src/browser/,$(BROWSER_FILES))
+# The CPU (JIT/interpreter) option keys are shared by the wasm switchboard and
+# the JS callers, so they are generated from one source. `make check-cpu-config`
+# re-runs the generator and fails if the output is stale.
+CPU_CONFIG_SOURCE=config/cpu_config.json
+CPU_CONFIG_RUST=src/rust/config.rs
+CPU_CONFIG_JS=src/config.ts
 
-build/v64_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+$(CPU_CONFIG_RUST) $(CPU_CONFIG_JS): $(CPU_CONFIG_SOURCE) tools/gen_cpu_config.js
+	./tools/gen_cpu_config.js
+
+cpu-config: $(CPU_CONFIG_RUST) $(CPU_CONFIG_JS)
+
+check-cpu-config: $(CPU_CONFIG_SOURCE) tools/gen_cpu_config.js
+	./tools/gen_cpu_config.js --check
+
+# Local WISP relay for the `wisp://` network backend. Unprivileged and
+# dependency-free, so it cross-compiles offline. See tools/relay/README.md.
+relay:
+	cd tools/relay && go run . -listen 127.0.0.1:8080
+
+relay-test:
+	./tools/relay/test.sh
+
+relay-dist:
+	./tools/relay/dist.sh
+
+# The TypeScript sources compile into one tree that Closure reads. Files move
+# from .js to .ts one at a time; see tsconfig.json and
+# docs/typescript-migration.md.
+TS_OUT=build/ts
+TS_STAMP=$(TS_OUT)/.stamp
+TS_SOURCES=$(shell find src lib -name '*.ts')
+
+$(TS_STAMP): tsconfig.json src/globals.d.ts $(CPU_CONFIG_JS) $(TS_SOURCES)
+	rm -rf $(TS_OUT)
+	$(TSC) -p tsconfig.json
+	@touch $@
+
+CORE_FILES:=$(addprefix $(TS_OUT)/src/,$(CORE_FILES))
+LIB_FILES:=$(addprefix $(TS_OUT)/lib/,$(LIB_FILES))
+BROWSER_FILES:=$(addprefix $(TS_OUT)/src/browser/,$(BROWSER_FILES))
+
+build/v64_all.js: $(CLOSURE) $(TS_STAMP)
 	mkdir -p build
 	-ls -lh build/v64_all.js
-	java -jar $(CLOSURE) \
+	$(CLOSURE) \
 		--js_output_file build/v64_all.js\
 		--define=DEBUG=false\
 		$(CLOSURE_SOURCE_MAP)\
@@ -113,12 +145,12 @@ build/v64_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 		--js $(CORE_FILES)\
 		--js $(LIB_FILES)\
 		--js $(BROWSER_FILES)\
-		--js src/browser/main.js
+		--js $(TS_OUT)/src/browser/main.js
 	ls -lh build/v64_all.js
 
-build/v64_all_debug.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
+build/v64_all_debug.js: $(CLOSURE) $(TS_STAMP)
 	mkdir -p build
-	java -jar $(CLOSURE) \
+	$(CLOSURE) \
 		--js_output_file build/v64_all_debug.js\
 		--define=DEBUG=true\
 		$(CLOSURE_SOURCE_MAP)\
@@ -127,12 +159,12 @@ build/v64_all_debug.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 		--js $(CORE_FILES)\
 		--js $(LIB_FILES)\
 		--js $(BROWSER_FILES)\
-		--js src/browser/main.js
+		--js $(TS_OUT)/src/browser/main.js
 
-build/libv64.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv64.js: $(CLOSURE) $(TS_STAMP)
 	mkdir -p build
 	-ls -lh build/libv64.js
-	java -jar $(CLOSURE) \
+	$(CLOSURE) \
 		--js_output_file build/libv64.js\
 		--define=DEBUG=false\
 		$(CLOSURE_FLAGS)\
@@ -144,10 +176,10 @@ build/libv64.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--js $(LIB_FILES)
 	ls -lh build/libv64.js
 
-build/libv64.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv64.mjs: $(CLOSURE) $(TS_STAMP)
 	mkdir -p build
 	-ls -lh build/libv64.js
-	java -jar $(CLOSURE) \
+	$(CLOSURE) \
 		--js_output_file build/libv64.mjs\
 		--define=DEBUG=false\
 		$(CLOSURE_FLAGS)\
@@ -161,9 +193,9 @@ build/libv64.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--emit_use_strict=false
 	ls -lh build/libv64.mjs
 
-build/libv64-debug.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv64-debug.js: $(CLOSURE) $(TS_STAMP)
 	mkdir -p build
-	java -jar $(CLOSURE) \
+	$(CLOSURE) \
 		--js_output_file build/libv64-debug.js\
 		--define=DEBUG=true\
 		$(CLOSURE_FLAGS)\
@@ -176,9 +208,9 @@ build/libv64-debug.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--js $(LIB_FILES)
 	ls -lh build/libv64-debug.js
 
-build/libv64-debug.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
+build/libv64-debug.mjs: $(CLOSURE) $(TS_STAMP)
 	mkdir -p build
-	java -jar $(CLOSURE) \
+	$(CLOSURE) \
 		--js_output_file build/libv64-debug.mjs\
 		--define=DEBUG=true\
 		$(CLOSURE_FLAGS)\
@@ -193,30 +225,15 @@ build/libv64-debug.mjs: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 		--emit_use_strict=false
 	ls -lh build/libv64-debug.mjs
 
-src/rust/gen/jit.rs: $(JIT_DEPENDENCIES)
-	./gen/generate_jit.js --output-dir build/ --table jit
-src/rust/gen/jit0f.rs: $(JIT_DEPENDENCIES)
-	./gen/generate_jit.js --output-dir build/ --table jit0f
-
-src/rust/gen/interpreter.rs: $(INTERPRETER_DEPENDENCIES)
-	./gen/generate_interpreter.js --output-dir build/ --table interpreter
-src/rust/gen/interpreter0f.rs: $(INTERPRETER_DEPENDENCIES)
-	./gen/generate_interpreter.js --output-dir build/ --table interpreter0f
-
-src/rust/gen/analyzer.rs: $(ANALYZER_DEPENDENCIES)
-	./gen/generate_analyzer.js --output-dir build/ --table analyzer
-src/rust/gen/analyzer0f.rs: $(ANALYZER_DEPENDENCIES)
-	./gen/generate_analyzer.js --output-dir build/ --table analyzer0f
-
-build/v64.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+build/v64.wasm: $(RUST_FILES) $(CPU_CONFIG_RUST) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
 	-BLOCK_SIZE=K ls -l build/v64.wasm
 	cargo rustc --release $(CARGO_FLAGS)
 	cp build/wasm32-unknown-unknown/release/v64.wasm build/v64.wasm
-	-$(WASM_OPT) && wasm-opt -O2 --strip-debug build/v64.wasm -o build/v64.wasm
+	-$(WASM_OPT) && wasm-opt -O3 --strip-debug build/v64.wasm -o build/v64.wasm
 	BLOCK_SIZE=K ls -l build/v64.wasm
 
-build/v64-debug.wasm: $(RUST_FILES) build/softfloat.o build/zstddeclib.o Cargo.toml
+build/v64-debug.wasm: $(RUST_FILES) $(CPU_CONFIG_RUST) build/softfloat.o build/zstddeclib.o Cargo.toml
 	mkdir -p build/
 	-BLOCK_SIZE=K ls -l build/v64-debug.wasm
 	cargo rustc $(CARGO_FLAGS)
@@ -265,7 +282,6 @@ clean:
 	-rm build/v64_all.js
 	-rm build/v64.wasm
 	-rm build/v64-debug.wasm
-	-rm $(INSTRUCTION_TABLES)
 	-rm build/*.map
 	-rm build/*.wast
 	-rm build/*.o
@@ -288,9 +304,7 @@ update_version:
 
 
 $(CLOSURE):
-	mkdir -p $(CLOSURE_DIR)
-	# don't upgrade until https://github.com/google/closure-compiler/issues/3972 is fixed
-	wget -nv -O $(CLOSURE) https://repo1.maven.org/maven2/com/google/javascript/closure-compiler/v20210601/closure-compiler-v20210601.jar
+	pnpm install
 
 build/integration-test-fs/fs.json: images/buildroot-bzimage68.bin
 	mkdir -p build/integration-test-fs/flat
@@ -369,17 +383,23 @@ jit64-tests: build/v64-debug.wasm
 	node tests/jit64/addressing.js
 	node tests/jit64/controlflow.js
 	node tests/jit64/xchg.js
+	node tests/jit64/vex-length.js
 	node tests/jit64/high-byte.js
 	node tests/jit64/debug-probe.js
+	node tests/jit64/compile-probe.js
+	node tests/jit64/fillloop.js
 	node tests/ide-interrupts.js
 	node tests/jit64/e2e.js
 	node tests/jit64/entry-cache.js
 	JIT64_DIFF_CASES=500 node tests/jit64/differential.js
-	node tests/jit64/benchmark.js
 
 # CPU microbenchmarks (interpreter vs jit64); MICROBENCH_OUT saves the results.
 jit64-microbench: build/v64-debug.wasm
-	JIT64_BENCH_ITERATIONS=$(or $(MICROBENCH_ITERATIONS),300000) node tests/jit64/microbench.js
+	JIT64_BENCH_ITERATIONS=$(or $(MICROBENCH_ITERATIONS),300000) node tests/benchmark/cpu64.js
+
+# 32-bit vs 64-bit interpreter floor, JIT off in both (ITERS=n to tune).
+interp-bitwidth: build/v64-debug.wasm
+	node tests/benchmark/interp-bitwidth.mjs $(or $(ITERS),500000)
 
 # Alpine boot throughput; needs images/alpine-virt-*.iso.
 alpine-perf: build/v64.wasm
@@ -388,7 +408,18 @@ alpine-perf: build/v64.wasm
 interp64-tests: build/v64-debug.wasm
 	node tests/interp64/run.js
 	node tests/interp64/code_page_boundary.js
+	node tests/interp64/smc.js
+	node tests/interp64/decode-cache-page-flag.js
 	node tests/interp64/rep.js
+	node tests/interp64/sse4.js
+	node tests/interp64/avx.js
+	node tests/sse4-32.js
+	node tests/avx-32.js
+	node tests/interp32/decode-cache-diff.js
+# Random programs clobber their own GDT and trip device asserts, identically with
+# and without the cache; the harness counts those as skipped. Failures go to
+# stdout and set the exit status, so stderr noise is not worth reading.
+	node tests/interp32/decode-cache-fuzz.js 2>/dev/null
 
 boot64-tests: build/v64-debug.wasm
 	node tests/boot64/run.js
@@ -418,6 +449,7 @@ rust-test-intensive:
 
 api-tests: build/v64-debug.wasm
 	./tests/api/clean-shutdown.js
+	./tests/api/disable-jit.js
 	./tests/api/state.js
 	./tests/api/reset.js
 	./tests/api/floppy.js
@@ -429,12 +461,12 @@ api-tests: build/v64-debug.wasm
 	#./tests/api/reboot-buildroot.js # https://github.com/copy/v86/issues/636
 	./tests/api/pic.js
 
-all-tests: eslint kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests
+all-tests: eslint check-cpu-config kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests
 	# Skipping:
 	# - devices-test (hangs)
 
 eslint:
-	eslint src tests gen lib examples tools
+	$(ESLINT) --no-error-on-unmatched-pattern src tests lib examples tools
 
 rustfmt: $(RUST_FILES)
 	cargo fmt --all -- --check --config fn_single_line=true,control_brace_style=ClosingNextLine
@@ -459,7 +491,7 @@ build/xterm.js:
 # ---------------------------------------------------------------------------
 # Guest images for the examples and the end-to-end tests. These are large and
 # not committed (images is in .gitignore); download them with
-# `make test-images` (or only what you need, e.g. `make alpine-example`).
+# `make test-images`.
 # ---------------------------------------------------------------------------
 
 ALPINE_VERSION=3.24
@@ -493,14 +525,28 @@ images/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso:
 	curl -fL -o $@.sha256 $(ALPINE_X86_64)/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso.sha256
 	cd images && (shasum -a 256 -c alpine-virt-$(ALPINE_RELEASE)-x86_64.iso.sha256 || sha256sum -c alpine-virt-$(ALPINE_RELEASE)-x86_64.iso.sha256)
 
+TINYCORE_VERSION=17.1
+TINYCORE_X86_64=http://tinycorelinux.net/17.x/x86_64/release
+
+images/TinyCorePure64-$(TINYCORE_VERSION).iso:
+	mkdir -p images
+	curl -fL -o $@ $(TINYCORE_X86_64)/TinyCorePure64-$(TINYCORE_VERSION).iso
+
+OPENWRT_VERSION=24.10.5
+OPENWRT_X86_64=https://downloads.openwrt.org/releases/$(OPENWRT_VERSION)/targets/x86/64
+OPENWRT_IMG=openwrt-$(OPENWRT_VERSION)-x86-64-generic-squashfs-combined.img
+
+images/openwrt-$(OPENWRT_VERSION)-x86-64-squashfs.img:
+	mkdir -p images
+	curl -fL -o images/$(OPENWRT_IMG).gz $(OPENWRT_X86_64)/$(OPENWRT_IMG).gz
+	python3 tools/resize_openwrt.py images/$(OPENWRT_IMG).gz $@
+
+.PHONY: cpu-config check-cpu-config relay relay-test relay-dist
 .PHONY: test-images
 test-images: images/vmlinuz-virt images/initramfs-virt images/modloop-virt \
-	     images/busybox images/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso
-
-# Everything examples/alpine-iso.html needs (release wasm + xterm + the ISO).
-.PHONY: alpine-example
-alpine-example: build/v64.wasm build/xterm.js build/xterm.css \
-		images/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso
+	     images/busybox images/alpine-virt-$(ALPINE_RELEASE)-x86_64.iso \
+	     images/TinyCorePure64-$(TINYCORE_VERSION).iso \
+	     images/openwrt-$(OPENWRT_VERSION)-x86-64-squashfs.img
 
 update-package-json-version:
 	git describe --tags --exclude latest | sed 's/-/./' | tr - + | tee build/version
