@@ -1,8 +1,8 @@
 #![allow(non_upper_case_globals)]
 
-use crate::cpu::cpu::reg128;
-use crate::softfloat::F80;
-use crate::state_flags::CachedStateFlags;
+use crate::cpu::core::reg128;
+use crate::cpu::interp::softfloat::F80;
+use crate::cpu::state_flags::CachedStateFlags;
 
 pub const reg8: *mut u8 = 64 as *mut u8;
 pub const reg16: *mut u16 = 64 as *mut u16;
@@ -89,6 +89,17 @@ pub unsafe fn xmm_ptr(r: i32) -> *mut reg128 {
         (std::ptr::addr_of_mut!(XMM_HIGH.0) as *mut u64)
             .add((r as usize - 8) * 2) as *mut reg128
     }
+}
+
+// Upper 128 bits of ymm0-15. The low half is the corresponding xmm register.
+#[repr(align(16))]
+struct YmmHigh([u64; 32]);
+
+static mut YMM_HIGH: YmmHigh = YmmHigh([0; 32]);
+
+#[inline]
+pub unsafe fn ymm_high_ptr(r: i32) -> *mut reg128 {
+    (std::ptr::addr_of_mut!(YMM_HIGH.0) as *mut u64).add(r as usize * 2) as *mut reg128
 }
 pub const current_tsc: *mut u64 = 960 as *mut u64;
 
