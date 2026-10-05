@@ -1,0 +1,828 @@
+/* ---------------------------------------------------------------------------
+   v64 UI theme
+   --------------------------------------------------------------------------- */
+:root {
+    --bg: #0b0d11;
+    --bg-glow: #1a2130;
+    --panel: #141821;
+    --panel-2: #1c212c;
+    --panel-3: #252b38;
+    --border: #262c38;
+    --border-soft: rgba(255, 255, 255, 0.06);
+    --text: #e8eaef;
+    --text-dim: #b6bcc8;
+    --muted: #8b93a1;
+    --link: #f5b942;
+    --link-hover: #ffd07a;
+    --accent: #f5b942;
+    --accent-weak: #2c2513;
+    --accent-ring: rgba(245, 185, 66, 0.35);
+    --err: #f87171;
+    --radius: 10px;
+    --radius-sm: 7px;
+    --shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --speed: 0.15s;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { color-scheme: dark; }
+
+body {
+    margin: 0;
+    padding: 20px;
+    background: radial-gradient(1000px 520px at 50% -280px, var(--bg-glow), transparent 70%), var(--bg);
+    background-attachment: fixed;
+    color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+
+h4 {
+    margin: 0 0 14px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+}
+
+a { color: var(--link); text-decoration: none; cursor: pointer; transition: color var(--speed); }
+a:hover { color: var(--link-hover); text-decoration: underline; }
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+::selection { background: var(--accent-ring); color: #fff; }
+
+*::-webkit-scrollbar { width: 11px; height: 11px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+    background: var(--panel-3);
+    border: 3px solid var(--bg);
+    border-radius: 99px;
+}
+*::-webkit-scrollbar-thumb:hover { background: #333c4c; }
+
+/* Boot options card */
+#boot_options {
+    max-width: 1320px;
+    margin: 0 auto;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 0;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+}
+
+/* Quick start: the network proxy sits above the OS list so it is visible
+   before a profile is started. Label + input on one row, presets below, so
+   the preset links are not pushed off-screen by a full-width input. */
+.quick-proxy {
+    display: grid;
+    grid-template-columns: auto minmax(0, 520px);
+    align-items: center;
+    gap: 6px 12px;
+    margin-bottom: 16px;
+    font-size: 12.5px;
+}
+.quick-proxy label {
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+.quick-proxy input[type=text] { width: 100%; min-width: 0; }
+.quick-proxy-presets { grid-column: 1 / -1; color: var(--muted); }
+
+/* Filter bar: one fieldset per category. A grid (rather than flex) so the
+   columns line up from row to row instead of following each group's width. */
+#filter {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 18px 26px;
+    align-items: start;
+    font-size: 12.5px;
+}
+.filter-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-content: start;
+    align-items: center;
+    gap: 6px;
+    border: 0;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+}
+.filter-group legend {
+    float: left; /* keeps the legend out of the pill flow without a wrapper */
+    width: 100%;
+    padding: 0 0 7px;
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+#filter label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--speed), border-color var(--speed), color var(--speed);
+}
+#filter label:hover {
+    background: var(--panel-3);
+    border-color: #3a4252;
+    color: var(--text);
+}
+#filter input[type=checkbox] { accent-color: var(--accent); margin: 0; }
+#filter label:has(input:checked) {
+    background: var(--accent-weak);
+    border-color: var(--accent);
+    color: var(--text);
+}
+#filter label:has(input:checked) input[type=checkbox] { filter: brightness(1.15); }
+
+.filter-actions {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-soft);
+}
+.filter-sep { color: var(--muted); opacity: 0.5; }
+
+/* OS list */
+#oses {
+    margin-top: 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 120px);
+}
+#oses a { color: var(--text); }
+#oses .th {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--panel-2);
+}
+#oses .th .tr > span { border-top: 0; padding: 10px 12px; }
+#oses a span:nth-child(1) { font-weight: 600; }
+#oses a span:nth-child(2) { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* The header row is a div.th, not an anchor, so it needs the same alignment. */
+#oses .th span:nth-child(2) { text-align: right; }
+#oses a span:nth-child(10) { color: var(--muted); }
+#oses a.tr:hover { background: var(--panel-2); text-decoration: none; }
+#oses a.tr:hover span:nth-child(1) { color: var(--link-hover); }
+#oses a.tr:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    background: var(--panel-2);
+}
+
+.table { display: table; width: 100%; border-collapse: separate; border-spacing: 0; }
+.th { display: table-header-group; }
+.tr { display: table-row; }
+.tr > span {
+    display: table-cell;
+    padding: 10px 12px;
+    white-space: nowrap;
+    border-top: 1px solid var(--border-soft);
+    transition: color var(--speed);
+}
+#oses span:nth-child(10) { white-space: normal; min-width: 220px; }
+
+@media (max-width: 1250px) {
+    #oses span:nth-child(9) { display: none; }
+}
+@media (max-width: 1150px) {
+    #oses span:nth-child(8), #oses span:nth-child(7) { display: none; }
+}
+@media (max-width: 1050px) {
+    #oses span:nth-child(5), #oses span:nth-child(6) { display: none; }
+}
+@media (max-width: 850px) {
+    #oses span:nth-child(4) { display: none; }
+}
+@media (max-width: 750px) {
+    #oses, #oses a.tr { display: block; }
+    #oses .th { display: none; }
+    /* Name, size and UI icon stay on the first line; the trait columns and the
+       description each take a full line below. */
+    #oses a.tr {
+        display: block;
+        padding: 13px 14px;
+        border-top: 1px solid var(--border);
+    }
+    #oses .tr > span {
+        display: inline;
+        border: 0;
+        padding: 0;
+        white-space: normal;
+        min-width: 0;
+    }
+    #oses span:nth-child(2) { font-size: 12.5px; }
+    #oses span:nth-child(3) { display: inline-block; vertical-align: -2px; margin-right: 6px; }
+    #oses span:nth-child(3) div { display: inline; }
+    #oses span:nth-child(n+4):nth-child(-n+9) {
+        color: var(--muted);
+        font-size: 12.5px;
+    }
+    #oses span:nth-child(n+4):nth-child(-n+9)::before { content: " · "; opacity: 0.45; }
+    #oses span:nth-child(9)::before { content: ""; }
+    #oses span:nth-child(10) {
+        display: block;
+        font-size: 13px;
+        margin-top: 3px;
+    }
+}
+
+/* Form controls */
+label { user-select: none; }
+input[type=checkbox] { accent-color: var(--accent); margin: 0 4px 0 0; vertical-align: middle; }
+input[type=number] { width: 84px; }
+
+input[type=text],
+input[type=number],
+select,
+input[type=file] {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 6px 9px;
+    font: inherit;
+    font-size: 13px;
+    transition: border-color var(--speed), background var(--speed);
+}
+input[type=text]:hover,
+input[type=number]:hover,
+select:hover,
+input[type=file]:hover { border-color: #3a4252; }
+input[type=text],
+input[type=number],
+select { min-height: 34px; }
+select {
+    cursor: pointer;
+    appearance: none;
+    padding-right: 30px;
+    background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                      linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+    background-position: calc(100% - 16px) 51%, calc(100% - 11px) 51%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+}
+input[type=file] { max-width: 100%; cursor: pointer; }
+input[type=file]::file-selector-button {
+    background: var(--panel-3);
+    color: var(--text);
+    border: 0;
+    border-radius: 5px;
+    padding: 6px 12px;
+    margin-right: 12px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background var(--speed);
+}
+input[type=file]::file-selector-button:hover { background: #2f3644; }
+
+/* Setup form: the flat table becomes a two-column grid of field cards. */
+#boot_options table {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 20px;
+    align-items: start;
+    max-width: 100%;
+}
+/* The parser inserts a tbody, which would otherwise be the only grid item. */
+#boot_options tbody { display: contents; }
+#boot_options tr {
+    display: grid;
+    grid-template-columns: 148px minmax(0, 1fr);
+    align-items: center;
+    column-gap: 12px;
+    padding: 9px 14px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 8px;
+}
+#boot_options td {
+    padding: 0;
+    vertical-align: middle;
+    min-width: 0;
+}
+#boot_options td:first-child { width: auto; color: var(--text-dim); }
+/* Full-width separators and the "images are not uploaded" note. */
+#boot_options tr:has(td[colspan]) {
+    grid-column: 1 / -1;
+    display: block;
+    padding: 0;
+    margin: 4px 0 12px;
+    background: none;
+    border: 0;
+    border-radius: 0;
+}
+#boot_options tr:has(td[colspan]) td { padding: 0; }
+#boot_options tr:has(> td:first-child + td > br:only-child) { display: none; }
+#boot_options small { color: var(--muted); }
+#boot_options input[type=text] { width: 100%; max-width: 100%; }
+#boot_options input[type=file] { width: 100%; }
+#boot_options select { width: 100%; }
+#boot_options hr { margin: 8px 0; }
+
+#filesystem_panel input { max-width: 100%; }
+
+/* Buttons */
+button {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 7px 14px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background var(--speed), border-color var(--speed), transform var(--speed);
+}
+button:hover { background: var(--panel-3); border-color: #3a4252; }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: 0.45; cursor: default; transform: none; }
+
+#start_emulation {
+    margin-top: 10px;
+    padding: 11px 26px;
+    font-size: 15px;
+    font-weight: 600;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #1a1400;
+}
+#start_emulation:hover { background: var(--link-hover); border-color: var(--link-hover); }
+
+hr { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
+
+#setup_error {
+    color: #fff;
+    font-weight: 600;
+    background-color: #7f1d1d;
+    border: 1px solid var(--err);
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
+}
+#config_link {
+    font-weight: 600;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 16px;
+}
+
+/* Runtime toolbar and panels */
+#runtime_options {
+    max-width: 1320px;
+    margin: 16px auto 0;
+    padding: 14px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+#runtime_options button { margin: 0 6px 6px 0; }
+#runtime_options label { display: inline-flex; align-items: center; gap: 8px; color: var(--text-dim); }
+#loading { white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; color: var(--muted); }
+
+#log, #runtime_infos, #serial, #filesystem_panel, #debug_panel {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.55;
+    border: 1px solid var(--border);
+    background: #05070a;
+    color: #dfe3ea;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+}
+#runtime_infos, #filesystem_panel {
+    float: left;
+    width: 268px;
+    margin: 0 12px 12px 0;
+}
+#runtime_infos b, #filesystem_panel label { color: var(--text); }
+#log { height: 120px; width: 560px; max-width: 100%; }
+#debug_panel { white-space: pre; float: left; overflow: auto; max-width: 100%; }
+#serial { margin: 0; }
+#serial:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Emulator screen */
+#screen {
+    position: relative;
+    white-space: pre;
+    font-family: "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace;
+    font-weight: bold;
+    font-size: 15px;
+    line-height: normal;
+}
+#screen, #vga { transform-origin: top left; }
+#vga { background: #000; touch-action: none; }
+#screen_container {
+    float: left;
+    margin: 0 12px 12px 0;
+    outline: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: #000;
+}
+#screen_container:fullscreen { display: flex !important; align-items: center; justify-content: center; }
+#screen_container:fullscreen #vga { width: auto !important; height: 100% !important; }
+
+/* Terminal (xterm) */
+#terminal { max-width: 1024px; }
+
+/* Folder tabs: quick start / custom setup / proxy download. The active tab
+   drops its bottom border and overlaps the body so the two merge. */
+.folder-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 12px 16px 0;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--border);
+}
+.folder-tab {
+    appearance: none;
+    border: 1px solid var(--border);
+    border-bottom: 0;
+    border-radius: 10px 10px 0 0;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 18px;
+    margin-bottom: -1px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background var(--speed), color var(--speed);
+}
+.folder-tab:hover { background: var(--panel-3); color: var(--text); }
+.folder-tab.is-active { background: var(--panel); color: var(--text); }
+.folder-body {
+    padding: 20px 24px;
+    background: var(--panel);
+}
+.folder-panel { display: none; }
+.folder-panel.is-active { display: block; }
+
+/* Prebuilt relay downloads (tools/relay) */
+.folder-panel p { color: var(--muted); margin: 8px 0; }
+.folder-panel code { font-family: var(--mono); color: var(--text-dim); }
+#relay_list { display: table; width: 100%; border-collapse: collapse; margin-top: 10px; }
+#relay_list td { padding: 4px 10px 4px 0; border-top: 1px solid var(--border-soft); }
+#relay_list td:nth-child(2),
+#relay_list td:nth-child(3) { color: var(--muted); white-space: nowrap; }
+#relay_list .relay-sum { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+/* The relay cards reuse the setup grid; keep the 64-char hash inside the card. */
+#relay_list td:nth-child(2),
+#relay_list td:nth-child(4) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* On-screen keyboard for touch devices */
+.phone_keyboard {
+    width: 0;
+    height: 0;
+    resize: none;
+    position: absolute;
+    opacity: 0;
+    left: -9999em;
+    top: 0;
+    z-index: -10;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+.blink { animation: blink 0.6s step-start infinite; }
+@keyframes blink { 50% { color: transparent; } }
+.blinking-cursor { animation: blinking-cursor 0.6s step-start infinite; }
+@keyframes blinking-cursor { 50% { background-color: transparent; } }
+
+/* Theatre mode */
+#screen_container.theatre_screen_container {
+    position: fixed;
+    transform: translate(-50%, -50%);
+    top: 50dvh;
+    left: 50vw;
+    z-index: 2;
+    outline: none !important;
+    margin: 0 !important;
+    float: none;
+}
+#runtime_options.theatre_runtime_options {
+    position: fixed;
+    width: 100vw;
+    max-width: none;
+    margin: 0;
+    top: 0;
+    left: 0;
+    padding: 6px !important;
+    z-index: 3;
+    background-color: rgba(0, 0, 0, 0.92);
+    border: 0;
+    border-bottom: 2px solid #333;
+    border-radius: 0;
+    box-shadow: none;
+    transform: translate(0%, -50%);
+}
+.theatre_runtime_options:hover { transform: translate(0%, 0%); }
+.theatre_runtime_infos {
+    position: fixed;
+    bottom: 0;
+    z-index: 4;
+    margin: 0 !important;
+    transform: translate(-10px, calc(100% - 65px));
+    opacity: 40%;
+}
+.theatre_runtime_infos:hover { transform: translate(-10px, -5px); }
+.theatre_filesystem_panel {
+    position: fixed;
+    bottom: 0;
+    z-index: 4;
+    margin: 0 !important;
+    transform: translate(0%, 75%);
+    left: 280px;
+}
+.theatre_filesystem_panel:hover { transform: translate(0%, -5%); }
+#theatre_background {
+    position: fixed;
+    width: 100vw;
+    height: 100dvh;
+    top: 0;
+    left: 0;
+    background-color: black;
+    display: none;
+    z-index: 1;
+}
+#toggle_ui {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    right: 0;
+    z-index: 5;
+}
+#toggle_ui, .theatre_runtime_options { opacity: 25%; }
+.theatre_filesystem_panel { opacity: 40%; }
+#toggle_ui,
+.theatre_runtime_options,
+.theatre_runtime_infos,
+.theatre_filesystem_panel {
+    transition: opacity 0.25s, transform 0.25s;
+}
+#toggle_ui:hover,
+.theatre_runtime_options:hover,
+.theatre_runtime_infos:hover,
+.theatre_filesystem_panel:hover {
+    opacity: 100%;
+}
+
+/* Single-column setup cards once two columns stop fitting. */
+@media (max-width: 1200px) {
+    #filter { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 900px) {
+    #boot_options table { grid-template-columns: minmax(0, 1fr); }
+    #filter { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 600px) {
+    body { padding: 12px; }
+    #boot_options { border-radius: 12px; }
+    .folder-tabs { padding: 10px 12px 0; }
+    .folder-body { padding: 16px; }
+    #filter { grid-template-columns: minmax(0, 1fr); font-size: 12px; gap: 14px 20px; }
+    #filter label { padding: 6px 10px; }
+    #boot_options tr {
+        grid-template-columns: minmax(0, 1fr);
+        row-gap: 6px;
+        padding: 12px 14px;
+    }
+    #boot_options td:first-child {
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+    }
+    #start_emulation { width: 100%; }
+    #runtime_infos, #filesystem_panel, #log, #terminal { max-width: 100%; }
+    #runtime_infos, #filesystem_panel { width: 100%; float: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+/* Icons */
+.gui_icon {
+	height: 1em;
+	content: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56 50"><path d="M65.6 102.7h15.3v5.1H65.6z" style="fill:white;fill-opacity:1;stroke:none" transform="translate(-64.1 -84.7)"/><path d="M80.9 92.4H118V118H81ZM65 103.6v25.6h38V118H80.8v-14.4z" style="fill:none;stroke:white;stroke-width:2;stroke-linecap:square" transform="translate(-64.1 -84.7)"/><path d="M80.9 92.4h37.9v5.1H80.9zm8.7 21.1v-12.3l7.6 7.6-2.7 1.5 1.9 3.2-1.8 1-2-3.4z" style="fill:white;fill-opacity:1;stroke:none" transform="translate(-64.1 -84.7)"/></svg>');
+}
+.tui_icon {
+	height: 1em;
+	content: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 55 48"><g style="fill:white"><path d="M91 127h26v5H91z" transform="translate(-64 -85)"/><path d="M118 17h26v5h-26z" transform="rotate(45 70 -120)"/><path d="M-43 139h26v5h-26z" transform="rotate(-45 -134 35)"/></g></svg>');
+}
+/* the code below was copied from xterm.css */
+
+.xterm {
+    cursor: text;
+    position: relative;
+    user-select: none;
+    -ms-user-select: none;
+    -webkit-user-select: none;
+}
+
+.xterm.focus,
+.xterm:focus {
+    outline: none;
+}
+
+.xterm .xterm-helpers {
+    position: absolute;
+    top: 0;
+    /**
+     * The z-index of the helpers must be higher than the canvases in order for
+     * IMEs to appear on top.
+     */
+    z-index: 5;
+}
+
+.xterm .xterm-helper-textarea {
+    padding: 0;
+    border: 0;
+    margin: 0;
+    /* Move textarea out of the screen to the far left, so that the cursor is not visible */
+    position: absolute;
+    opacity: 0;
+    left: -9999em;
+    top: 0;
+    width: 0;
+    height: 0;
+    z-index: -5;
+    /** Prevent wrapping so the IME appears against the textarea at the correct position */
+    white-space: nowrap;
+    overflow: hidden;
+    resize: none;
+}
+
+.xterm .composition-view {
+    /* TODO: Composition position got messed up somewhere */
+    background: #000;
+    color: #FFF;
+    display: none;
+    position: absolute;
+    white-space: nowrap;
+    z-index: 1;
+}
+
+.xterm .composition-view.active {
+    display: block;
+}
+
+.xterm .xterm-viewport {
+    /* On OS X this is required in order for the scroll bar to appear fully opaque */
+    background-color: #000;
+    overflow-y: scroll;
+    cursor: default;
+    position: absolute;
+    right: 0;
+    left: 0;
+    top: 0;
+    bottom: 0;
+}
+
+.xterm .xterm-screen {
+    position: relative;
+}
+
+.xterm .xterm-screen canvas {
+    position: absolute;
+    left: 0;
+    top: 0;
+}
+
+.xterm .xterm-scroll-area {
+    visibility: hidden;
+}
+
+.xterm-char-measure-element {
+    display: inline-block;
+    visibility: hidden;
+    position: absolute;
+    top: 0;
+    left: -9999em;
+    line-height: normal;
+}
+
+.xterm.enable-mouse-events {
+    /* When mouse events are enabled (eg. tmux), revert to the standard pointer cursor */
+    cursor: default;
+}
+
+.xterm.xterm-cursor-pointer,
+.xterm .xterm-cursor-pointer {
+    cursor: pointer;
+}
+
+.xterm.column-select.focus {
+    /* Column selection mode */
+    cursor: crosshair;
+}
+
+.xterm .xterm-accessibility,
+.xterm .xterm-message {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    z-index: 10;
+    color: transparent;
+    pointer-events: none;
+}
+
+.xterm .live-region {
+    position: absolute;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+}
+
+.xterm-dim {
+    /* Dim should not apply to background, so the opacity of the foreground color is applied
+     * explicitly in the generated class and reset to 1 here */
+    opacity: 1 !important;
+}
+
+.xterm-underline-1 { text-decoration: underline; }
+.xterm-underline-2 { text-decoration: double underline; }
+.xterm-underline-3 { text-decoration: wavy underline; }
+.xterm-underline-4 { text-decoration: dotted underline; }
+.xterm-underline-5 { text-decoration: dashed underline; }
+
+.xterm-overline {
+    text-decoration: overline;
+}
+
+.xterm-overline.xterm-underline-1 { text-decoration: overline underline; }
+.xterm-overline.xterm-underline-2 { text-decoration: overline double underline; }
+.xterm-overline.xterm-underline-3 { text-decoration: overline wavy underline; }
+.xterm-overline.xterm-underline-4 { text-decoration: overline dotted underline; }
+.xterm-overline.xterm-underline-5 { text-decoration: overline dashed underline; }
+
+.xterm-strikethrough {
+    text-decoration: line-through;
+}
+
+.xterm-screen .xterm-decoration-container .xterm-decoration {
+	z-index: 6;
+	position: absolute;
+}
+
+.xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer {
+	z-index: 7;
+}
+
+.xterm-decoration-overview-ruler {
+    z-index: 8;
+    position: absolute;
+    top: 0;
+    right: 0;
+    pointer-events: none;
+}
+
+.xterm-decoration-top {
+    z-index: 2;
+    position: relative;
+}
