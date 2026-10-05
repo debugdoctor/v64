@@ -9,8 +9,10 @@ examples and the end-to-end tests look in this directory by default.
 | `initramfs-virt` | `tests/e2e/linux.js` | An initramfs |
 | `modloop-virt` | the Alpine ISO boot | Kernel modules (squashfs) |
 | `busybox` | `tests/e2e/initramfs.js` | A static x86-64 busybox |
-| `alpine-virt-3.24.2-x86_64.iso` | `examples/alpine-iso.html` | Alpine live ISO (BIOS / El Torito) |
+| `alpine-virt-3.24.2-x86_64.iso` | `tests/e2e/alpine-perf.js` | Alpine live ISO (BIOS / El Torito) |
 | `alpine-minirootfs-3.24.2-x86_64.tar.gz` | optional rootfs | Alpine mini rootfs |
+| `TinyCorePure64-17.1.iso` | `tests/full/run.js` (Tiny Core Pure64 17 CD) | Tiny Core Linux Pure64 live ISO (x86-64) |
+| `openwrt-24.10.5-x86-64-squashfs.img` | `tests/full/run.js` (OpenWrt 24.10) | OpenWrt x86-64 combined image, p2 resized to 64 MB |
 
 `LINUX64_IMAGE`, `LINUX64_INITRD` and `LINUX64_BUSYBOX` override the paths.
 
@@ -18,7 +20,6 @@ examples and the end-to-end tests look in this directory by default.
 
 ```sh
 make test-images       # vmlinuz-virt, initramfs-virt, modloop-virt, busybox, the Alpine ISO
-make alpine-example    # only what examples/alpine-iso.html needs (release wasm + xterm + the ISO)
 ```
 
 Or by hand (the versions the Makefile pins, Alpine 3.24.2):
@@ -36,6 +37,19 @@ curl -fL -o images/alpine-minirootfs-3.24.2-x86_64.tar.gz "$base/alpine-miniroot
 # a static x86-64 busybox (musl build from busybox.net)
 curl -fL -o images/busybox https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
 chmod +x images/busybox
+
+# Tiny Core Linux Pure64 (x86-64 live ISO)
+curl -fL -o images/TinyCorePure64-17.1.iso \
+    http://tinycorelinux.net/17.x/x86_64/release/TinyCorePure64-17.1.iso
+
+# OpenWrt x86-64. The upstream combined image is written for a 128 MB disk
+# (121 MB of file); resize_openwrt.py rewrites partition 2 to 64 MB and
+# truncates the file, leaving the kernel, GRUB and squashfs untouched.
+curl -fL -o images/openwrt-24.10.5-x86-64-generic-squashfs-combined.img.gz \
+    https://downloads.openwrt.org/releases/24.10.5/targets/x86/64/openwrt-24.10.5-x86-64-generic-squashfs-combined.img.gz
+python3 tools/resize_openwrt.py \
+    images/openwrt-24.10.5-x86-64-generic-squashfs-combined.img.gz \
+    images/openwrt-24.10.5-x86-64-squashfs.img
 ```
 
 Verify the ISO against the published checksum:
