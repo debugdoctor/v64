@@ -30,6 +30,7 @@ pub const JIT64_SELFCHECK: u32 = 30;
 pub const JIT64_SELFCHECK_MIN: u32 = 31;
 pub const JIT64_SELFCHECK_REPEAT: u32 = 32;
 pub const JIT64_EXIT_STATS: u32 = 33;
+pub const JIT64_PROFILE: u32 = 34;
 
 // Long-mode interpreter (interp64.rs)
 pub const INTERP64_BATCH: u32 = 48;

@@ -30,6 +30,7 @@ export const CPU_CONFIG = {
     "JIT64_SELFCHECK_MIN": 31,
     "JIT64_SELFCHECK_REPEAT": 32,
     "JIT64_EXIT_STATS": 33,
+    "JIT64_PROFILE": 34,
 
     // Long-mode interpreter (interp64.rs)
     "INTERP64_BATCH": 48,

@@ -61,6 +61,10 @@ pub enum Instruction {
     // A VEX/AVX instruction: executed by the interpreter at `rip` (the JIT and
     // the decode cache call the shared implementation).
     Avx { rip: u64 },
+    VectorReg { op: u8, dst: u8, src1: u8, src2: u8, wide: bool },
+    Rorx { dst: u8, src: u8, width: u8, count: u8 },
+    BmiShift { dst: u8, src: u8, count: u8, width: u8, kind: u8 },
+    SignHigh { width: u8 },
 
     // SSE2. The XMM file lives in emulated memory, so these are pairs of
     // 64-bit accesses rather than 128-bit values.

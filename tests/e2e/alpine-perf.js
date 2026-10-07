@@ -6,6 +6,8 @@
 // Needs images/alpine-virt-*.iso (see images/README.md):
 //   SECONDS=300 WASM_PATH=build/v64.wasm node tests/e2e/alpine-perf.js
 //   INTERP=1 SECONDS=300 node tests/e2e/alpine-perf.js
+//   HOTSPOTS=1 HOTSPOTS_OUT=build/hotspots.json SECONDS=900 node tests/e2e/alpine-perf.js
+// Hotspot counts are retained random samples; low-frequency entries may be pruned.
 //
 // Prints a RESULT line; login requires a successful modloop mount and no boot errors.
 
@@ -73,6 +75,7 @@ emulator.add_listener("serial0-output-byte", b => { serial += String.fromCharCod
 emulator.add_listener("emulator-loaded", async () =>
 {
     const ex = emulator.v86.cpu.wm.exports;
+    if(process.env.HOTSPOTS === "1") set_cpu_config(ex, "JIT64_PROFILE", 1);
     if(process.env.INTERP_MEM_SINGLE === "0") set_cpu_config(ex, "INTERP64_MEM_SINGLE", 0);
     if(process.env.INTERP_BATCH === "0") set_cpu_config(ex, "INTERP64_BATCH", 0);
     if(process.env.PERF_FAIL_OPS === "1") set_cpu_config(ex, "INTERP64_OPCODE_STATS", 1);
@@ -220,6 +223,23 @@ emulator.add_listener("emulator-loaded", async () =>
         fops.sort((a, b) => b[1] - a[1]);
         console.error("interp 0f opcodes: " +
             fops.slice(0, 24).map(([o, c]) => "0x" + o.toString(16) + "=" + c).join(" "));
+    }
+    if(process.env.HOTSPOTS === "1")
+    {
+        const count = ex.jit64_profile_snapshot();
+        const rows = [];
+        for(let i = 0; i < Math.min(count, 40); i++)
+        {
+            const value = field => ex.jit64_profile_value(i, field);
+            const bytes = [];
+            for(let j = 0; j < Number(value(3)); j++) bytes.push(Number(value(4 + j)).toString(16).padStart(2, "0"));
+            rows.push({ cr3: "0x" + value(19).toString(16), rip: "0x" + BigInt.asUintN(64, value(0)).toString(16), kind: Number(value(1)) === 1 ? "jit-helper" : "interpreter",
+                samples: Number(value(2)), bytes: bytes.join(" ") });
+        }
+        const report = { sample_period: 64, interpreter_events: Number(ex.jit64_profile_events(0)),
+            jit_helper_events: Number(ex.jit64_profile_events(1)), prunes: Number(ex.jit64_profile_events(2)), locations: count, rows };
+        if(process.env.HOTSPOTS_OUT) fs.writeFileSync(process.env.HOTSPOTS_OUT, JSON.stringify(report, null, 2) + "\n");
+        console.log("HOTSPOTS " + JSON.stringify(report));
     }
     const clean_serial = serial.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "");
     const modloop_ok = /Mounting modloop[^\n]*\n?\s*\[ ok \]/.test(clean_serial);

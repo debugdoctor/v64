@@ -296,6 +296,42 @@ fn vex_decode_len(bytes: &[u8], i: usize) -> Result<usize, String> {
     Ok(j - i)
 }
 
+fn decode_vex_register(bytes: &[u8]) -> Option<Instruction> {
+    let (rex, control, at, map) = if bytes[0] == 0xC5 {
+        ((!bytes[1] >> 7 & 1) << 2, bytes[1], 2, 1)
+    }
+    else {
+        ((!bytes[1] >> 5 & 7), bytes[2], 3, bytes[1] & 31)
+    };
+    let op = *bytes.get(at)?;
+    let modrm = *bytes.get(at + 1)?;
+    if modrm >> 6 != 3 { return None; }
+    let pp = control & 3;
+    let wide = control & 4 != 0;
+    let src1 = !control >> 3 & 15;
+    let reg = (modrm >> 3 & 7) | (rex & 4) << 1;
+    let rm = (modrm & 7) | (rex & 1) << 3;
+    if map == 3 && op == 0xF0 && pp == 3 && !wide && src1 == 0 {
+        let width = if control & 0x80 != 0 { 64 } else { 32 };
+        return Some(Instruction::Rorx { dst: reg, src: rm, width, count: *bytes.get(at + 2)? & (width - 1) });
+    }
+    if map == 2 && op == 0xF7 && pp != 0 && !wide {
+        let width = if control & 0x80 != 0 { 64 } else { 32 };
+        let kind = match pp { 1 => 2, 2 => 1, _ => 0 };
+        return Some(Instruction::BmiShift { dst: reg, src: rm, count: src1, width, kind });
+    }
+    if map != 1 { return None; }
+    match op {
+        0xD4 | 0xFB | 0xDB | 0xDF | 0xEB | 0xEF if pp == 1 =>
+            Some(Instruction::VectorReg { op, dst: reg, src1, src2: rm, wide }),
+        0x6F | 0x7F if (pp == 1 || pp == 2) && src1 == 0 => {
+            let (dst, src) = if op == 0x6F { (reg, rm) } else { (rm, reg) };
+            Some(Instruction::VectorReg { op: 0, dst, src1: src, src2: src, wide })
+        },
+        _ => None,
+    }
+}
+
 fn decode_into(out: &mut DecodedBlock, base: u64, bytes: &[u8]) -> Result<(), String> {
     let mut i = 0;
 
@@ -350,13 +386,18 @@ fn decode_into(out: &mut DecodedBlock, base: u64, bytes: &[u8]) -> Result<(), St
             }
         }
 
-        // VEX/AVX: executed by the interpreter (see Instruction::Avx).
+        // Compile supported register forms; remaining VEX forms use the bridge.
         if bytes[i] == 0xC4 || bytes[i] == 0xC5 {
             if i != start {
                 return Err("legacy prefix before VEX".into());
             }
             let len = vex_decode_len(bytes, i)?;
-            out.push(Instruction::Avx { rip: out.current_rip });
+            if let Some(instr) = decode_vex_register(&bytes[i..i + len]) {
+                out.push(instr);
+            }
+            else {
+                out.push(Instruction::Avx { rip: out.current_rip });
+            }
             i += len;
             continue;
         }
@@ -372,6 +413,11 @@ fn decode_into(out: &mut DecodedBlock, base: u64, bytes: &[u8]) -> Result<(), St
         let addr_size = if prefix_67 { 32 } else { 64 };
 
         match opcode {
+            0x98 => {
+                let width = operand_width(prefix_66, rex_w);
+                out.push(Instruction::MovExtendReg { dst: 0, src: 0, src_width: width / 2, dst_width: width, signed: true, high8: false });
+            },
+            0x99 => out.push(Instruction::SignHigh { width: operand_width(prefix_66, rex_w) }),
             // xchg rAX, r (0x90 is NOP only when the other register is rAX;
             // with REX.B it exchanges with r8-r15)
             0x90..=0x97 => {
@@ -1884,6 +1930,15 @@ fn gen_memory_write_slow(
 
 // SSE2: the XMM file is in emulated memory, so 128-bit operands are pairs of
 // 64-bit halves.
+fn vector_reg_address(r: u8, offset: u32) -> i32 {
+    if offset < 16 {
+        crate::cpu::global_pointers::get_reg_xmm_addr(r) as i32 + offset as i32
+    }
+    else {
+        unsafe { crate::cpu::global_pointers::ymm_high_ptr(r as i32) as i32 + (offset - 16) as i32 }
+    }
+}
+
 fn gen_xmm_reg_load(b: &mut WasmBuilder, r: u8, offset: u32) {
     b.const_i32(crate::cpu::global_pointers::get_reg_xmm_addr(r) as i32);
     b.load_aligned_i64(offset);
@@ -2814,6 +2869,63 @@ fn compile_block_with_rips(instrs: &[Instruction], rips: &[u64], block_end: u64)
                 b.free_local_i64(value);
                 b.free_local_i64(address);
             },
+            Instruction::BmiShift { dst, src, count, width, kind } => {
+                let si = load_reg(&mut b, &mut locals, src);
+                let ci = load_reg(&mut b, &mut locals, count);
+                b.get_local_i64(&locals[si].1);
+                emit_mask(&mut b, width);
+                if kind == 1 && width == 32 {
+                    b.const_i64(32);
+                    b.shl_i64();
+                    b.const_i64(32);
+                    b.shr_s_i64();
+                }
+                b.get_local_i64(&locals[ci].1);
+                b.const_i64((width - 1) as i64);
+                b.and_i64();
+                match kind {
+                    2 => b.shl_i64(),
+                    1 => b.shr_s_i64(),
+                    _ => b.shr_u_i64(),
+                }
+                emit_mask(&mut b, width);
+                let result = b.set_new_local_i64();
+                let di = load_reg(&mut b, &mut locals, dst);
+                emit_write_reg(&mut b, &locals[di].1, &result, width);
+                b.free_local_i64(result);
+            },
+            Instruction::Rorx { dst, src, width, count } => {
+                let si = load_reg(&mut b, &mut locals, src);
+                b.get_local_i64(&locals[si].1);
+                emit_mask(&mut b, width);
+                let source = b.set_new_local_i64();
+                b.get_local_i64(&source);
+                b.const_i64(count as i64);
+                b.shr_u_i64();
+                b.get_local_i64(&source);
+                b.const_i64((width - count) as i64);
+                b.shl_i64();
+                b.or_i64();
+                emit_mask(&mut b, width);
+                let result = b.set_new_local_i64();
+                let di = load_reg(&mut b, &mut locals, dst);
+                emit_write_reg(&mut b, &locals[di].1, &result, width);
+                b.free_local_i64(source);
+                b.free_local_i64(result);
+            },
+            Instruction::SignHigh { width } => {
+                let si = load_reg(&mut b, &mut locals, 0);
+                b.get_local_i64(&locals[si].1);
+                b.const_i64((64 - width) as i64);
+                b.shl_i64();
+                b.const_i64(63);
+                b.shr_s_i64();
+                emit_mask(&mut b, width);
+                let result = b.set_new_local_i64();
+                let di = load_reg(&mut b, &mut locals, 2);
+                emit_write_reg(&mut b, &locals[di].1, &result, width);
+                b.free_local_i64(result);
+            },
             Instruction::ShiftReg { kind, r, width, count } => {
                 if count == 0 {
                     continue;
@@ -3104,6 +3216,36 @@ fn compile_block_with_rips(instrs: &[Instruction], rips: &[u64], block_end: u64)
                 b.free_local_i64(lo);
                 b.free_local_i64(hi);
                 b.free_local_i64(address);
+            },
+            Instruction::VectorReg { op, dst, src1, src2, wide } => {
+                for offset in (0..if wide { 32 } else { 16 }).step_by(8) {
+                    b.const_i32(vector_reg_address(dst, offset));
+                    b.const_i32(vector_reg_address(src1, offset));
+                    b.load_aligned_i64(0);
+                    if op != 0 {
+                        if op == 0xDF {
+                            b.const_i64(-1);
+                            b.xor_i64();
+                        }
+                        b.const_i32(vector_reg_address(src2, offset));
+                        b.load_aligned_i64(0);
+                        match op {
+                            0xD4 => b.add_i64(),
+                            0xFB => b.sub_i64(),
+                            0xDB | 0xDF => b.and_i64(),
+                            0xEB => b.or_i64(),
+                            _ => b.xor_i64(),
+                        }
+                    }
+                    b.store_aligned_i64(0);
+                }
+                if !wide {
+                    for offset in [16, 24] {
+                        b.const_i32(vector_reg_address(dst, offset));
+                        b.const_i64(0);
+                        b.store_aligned_i64(0);
+                    }
+                }
             },
             Instruction::XmmCopy { dst, src } => {
                 gen_xmm_reg_load(&mut b, src, 0);
@@ -3573,7 +3715,7 @@ fn bail_class(instr: &Instruction) -> u64 {
         Instruction::Call { .. } | Instruction::CallReg { .. } | Instruction::CallMem { .. } => 1 << 26,
         Instruction::Leave => 1 << 27,
         Instruction::Nop => 1 << 22,
-        Instruction::Avx { .. } => 1 << 21,
+        Instruction::Avx { .. } | Instruction::VectorReg { .. } | Instruction::Rorx { .. } | Instruction::BmiShift { .. } | Instruction::SignHigh { .. } => 1 << 21,
         Instruction::Hlt => 1 << 28,
     }
 }
@@ -3749,6 +3891,95 @@ const JIT64_EXIT_REASON_COUNT: usize = 8;
 static mut JIT64_EXIT_REASON: [u64; JIT64_EXIT_REASON_COUNT] = [0; JIT64_EXIT_REASON_COUNT];
 // Compile-time gate: blocks compiled while this is set count their exits.
 static mut JIT64_EXIT_STATS: bool = false;
+
+#[derive(Clone)]
+struct FallbackSample {
+    cr3: u32,
+    rip: u64,
+    kind: u8,
+    samples: u64,
+    bytes: [u8; 15],
+    len: u8,
+}
+
+static mut JIT64_PROFILE: bool = false;
+static mut PROFILE_EVENTS: [u64; 2] = [0; 2];
+static mut PROFILE_RANDOM: [u32; 2] = [0x6d2b79f5, 0x9e3779b9];
+static mut PROFILE_DROPPED: u64 = 0;
+static mut PROFILE_SAMPLES: Option<FastMap<(u32, u8), FallbackSample>> = None;
+static mut PROFILE_REPORT: Vec<FallbackSample> = Vec::new();
+
+// Sample about one in 64 executions; shared physical code combines address spaces.
+#[inline(always)]
+pub unsafe fn profile_fallback(rip: u64, kind: u8) {
+    if !JIT64_PROFILE { return; }
+    profile_fallback_enabled(rip, kind);
+}
+
+#[inline(never)]
+unsafe fn profile_fallback_enabled(rip: u64, kind: u8) {
+    PROFILE_EVENTS[kind as usize] += 1;
+    let random = &mut PROFILE_RANDOM[kind as usize];
+    *random ^= *random << 13;
+    *random ^= *random >> 17;
+    *random ^= *random << 5;
+    if *random & 63 != 0 { return; }
+    let Ok(phys) = crate::cpu::core::translate_address_64_no_side_effects(rip) else { return; };
+    if crate::memory::in_mapped_range(phys) { return; }
+    let key = (phys, kind);
+    let len = (0x1000 - (phys & 0xfff)).min(15) as u8;
+    let mut bytes = [0; 15];
+    for i in 0..len as usize {
+        bytes[i] = crate::memory::read8_no_mmap_check(phys + i as u32) as u8;
+    }
+    let samples = (&mut *std::ptr::addr_of_mut!(PROFILE_SAMPLES)).get_or_insert_with(FastMap::default);
+    if let Some(entry) = samples.get_mut(&key) {
+        if entry.bytes == bytes {
+            entry.samples += 1;
+        }
+        else {
+            *entry = FallbackSample { cr3: *crate::cpu::global_pointers::cr.add(3) as u32, rip, kind, samples: 1, bytes, len };
+        }
+        return;
+    }
+    if samples.len() >= 65536 {
+        let mut counts: Vec<_> = samples.values().map(|v| v.samples).collect();
+        counts.sort_unstable();
+        let cutoff = counts[counts.len() / 2];
+        samples.retain(|_, v| v.samples > cutoff);
+        PROFILE_DROPPED += 1;
+    }
+    samples.insert(key, FallbackSample { cr3: *crate::cpu::global_pointers::cr.add(3) as u32, rip, kind, samples: 1, bytes, len });
+}
+
+#[no_mangle]
+pub unsafe fn jit64_profile_snapshot() -> u32 {
+    let samples = &*std::ptr::addr_of!(PROFILE_SAMPLES);
+    let report = &mut *std::ptr::addr_of_mut!(PROFILE_REPORT);
+    *report = samples.as_ref().map(|m| m.values().cloned().collect()).unwrap_or_default();
+    report.sort_unstable_by(|a, b| b.samples.cmp(&a.samples));
+    report.len() as u32
+}
+
+#[no_mangle]
+pub unsafe fn jit64_profile_value(index: u32, field: u32) -> u64 {
+    let Some(entry) = (&*std::ptr::addr_of!(PROFILE_REPORT)).get(index as usize) else { return 0; };
+    match field {
+        0 => entry.rip,
+        1 => entry.kind as u64,
+        2 => entry.samples,
+        3 => entry.len as u64,
+        4..=18 => entry.bytes[(field - 4) as usize] as u64,
+        19 => entry.cr3 as u64,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe fn jit64_profile_events(kind: u32) -> u64 {
+    if kind == 2 { return PROFILE_DROPPED; }
+    (&*std::ptr::addr_of!(PROFILE_EVENTS)).get(kind as usize).copied().unwrap_or(0)
+}
 
 // Bisect switch: classes of instructions whose blocks are left to the
 // interpreter (see jit64_set_bail).
@@ -4936,6 +5167,14 @@ pub unsafe fn set_config(index: u32, value: u32) -> bool {
         cfg::JIT64_SELFCHECK_MIN => jit64_set_selfcheck_min(value),
         cfg::JIT64_SELFCHECK_REPEAT => jit64_set_selfcheck_repeat(value),
         cfg::JIT64_EXIT_STATS => jit64_set_exit_stats(value),
+        cfg::JIT64_PROFILE => {
+            JIT64_PROFILE = value != 0;
+            PROFILE_EVENTS = [0; 2];
+            PROFILE_RANDOM = [0x6d2b79f5, 0x9e3779b9];
+            PROFILE_DROPPED = 0;
+            PROFILE_SAMPLES = None;
+            (&mut *std::ptr::addr_of_mut!(PROFILE_REPORT)).clear();
+        },
         _ => return false,
     }
 
@@ -4963,6 +5202,7 @@ pub unsafe fn get_config(index: u32) -> Option<u32> {
         cfg::JIT64_SELFCHECK_MIN => SELFCHECK_MIN_INSTRS as u32,
         cfg::JIT64_SELFCHECK_REPEAT => SELFCHECK_REPEAT as u32,
         cfg::JIT64_EXIT_STATS => JIT64_EXIT_STATS as u32,
+        cfg::JIT64_PROFILE => JIT64_PROFILE as u32,
         _ => return None,
     })
 }
@@ -5492,6 +5732,21 @@ mod tests {
             0x0F, 0x1F, 0x44, 0x00, 0x00,
             0xF3, 0x0F, 0x1E, 0xFA,
         ]).unwrap(), vec![Instruction::Nop, Instruction::Nop, Instruction::Nop]);
+    }
+
+    #[test]
+    fn decodes_native_vex_register_operations() {
+        assert_eq!(decode_block(0, &[0xC4, 0x41, 0x3D, 0xEF, 0xC9]).unwrap(), vec![
+            Instruction::VectorReg { op: 0xEF, dst: 9, src1: 8, src2: 9, wide: true },
+        ]);
+        assert_eq!(decode_block(0, &[0xC4, 0x41, 0x7A, 0x6F, 0xC8]).unwrap(), vec![
+            Instruction::VectorReg { op: 0, dst: 9, src1: 8, src2: 8, wide: false },
+        ]);
+        assert_eq!(decode_block(0, &[0xC4, 0xE3, 0xFB, 0xF0, 0xD8, 0xFF]).unwrap(), vec![
+            Instruction::Rorx { dst: 3, src: 0, width: 64, count: 63 },
+        ]);
+        assert!(matches!(decode_block(0, &[0xC4, 0x41, 0x7E, 0x6F, 0x07]).unwrap()[0], Instruction::Avx { .. }));
+        assert!(decode_vex_register(&[0xC4, 0xE3, 0xFF, 0xF0, 0xD8, 1]).is_none());
     }
 
     #[test]

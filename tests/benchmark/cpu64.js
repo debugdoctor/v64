@@ -9,6 +9,7 @@
 //
 // The measured JIT run does not clear the block cache or rewrite the code page,
 // so one-time compile cost is excluded.
+// HOTSPOTS=1 reports fallback counts and enables sampling during measurement.
 
 import assert from "node:assert/strict";
 import { writeFileSync as write_file_sync } from "node:fs";
@@ -179,6 +180,40 @@ const WORKLOADS = [
         ],
     },
     {
+        name: "bmi_shifts",
+        note: "SHLX/SHRX/SARX register shifts",
+        iterations: ITERATIONS,
+        body: [
+            0xC4, 0xE2, 0xF1, 0xF7, 0xC8,
+            0xC4, 0xE2, 0xF3, 0xF7, 0xC8,
+            0xC4, 0xE2, 0xF2, 0xF7, 0xC8,
+        ],
+    },
+    {
+        name: "avx_addq",
+        note: "VPADDQ/VPSUBQ register arithmetic",
+        iterations: ITERATIONS,
+        body: [0xC5, 0xFD, 0xD4, 0xC1, 0xC5, 0xFD, 0xFB, 0xC1],
+    },
+    {
+        name: "bmi_rorx",
+        note: "RORX register rotates used by SHA-256",
+        iterations: ITERATIONS,
+        body: [0xC4, 0xE3, 0xFB, 0xF0, 0xD8, 0x19], // nasm: rorx rbx,rax,25
+    },
+    {
+        name: "sign_extend",
+        note: "CDQE and CQO",
+        iterations: ITERATIONS,
+        body: [0x48, 0x98, 0x48, 0x99],
+    },
+    {
+        name: "avx_vpxor",
+        note: "VEX.256 register XOR",
+        iterations: ITERATIONS,
+        body: [0xC5, 0xFD, 0xEF, 0xC1], // nasm: vpxor ymm0,ymm0,ymm1
+    },
+    {
         name: "rep_stosb",
         note: "rep stosb, 64 bytes per iteration (known slow path)",
         iterations: REP_ITERATIONS,
@@ -298,7 +333,17 @@ emulator.add_listener("emulator-loaded", () => {
         // Compile once, then measure without clearing the cache or rewriting code.
         prepare(workload.program);
         run(1, true);
+        if(process.env.HOTSPOTS === "1") set_cpu_config(ex, "JIT64_PROFILE", 1);
         const compiled = run(1, false);
+        if(process.env.HOTSPOTS === "1")
+        {
+            const count = ex.jit64_profile_snapshot();
+            console.log("  fallback " + workload.name + ": interpreter=" + ex.jit64_profile_events(0) +
+                " jit-helper=" + ex.jit64_profile_events(1) + " sampled_locations=" + count);
+            set_cpu_config(ex, "JIT64_PROFILE", 0);
+            assert.equal(ex.jit64_profile_events(0), 0n, "disabling profiling resets counters");
+            assert.equal(ex.jit64_profile_snapshot(), 0, "disabling profiling clears samples");
+        }
 
         const speedup = interpreted.ms / compiled.ms;
         results[workload.name] = {

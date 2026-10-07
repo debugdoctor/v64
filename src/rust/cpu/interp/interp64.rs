@@ -422,10 +422,13 @@ pub unsafe fn run_one() {
 
 // JIT bridge: execute the VEX/AVX instruction at `address` in the interpreter.
 // The second argument is unused (keeps the existing wasm import signature).
+static mut PROFILE_JIT_BRIDGE: bool = false;
 #[no_mangle]
 pub unsafe fn jit64_avx(address: u64, _unused: i32) {
     *rip = address;
+    PROFILE_JIT_BRIDGE = true;
     run_one();
+    PROFILE_JIT_BRIDGE = false;
 }
 
 // The 32-bit instruction_pointer view is only read at boundaries; sync there.
@@ -640,7 +643,7 @@ pub(crate) fn instr_supported(i: &JInstr) -> bool {
         Avx { .. } => true,
         // SSE2 moves, xor, integer ops, shifts and shuffles (jexec handles them
         // through the shared `interp64_0f` helpers).
-        XmmCopy { .. } | XmmLoad { .. } | XmmStore { .. } | XmmXor { .. } | XmmXorMem { .. } => true,
+        BmiShift { .. } | Rorx { .. } | SignHigh { .. } | VectorReg { .. } | XmmCopy { .. } | XmmLoad { .. } | XmmStore { .. } | XmmXor { .. } | XmmXorMem { .. } => true,
         XmmInt { .. } | XmmIntMem { .. } | XmmShiftImm { .. } | XmmShuf { .. } | XmmShufMem { .. } => true,
         ImulRegReg { .. } | ImulRegImm { .. } | ImulRegMem { .. } => true,
         BitTestReg { .. } | BitTestImm { .. } => true,
@@ -942,6 +945,50 @@ pub(crate) unsafe fn jexec(instr: &JInstr) -> OrPageFault<JStep> {
             let a = jmem_addr(&mem);
             self::interp64_0f::mem_write128(a, self::interp64_0f::xmm_get(src))?;
         },
+        BmiShift { dst, src, count, width, kind } => {
+            let source = read_reg(src, jopsize(width), true);
+            let shift = read_reg(count, jopsize(width), true) as u32 & (width - 1) as u32;
+            let result = match kind {
+                2 => source << shift,
+                1 if width == 32 => (source as u32 as i32 >> shift) as u32 as u64,
+                1 => (source as i64 >> shift) as u64,
+                _ => source >> shift,
+            };
+            write_reg(dst, jopsize(width), true, result);
+        },
+        Rorx { dst, src, width, count } => {
+            let source = read_reg(src, jopsize(width), true);
+            let result = if width == 64 { source.rotate_right(count as u32) }
+                else { (source as u32).rotate_right(count as u32) as u64 };
+            write_reg(dst, jopsize(width), true, result);
+        },
+        SignHigh { width } => {
+            let source = read_reg(0, jopsize(width), true);
+            write_reg(2, jopsize(width), true, if source >> (width - 1) & 1 != 0 { u64::MAX } else { 0 });
+        },
+        VectorReg { op, dst, src1, src2, wide } => {
+            let apply = |a: reg128, b: reg128| {
+                let mut result = a;
+                for i in 0..2 {
+                    result.u64[i] = match op {
+                        0 => a.u64[i],
+                        0xD4 => a.u64[i].wrapping_add(b.u64[i]),
+                        0xFB => a.u64[i].wrapping_sub(b.u64[i]),
+                        0xDB => a.u64[i] & b.u64[i],
+                        0xDF => !a.u64[i] & b.u64[i],
+                        0xEB => a.u64[i] | b.u64[i],
+                        _ => a.u64[i] ^ b.u64[i],
+                    };
+                }
+                result
+            };
+            let lo = apply(self::interp64_0f::xmm_get(src1), self::interp64_0f::xmm_get(src2));
+            let hi = if wide {
+                apply(*ymm_high_ptr(src1 as i32), *ymm_high_ptr(src2 as i32))
+            } else { reg128 { u64: [0, 0] } };
+            self::interp64_0f::xmm_set(dst, lo);
+            *ymm_high_ptr(dst as i32) = hi;
+        },
         XmmCopy { dst, src } => self::interp64_0f::xmm_set(dst, self::interp64_0f::xmm_get(src)),
         XmmXor { dst, src } => {
             let mut v = self::interp64_0f::xmm_get(dst);
@@ -1204,6 +1251,7 @@ pub unsafe fn boot64(cr3: u32, entry: u64, boot_params: u64) {
 // --- AVX (VEX-encoded) -----------------------------------------------------
 
 pub(crate) unsafe fn run_one_inner() -> OrPageFault<()> {
+    crate::cpu::jit::jit64::profile_fallback(*rip, PROFILE_JIT_BRIDGE as u8);
     let (pfx, opcode) = decode_prefixes()?;
     if INTERP64_OPCODE_STATS {
         INTERP64_OPCODE[opcode as usize] = INTERP64_OPCODE[opcode as usize].wrapping_add(1);
@@ -1951,4 +1999,3 @@ pub(crate) unsafe fn run_one_inner() -> OrPageFault<()> {
 
     Ok(())
 }
-

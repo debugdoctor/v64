@@ -34,7 +34,8 @@
         "JIT64_SELFCHECK": 30,
         "JIT64_SELFCHECK_MIN": 31,
         "JIT64_SELFCHECK_REPEAT": 32,
-        "JIT64_EXIT_STATS": 33
+        "JIT64_EXIT_STATS": 33,
+        "JIT64_PROFILE": 34
       }
     },
     {

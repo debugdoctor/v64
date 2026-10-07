@@ -868,6 +868,73 @@ emulator.add_listener("emulator-loaded", () => {
         },
     ];
 
+    // Register aliases, extended registers and VEX.128 upper-half clearing.
+    const vector_input = Array.from({ length: 32 }, (_, i) => (i * 37 + 11) & 255);
+    const vector_reversed = Array.from({ length: 32 }, (_, i) => vector_input[(3 - (i >> 3)) * 8 + (i & 7)]);
+    for(const [name, op] of [["xor", 0xEF], ["and", 0xDB], ["andn", 0xDF], ["or", 0xEB], ["copy", 0], ["addq", 0xD4], ["subq", 0xFB]])
+    {
+        for(const wide of [false, true])
+        {
+            const out = vector_input.map((a, i) => {
+                const b = vector_reversed[i];
+                if(!wide && i >= 16) return 0;
+                if(op === 0xD4 || op === 0xFB)
+                {
+                    const base = i & ~7;
+                    const word = bytes => bytes.slice(base, base + 8).reduce((v, byte, j) => v | BigInt(byte) << BigInt(j * 8), 0n);
+                    const result = BigInt.asUintN(64, op === 0xD4 ? word(vector_input) + word(vector_reversed) : word(vector_input) - word(vector_reversed));
+                    return Number(result >> BigInt((i & 7) * 8) & 255n);
+                }
+                return op === 0 ? a : op === 0xEF ? a ^ b : op === 0xDB ? a & b : op === 0xDF ? (~a & b) : a | b;
+            });
+            FIXED.push({
+                name: "avx native: " + name + (wide ? " ymm" : " xmm"),
+                memory_size: 64,
+                raw_reference: true,
+                body: [
+                    0xC4, 0x41, 0x7E, 0x6F, 0x07, // nasm: vmovdqu ymm8,[r15]
+                    0xC4, 0x43, 0xFD, 0x00, 0xC8, 0x1B, // vpermq ymm9,ymm8,0x1b
+                    ...(op ? [0xC4, 0x41, wide ? 0x3D : 0x39, op, 0xC9] : [0xC4, 0x41, wide ? 0x7E : 0x7A, 0x6F, 0xC8]),
+                    0xC4, 0x41, 0x7E, 0x7F, 0x4F, 0x20, // vmovdqu [r15+32],ymm9
+                ],
+                expect: { in0: vector_input.slice(0, 16), in1: vector_input.slice(16), out, offset: 32 },
+            });
+        }
+    }
+
+    for(const [name, bytes] of [
+        ["rorx32", [0xC4, 0xE3, 0x7B, 0xF0, 0xD8, 0x19]],
+        ["rorx64", [0xC4, 0xE3, 0xFB, 0xF0, 0xD8, 0x19]],
+        ["rorx32 zero", [0xC4, 0xE3, 0x7B, 0xF0, 0xD8, 0]],
+        ["rorx64 zero", [0xC4, 0xE3, 0xFB, 0xF0, 0xD8, 0]],
+        ["cbw cwd", [0x66, 0x98, 0x66, 0x99]],
+        ["cwde cdq", [0x98, 0x99]],
+        ["cdqe cqo", [0x48, 0x98, 0x48, 0x99]],
+    ])
+    {
+        FIXED.push({ name: "avx native scalar: " + name, raw_reference: true,
+            body: [0x48, 0xB8, 0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x81, ...bytes] });
+    }
+
+    for(const [name, pp] of [["shlx", 1], ["sarx", 2], ["shrx", 3]])
+    {
+        for(const width of [32, 64])
+        {
+            for(const count of [0, width - 1, width, width + 1, 0x10000003f])
+            {
+                const countBytes = Array.from({ length: 8 }, (_, i) => Number(BigInt(count) >> BigInt(i * 8) & 255n));
+                FIXED.push({ name: "avx native scalar: " + name + width + " count=" + count, raw_reference: true,
+                    body: [
+                        0x48, 0xB8, 0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x81,
+                        0x48, 0xB9, ...countBytes,
+                        0xF9, // stc: BMI2 must preserve carry
+                        0xC4, 0xE2, (width === 64 ? 0xF0 : 0x70) | pp, 0xF7, 0xC8, // nasm: shift rcx,rax,rcx
+                        0x9C, 0x41, 0x59, // pushfq; pop r9: observe flags before the loop changes them
+                    ] });
+            }
+        }
+    }
+
     const seed_regs = random => {
         const regs = new Array(16).fill(0n);
         for(const i of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14])
@@ -1072,7 +1139,7 @@ emulator.add_listener("emulator-loaded", () => {
             test.iters ?? (+process.env.JIT64_DIFF_FIXED_ITERS || ITERATIONS));
         const random = rng(12345);
         const regs = seed_regs(random);
-        const memory = Array.from({ length: 32 }, () => Math.floor(random() * 256));
+        const memory = Array.from({ length: test.memory_size || 32 }, () => Math.floor(random() * 256));
         // AES-NI / PCLMULQDQ are checked against published vectors, not just
         // against each other: the differential can only prove the two engines
         // agree, and OpenSSL picks these instructions from CPUID, so a shared
@@ -1083,8 +1150,10 @@ emulator.add_listener("emulator-loaded", () => {
             for(let i = 0; i < 16; i++) memory[i] = test.expect.in0[i];
             for(let i = 0; i < 16; i++) memory[16 + i] = test.expect.in1[i];
         }
+        if(test.raw_reference) set_cpu_config(ex, "INTERP64_DECODE_CACHE", 0);
         const interpreted = run(program, regs, memory, false);
         const compiled = run(program, regs, memory, true);
+        if(test.raw_reference) set_cpu_config(ex, "INTERP64_DECODE_CACHE", 1);
         if(test.name.startsWith("avx") && ex.jit64_compiled_count() === 0)
         {
             fixed_failures++;
@@ -1099,8 +1168,9 @@ emulator.add_listener("emulator-loaded", () => {
         if(test.expect)
         {
             // The scenario stores its result into the first 16 scratch bytes.
-            const got = Array.from(interpreted.memory.slice(0, 16));
             const want = test.expect.out;
+            const offset = test.expect.offset || 0;
+            const got = Array.from(interpreted.memory.slice(offset, offset + want.length));
             const gotHex = got.map(b => b.toString(16).padStart(2, "0")).join(" ");
             const wantHex = want.map(b => b.toString(16).padStart(2, "0")).join(" ");
             const refOk = got.every((b, i) => b === want[i]);
@@ -1111,7 +1181,7 @@ emulator.add_listener("emulator-loaded", () => {
                 console.log("    want    " + wantHex);
                 console.log("    interp  " + gotHex);
                 console.log("    jit     " +
-                    Array.from(compiled.memory.slice(0, 16)).map(b => b.toString(16).padStart(2, "0")).join(" "));
+                    Array.from(compiled.memory.slice(offset, offset + want.length)).map(b => b.toString(16).padStart(2, "0")).join(" "));
             }
             else
             {
