@@ -1,0 +1,5 @@
+*.o
+*.elf
+*.out
+*.diff
+__pycache__/

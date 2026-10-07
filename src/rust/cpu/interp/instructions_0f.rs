@@ -42,7 +42,8 @@ use crate::cpu::interp::arith::{
     saturate_sw_to_sb, saturate_sw_to_ub, saturate_ud_to_ub, saturate_uw,
 };
 use crate::cpu::core::*;
-use crate::cpu::interp::fpu::fpu_set_tag_word;
+use crate::cpu::interp::fpu::{fpu_set_status_word, fpu_set_tag_word};
+use crate::cpu::interp::fpu::set_control_word;
 use crate::cpu::global_pointers::*;
 use crate::cpu::interp::misc_instr::{
     adjust_stack_reg, bswap, cmovcc16, cmovcc32, fxrstor, fxsave, get_stack_pointer, jmpcc16,
@@ -1638,7 +1639,8 @@ pub unsafe fn instr_0F38() {
         0x10 | 0x14 | 0x15 => {
             let source = return_on_pagefault!(read_xmm_operand(modrm_byte));
             let mask = read_xmm128s(0);
-            write_xmm_reg128(dst, crate::cpu::interp::simd_instr::blendv_apply(read_xmm128s(dst), source, mask));
+            let element_bytes = match opcode { 0x10 => 1, 0x14 => 4, _ => 8 };
+            write_xmm_reg128(dst, crate::cpu::interp::simd_instr::blendv_apply(read_xmm128s(dst), source, mask, element_bytes));
         },
         // PTEST
         0x17 => {
@@ -3727,6 +3729,8 @@ pub unsafe fn instr_0FA2() {
             // pclmul, sse3, ssse3, fma, sse4.1, sse4.2, movbe, popcnt, aes,
             // xsave, osxsave, avx, rdrand. Bit assignments:
             // https://gitlab.com/x86-cpuid.org/x86-cpuid-db
+            // sse3, pclmul, ssse3, fma, sse4.1, sse4.2, movbe, popcnt, aes,
+            // xsave, osxsave, avx, rdrand:
             ecx = 1 << 0 | 1 << 1 | 1 << 9 | 1 << 12 | 1 << 19 | 1 << 20 | 1 << 22 | 1 << 23
                 | 1 << 25 | 1 << 26 | 1 << 27 | 1 << 28 | 1 << 30;
             let vme = 0 << 1;
@@ -3797,31 +3801,33 @@ pub unsafe fn instr_0FA2() {
             }
         },
 
-        // XSAVE features: x87 (160 @ 0), SSE (256 @ 160) and AVX (256 @ 576).
+        // XSAVE features: x87 (component 0), SSE (1) and AVX (2). These offsets
+        // and sizes are the SDM's and the same ones instr_0FAE_4_mem/5_mem use,
+        // so what CPUID promises is what XSAVE writes.
         0xD => {
             match read_reg32(ECX) {
                 0 => {
                     let xcr0 = crate::cpu::interp::interp64::get_xcr0();
-                    // EAX/EDX: supported XCR0 bits. EBX: size required by the
-                    // enabled XCR0 features (512 legacy + 64 header, plus 256
-                    // for AVX). ECX: size required by all supported features.
+                    // EAX/EDX: supported XCR0 bits. EBX: size for the features
+                    // XCR0 has enabled. ECX: size for all supported features.
                     eax = 7;
-                    ebx = 576 + if xcr0 & 4 != 0 { 256 } else { 0 };
-                    ecx = 832;
+                    // The area always holds the 512-byte legacy region and the
+                    // 64-byte header, so 576 even with AVX disabled.
+                    ebx = XSAVE_YMM_OFFSET
+                        + if xcr0 & 4 != 0 { XSAVE_YMM_SIZE } else { 0 };
+                    ecx = XSAVE_AREA_SIZE;
                     edx = 0;
                 },
-                // Sub-leaf n describes the state component for XCR0 bit n
-                // (Linux reads sub-leaf XFEATURE_YMM == 2 for the AVX state).
-                // Sub-leaf 1: XSAVE sub-features (none) and the XSAVES size.
+                // Sub-leaf 1 reports XSAVE capabilities and the enabled area size.
                 1 => {
                     eax = 0; // no XSAVEOPT/XSAVEC/XGETBV/XSAVES
-                    ebx = 832;
+                    ebx = XSAVE_AREA_SIZE;
                     ecx = 0;
                     edx = 0;
                 },
                 2 => {
-                    eax = 256; // YMM (AVX) size
-                    ebx = 576; // YMM offset
+                    eax = XSAVE_YMM_SIZE;
+                    ebx = XSAVE_YMM_OFFSET;
                     ecx = 0;
                     edx = 0;
                 },
@@ -4057,20 +4063,25 @@ pub unsafe fn instr_0FAE_3_mem(addr: i32) {
 pub unsafe fn instr_0FAE_4_reg(_r: i32) { trigger_ud(); }
 #[no_mangle]
 pub unsafe fn instr_0FAE_4_mem(addr: i32) {
-    // XSAVE: the legacy FXSAVE area plus the XSTATE_BV header, and the YMM
-    // halves when AVX is enabled in XCR0. The 32-bit kernel uses this for FPU
-    // context switches, so a stub #UDs early in boot.
-    // cf. Intel SDM Vol. 1, XSAVE.
-    fxsave(addr);
+    // XSAVE, SDM Vol.1 13.4: legacy region 0..511 (FXSAVE layout, XMM0-15 at
+    // 160 + 16*i), header at 512, then one section per component at the offset
+    // CPUID leaf 0DH reports in EBX.
+    let xcr0 = crate::cpu::interp::interp64::get_xcr0();
     let mask = read_reg32(EAX) as u32 as u64 | (read_reg32(EDX) as u32 as u64) << 32;
-    let requested = mask & crate::cpu::interp::interp64::get_xcr0();
-    return_on_pagefault!(safe_write64(addr + 512, requested));
+    let selected = mask & xcr0;
+
+    // Probe through the end of the last selected component.
+    let ymm_size = if selected & 4 != 0 { XSAVE_YMM_SIZE } else { 0 };
+    return_on_pagefault!(writable_or_pagefault(addr, XSAVE_YMM_OFFSET + ymm_size));
+    fxsave(addr);
+
+    return_on_pagefault!(safe_write64(addr + 512, selected));
     return_on_pagefault!(safe_write64(addr + 520, 0));
-    if requested & 4 != 0 {
-        for i in 0..8 {
+    if selected & 4 != 0 {
+        for i in 0..16 {
             let hi = *crate::cpu::global_pointers::ymm_high_ptr(i);
-            return_on_pagefault!(safe_write64(addr + 576 + i * 16, hi.u64[0]));
-            return_on_pagefault!(safe_write64(addr + 576 + i * 16 + 8, hi.u64[1]));
+            return_on_pagefault!(safe_write64(addr + XSAVE_YMM_OFFSET + (i << 4), hi.u64[0]));
+            return_on_pagefault!(safe_write64(addr + XSAVE_YMM_OFFSET + (i << 4) + 8, hi.u64[1]));
         }
     }
 }
@@ -4079,14 +4090,47 @@ pub unsafe fn instr_0FAE_5_reg(_r: i32) {
 }
 #[no_mangle]
 pub unsafe fn instr_0FAE_5_mem(addr: i32) {
-    // XRSTOR: restore the legacy area; the header selects the extra state.
+    // XRSTOR, SDM Vol.1 13.4.2: a requested component present in the area is
+    // restored from it, one requested but absent goes to its initial state, and
+    // one not requested at all is left alone. Getting that last case wrong
+    // silently discards state the caller asked to keep.
+    let xcr0 = crate::cpu::interp::interp64::get_xcr0();
+    let mask = read_reg32(EAX) as u32 as u64 | (read_reg32(EDX) as u32 as u64) << 32;
     let xstate_bv = return_on_pagefault!(safe_read64s(addr + 512));
-    fxrstor(addr);
-    if xstate_bv & 4 != 0 {
-        for i in 0..8 {
-            let lo = return_on_pagefault!(safe_read64s(addr + 576 + i * 16));
-            let hi = return_on_pagefault!(safe_read64s(addr + 576 + i * 16 + 8));
-            *crate::cpu::global_pointers::ymm_high_ptr(i) = reg128 { u64: [lo, hi] };
+    if xstate_bv & !xcr0 != 0 {
+        trigger_gp(0);
+        return;
+    }
+    let requested = mask & xcr0;
+    let present = requested & xstate_bv;
+    let initial = requested & !xstate_bv;
+
+    if present & 3 != 0 {
+        // x87 and SSE share the legacy region and the area stores them as one
+        // consistent set, so a mask selecting either restores both.
+        return_on_pagefault!(readable_or_pagefault(addr, 416));
+        fxrstor(addr);
+    }
+    if initial & 3 != 0 {
+        // 0xFF: all eight registers empty (see the 64-bit XRSTOR above).
+        set_control_word(0x37F);
+        fpu_set_status_word(0);
+        *fpu_stack_empty = 0xFF;
+        set_mxcsr(0x1F80);
+        for i in 0..16 {
+            *xmm_ptr(i) = reg128 { u64: [0, 0] };
+        }
+    }
+    if present & 4 != 0 {
+        return_on_pagefault!(readable_or_pagefault(addr + XSAVE_YMM_OFFSET, XSAVE_YMM_SIZE));
+        for i in 0..16 {
+            *crate::cpu::global_pointers::ymm_high_ptr(i) =
+                return_on_pagefault!(safe_read128s(addr + XSAVE_YMM_OFFSET + (i << 4)));
+        }
+    }
+    if initial & 4 != 0 {
+        for i in 0..16 {
+            *crate::cpu::global_pointers::ymm_high_ptr(i) = reg128 { u64: [0, 0] };
         }
     }
 }
@@ -4108,6 +4152,15 @@ pub unsafe fn instr_0FAE_7_mem(_addr: i32) {
     // clflush
     undefined_instruction();
 }
+// Standard XSAVE layout: Intel SDM Vol. 1, section 13.4.
+pub const XSAVE_LEGACY_SIZE: i32 = 512;
+pub const XSAVE_HEADER_SIZE: i32 = 64;
+pub const XSAVE_XMM_OFFSET: i32 = 160; // SSE component within the legacy region
+pub const XSAVE_XMM_SIZE: i32 = 256; // CPUID.0DH.2 is AVX; SSE is fixed at 160
+pub const XSAVE_YMM_OFFSET: i32 = XSAVE_LEGACY_SIZE + XSAVE_HEADER_SIZE; // 576
+pub const XSAVE_YMM_SIZE: i32 = 256; // upper halves of YMM0-15
+pub const XSAVE_AREA_SIZE: i32 = XSAVE_YMM_OFFSET + XSAVE_YMM_SIZE; // 832
+
 pub unsafe fn instr16_0FAF_mem(addr: i32, r: i32) {
     write_reg16(
         r,
@@ -6936,10 +6989,11 @@ unsafe fn vex32_0f3a(opcode: u8, pp: u8, l: bool, _w: bool, vvvv: u8) {
         // VBLENDVPS/VBLENDVPD/VPBLENDVB (mask register in imm[7:4])
         0x4A | 0x4B | 0x4C => {
             let mask = read_xmm128s((imm >> 4) as i32);
-            let rlo = crate::cpu::interp::simd_instr::blendv_apply(s1lo, s2lo, mask);
+            let element_bytes = match opcode { 0x4A => 4, 0x4B => 8, _ => 1 };
+            let rlo = crate::cpu::interp::simd_instr::blendv_apply(s1lo, s2lo, mask, element_bytes);
             let rhi = if l {
                 let mhi = *crate::cpu::global_pointers::ymm_high_ptr((imm >> 4) as i32);
-                crate::cpu::interp::simd_instr::blendv_apply(s1hi, s2hi, mhi)
+                crate::cpu::interp::simd_instr::blendv_apply(s1hi, s2hi, mhi, element_bytes)
             }
             else {
                 reg128 { u64: [0, 0] }

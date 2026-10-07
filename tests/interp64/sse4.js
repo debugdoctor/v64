@@ -163,11 +163,11 @@ emulator.add_listener("emulator-loaded", () => {
 
     // ---- PBLENDVB (mask in XMM0) ----
     active = "pblendvb";
-    set_xmm(0, hex("ff00ff00ff00ff00ff00ff00ff00ff00"));
+    set_xmm(0, hex("80017f02ff037f0480057f06ff077f08"));
     set_xmm(1, hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     set_xmm(2, hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
     run(sse38(0x10, 2, 1));
-    expect_xmm(2, hex("aabbaabbaabbaabbaabbaabbaabbaabb"), "blend by xmm0");
+    expect_xmm(2, hex("aabbbbbbaabbbbbbaabbbbbbaabbbbbb"), "blend by byte sign bit");
 
     // ---- ROUNDPS ----
     active = "roundps";
@@ -291,10 +291,21 @@ emulator.add_listener("emulator-loaded", () => {
     expect_xmm(0, plaintext, "aes-128 decryption");
 
     // ---- AESKEYGENASSIST ----
+    //
+    // Derived from the SDM definition, byte by byte. The previous golden value
+    // was taken from whatever the implementation happened to produce, so it
+    // agreed with a broken implementation: note that the low dword still
+    // matches and only the RotWord/RCON halves differ, which is exactly the
+    // part that was wrong. A stronger check would run the standard AES-NI key
+    // expansion and compare against RK, but PSHUFD is not reachable from this
+    // harness.
     active = "aeskeygenassist";
     set_xmm(1, RK[0]);
     run(sse3a(0xDF, 0, 1, 0x01));
-    expect_xmm(0, hex("f26b6fc5c4f26b6ffed7ab7677fed7ab"), "aeskeygenassist rcon=1");
+    // SDM: DEST[31:0]=SubWord(X1); DEST[63:32]=SubWord(RotWord(X1)) XOR RCON;
+    //      DEST[95:64]=SubWord(X3); DEST[127:96]=SubWord(RotWord(X3)) XOR RCON,
+    // with X1 = SRC[63:32] and X3 = SRC[127:96].
+    expect_xmm(0, hex("f26b6fc5" + "6a6fc5f2" + "fed7ab76" + "d6ab76fe"), "aeskeygenassist rcon=1");
 
     // ---- PCMPISTRI: equal each ----
     active = "pcmpistri equal each";

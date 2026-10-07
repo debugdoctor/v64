@@ -165,7 +165,8 @@ pub unsafe fn read64s(addr: u32) -> i64 {
             ptr::read_unaligned(vga_mem8.offset((addr - VGA_LFB_ADDRESS) as isize) as *const i64)
         }
         else {
-            read32s(addr) as i64 | (read32s(addr + 4) as i64) << 32
+            // Zero-extend the low half before combining the two reads.
+            read32s(addr) as u32 as i64 | (read32s(addr + 4) as u32 as i64) << 32
         }
     }
     else {

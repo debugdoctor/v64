@@ -266,8 +266,8 @@ emulator.add_listener("emulator-loaded", () => {
     set_reg64(0, DATA + 0x200);
     run([...vex2(0, 0, 1, 1), 0x6F, 0x10]); // ymm2 = mask
     set_reg64(0, DATA);
-    // vgatherdps ymm0, [rax + ymm1*4], ymm2
-    run([0xC4, 0xE2, 0x6D, 0x92, 0x04, 0x88]);
+    // vgatherdps ymm0, dword ptr [rax + 4*ymm1], ymm2
+    run([0xC4, 0xE2, 0x6D, 0x92, 0x04, 0x88]); // vgatherdps ymm0, dword ptr [rax + 4*ymm1], ymm2
     set_reg64(0, DATA + 0x300);
     run([...vex2(0, 0, 1, 0), 0x29, 0x00]);
     for(let i = 0; i < 8; i++) expect(ex.read32s(DATA + 0x300 + i * 4) >>> 0, 1000 + i, "gather " + i);
@@ -356,10 +356,25 @@ emulator.add_listener("emulator-loaded", () => {
     set_reg64(3, 0x12345678);
     run([...vex3(3, 0, 0, 3, false), 0xF0, 0xC3, 8]);     // rorx eax, ebx, 8
     expect(u32[16] >>> 0, 0x78123456, "rorx");
-    set_reg64(2, 0x10000); set_reg64(3, 0x10000);
+    // MULX r32a, r32b, r/m32 (VEX). SDM Vol. 2 lists four sources, not three:
+    //   tmp[63:0]  := SRC2[31:0] * SRC1[31:0]      SRC1 = ModRM:r/m = ebx
+    //   DEST1[31:0] := tmp[63:32]                 DEST1 = ModRM.reg = ecx
+    //   DEST2[31:0] := tmp[31:0]                  DEST2 = VEX.vvvv = eax
+    // and "SRC1" in that table is the *multiplier* from ModRM:r/m while the
+    // other operand, EDX, is the implicit multiplicand. VEX.vvvv is a
+    // destination, never a source.
+    //
+    // This used to assert the opposite -- "VEX.vvvv is also the multiplier, it
+    // does not read RDX" -- which is what made the emulator's bug survive here:
+    // the test enforced it. All three registers are seeded with distinct values
+    // so that reading the wrong operand cannot produce the right product.
+    //   0xDEADBEEF * 0xFEEDFACE = 0xDDBF6473_C1880A52
+    // and both halves are nonzero, so a half-swapped destination is caught too.
+    set_reg64(0, 0x12345678); set_reg64(2, 0xDEADBEEF); set_reg64(3, 0xFEEDFACE);
     run([...vex3(2, 0, 0, 3, false), 0xF6, 0xCB]);        // mulx ecx, eax, ebx
-    expect(u32[16] >>> 0, 0, "mulx lo");
-    expect(u32[16 + 1] >>> 0, 1, "mulx hi");
+    expect(u32[16 + 1] >>> 0, 0xDDBF6473, "mulx hi (ModRM.reg)");
+    expect(u32[16] >>> 0, 0xC1880A52, "mulx lo (VEX.vvvv)");
+    expect(u32[16 + 2] >>> 0, 0xDEADBEEF, "mulx leaves EDX alone");
 
     // ---- VPMINUB + VPCMPEQB/VPMOVMSKB over 32 bytes (glibc strcpy shape) ----
     active = "vpminub";

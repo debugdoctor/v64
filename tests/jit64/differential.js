@@ -70,6 +70,14 @@ const POOL = [
     [0x48, 0x0F, 0xC8], // bswap rax
     [0x49, 0x0F, 0xC9], // bswap r9
     [0x48, 0x0F, 0xAF, 0xC3], // imul rax, rbx
+    // Division. Found via the Alpine live ISO: apk's RSA signature check
+    // failed there, and division is what it is built from. rdx:rax is the
+    // dividend and rcx the divisor; both writes are visible in the final
+    // register comparison. Signed division traps on INT64_MIN / -1, which the
+    // random seeds below can produce, so the seeds keep |rdx| well below the
+    // boundary -- see the DIV_SEED_GUARD note at the comparison site.
+    [0x48, 0xF7, 0xF9], // idiv rcx
+    [0x48, 0xF7, 0xF1], // div rcx
     [0x48, 0x6B, 0xCA, 0x07], // imul rcx, rdx, 7
     [0x48, 0x0F, 0x44, 0xC3], // cmove rax, rbx
     [0x48, 0x0F, 0x45, 0xCA], // cmovne rcx, rdx
@@ -522,6 +530,280 @@ emulator.add_listener("emulator-loaded", () => {
             ],
         },
         {
+            // AESENCLAST is the same round without a key schedule twist; it
+            // must produce the same bytes as AESENC for the same inputs, which
+            // is exactly what distinguishes "AESENC wrongly applies
+            // MixColumns" from a correct implementation.
+            name: "vector: AESENCLAST xmm0,xmm1,0 (FIPS-197)",
+            iters: 1,
+            expect: {
+                in0: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                      0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+                in1: [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                      0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F],
+                out: [0x63, 0xFD, 0xAE, 0x15, 0x1F, 0xEB, 0x2E, 0xC4,
+                      0xCC, 0xC8, 0x99, 0xFE, 0x47, 0x8F, 0x3D, 0xE5],
+            },
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x38, 0xDD, 0xC1,       // aesenclast xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x07,       // movdqu [r15], xmm0
+            ],
+        },
+        {
+            // Absolute check against the FIPS-197 ShiftRows/SubBytes reference
+            // (AESENC = ShiftRows, SubBytes, XOR src; no MixColumns, no key).
+            // The Python model used to derive this self-validates on the
+            // FIPS-197 AES-128 vector 69c4e0d86a7b0430d8cdb78070b4c55a.
+            name: "vector: AESENC xmm0,xmm1,0 (FIPS-197)",
+            iters: 1,
+            expect: {
+                in0: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                      0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+                in1: [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                      0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F],
+                // AESENC = ShiftRows, SubBytes, MixColumns, XOR src. The SDM
+                // pseudocode omits MixColumns, and dropping it here looked
+                // plausible but is wrong: tests/interp64/sse4.js runs the
+                // standard nine-AESENC-then-AESENCLAST sequence against the
+                // FIPS-197 AES-128 ciphertext, and that only works with
+                // MixColumns in AESENC. The value below is the FIPS-197
+                // Appendix B state after one AESENC round.
+                out: [0x63, 0x78, 0xE4, 0xDA, 0xF0, 0x62, 0xFD, 0x71,
+                      0xA5, 0x0F, 0x36, 0xFF, 0xDE, 0xE6, 0x84, 0xAC],
+            },
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x38, 0xDC, 0xC1,       // aesenc xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x07,       // movdqu [r15], xmm0
+            ],
+        },
+        {
+            // PCLMULQDQ 0x00: low 64 bits of each operand, multiplied without
+            // carries. For all-ones operands bit k of the product is the parity
+            // of the number of (i,j) pairs with i+j=k, which is 1 exactly for
+            // even k -- so both halves are 0x5555555555555555.
+            name: "vector: PCLMULQDQ xmm0,xmm1,0x00",
+            iters: 1,
+            expect: {
+                in0: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                in1: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                out: [0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+                      0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55],
+            },
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x00, // pclmulqdq xmm0, xmm1, 0x00
+                0xF3, 0x41, 0x0F, 0x7F, 0x07,       // movdqu [r15], xmm0
+            ],
+        },
+        {
+            // 0x11 selects the high half of both operands; same all-ones inputs,
+            // so the product is the same 0x5555... pattern.
+            name: "vector: PCLMULQDQ xmm0,xmm1,0x11",
+            iters: 1,
+            expect: {
+                in0: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                in1: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                out: [0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+                      0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55],
+            },
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x11, // pclmulqdq xmm0, xmm1, 0x11
+                0xF3, 0x41, 0x0F, 0x7F, 0x07,       // movdqu [r15], xmm0
+            ],
+        },
+        {
+            // 0x01 takes the high half of xmm0 and the low half of xmm1.
+            // PCLMULQDQ writes the full 128-bit product (unlike PMULUDQ, which
+            // only writes the low half), so both halves are 0x5555... here.
+            name: "vector: PCLMULQDQ xmm0,xmm1,0x01",
+            iters: 1,
+            expect: {
+                in0: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+                in1: [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                out: [0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+                      0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55],
+            },
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x01, // pclmulqdq xmm0, xmm1, 0x01
+                0xF3, 0x41, 0x0F, 0x7F, 0x07,       // movdqu [r15], xmm0
+            ],
+        },
+        {
+            // AESDEC: InvShiftRows, InvSubBytes, InvMixColumns, XOR src.
+            // Reference from the same FIPS-197-style round model, with the
+            // inverse MixColumns matrix {0e,0b,0d,09}.
+            name: "vector: AESDEC xmm0,xmm1,0 (FIPS-197)",
+            iters: 1,
+            expect: {
+                in0: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                      0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+                in1: [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                      0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F],
+                out: [0xDD, 0xE6, 0x02, 0xC2, 0x26, 0x74, 0x3F, 0x6F,
+                      0x00, 0x07, 0x3C, 0xA8, 0x6F, 0xF4, 0x4F, 0xBF],
+            },
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x38, 0xDE, 0xC1,       // aesdec xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x07,       // movdqu [r15], xmm0
+            ],
+        },
+        {
+            // AESDECLAST: InvShiftRows, InvSubBytes, XOR src -- no
+            // InvMixColumns. Same inputs as AESDEC must give a different answer.
+            name: "vector: AESDECLAST xmm0,xmm1,0 (FIPS-197)",
+            iters: 1,
+            expect: {
+                in0: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                      0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+                in1: [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                      0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F],
+                out: [0x52, 0xC8, 0x60, 0x01, 0x82, 0xE6, 0x9F, 0xF9,
+                      0x9F, 0xE4, 0x9E, 0x76, 0x2B, 0xF4, 0xDD, 0x69],
+            },
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x38, 0xDF, 0xC1,       // aesdeclast xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x07,       // movdqu [r15], xmm0
+            ],
+        },
+        {
+            // AESIMC: InvMixColumns of the input, no round transform, no XOR.
+            // AESIMC reads only its r/m operand, so xmm1 carries the input; an
+            // all-ones input would be a fixed point of InvMixColumns and could
+            // not tell a missing transform apart from a correct one.
+            name: "vector: AESIMC xmm0, xmm1",
+            iters: 1,
+            expect: {
+                in0: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                in1: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                      0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+                out: [0xAA, 0xFF, 0x88, 0xDD, 0xEE, 0xBB, 0xCC, 0x99,
+                      0x22, 0x77, 0x00, 0x55, 0x66, 0x33, 0x44, 0x11],
+            },
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x38, 0xDB, 0xC1,       // aesimc xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x07,       // movdqu [r15], xmm0
+            ],
+        },
+        {
+            // AESKEYGENASSIST is how AES-NI builds the key schedule, so a wrong
+            // RCON or RotWord here corrupts every key derived in the guest.
+            // Value matches the published AES-128 expansion for the FIPS-197 key.
+            name: "vector: AESKEYGENASSIST xmm0, xmm1, 0x01",
+            iters: 1,
+            expect: {
+                in0: [0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6,
+                      0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C],
+                in1: [0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6,
+                      0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C],
+                // DEST[31:0]   = SubWord(X1)
+                // DEST[63:32]  = SubWord(RotWord(X1)) XOR RCON
+                // DEST[95:64]  = SubWord(X3)
+                // DEST[127:96] = SubWord(RotWord(X3)) XOR RCON
+                // SubWord runs first and RCON is XORed in afterwards; doing it
+                // the other way round was what made this vector look wrong.
+                // X1 = 0xa6d2ae28, X3 = 0x3c4fcf09 for the FIPS-197 key.
+                out: [0x34, 0xE4, 0xB5, 0x24, 0xE5, 0xB5, 0x24, 0x34,
+                      0x01, 0x8A, 0x84, 0xEB, 0x8B, 0x84, 0xEB, 0x01],
+            },
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x3A, 0xDF, 0xC0, 0x01, // aeskeygenassist xmm0, xmm1, 1
+                0xF3, 0x41, 0x0F, 0x7F, 0x07,       // movdqu [r15], xmm0
+            ],
+        },
+        {
+            // AES-NI. v86 advertises `aes` in CPUID and the interpreter
+            // implements it, but the JIT has no support -- apk/openssl take an
+            // AES-NI RSA path when CPUID says so, so both engines must agree.
+            name: "AES-NI: aesenc/aesenclast/aesdec",
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x38, 0xDC, 0xC1,       // aesenc xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x00, // movdqu [r15], xmm0
+                0x66, 0x0F, 0x38, 0xDD, 0xC1,       // aesenclast xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x10, // movdqu [r15+16], xmm0
+                0x66, 0x0F, 0x38, 0xDE, 0xC1,       // aesdec xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x08, // movdqu [r15+8], xmm0
+            ],
+        },
+        {
+            name: "AES-NI: aeskeygenassist",
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0x66, 0x0F, 0x3A, 0xDF, 0xC0, 0x1B, // aeskeygenassist xmm0, xmm0, 0x1b
+                0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x10, // movdqu [r15+16], xmm0
+            ],
+        },
+        {
+            // PCLMULQDQ, the other half of OpenSSL's fast RSA path.
+            name: "PCLMULQDQ: all four imm8 forms",
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x07,       // movdqu xmm0, [r15]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x10, // movdqu xmm1, [r15+16]
+                0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x00, // pclmulqdq xmm0, xmm1, 0x00
+                0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x00, // movdqu [r15], xmm0
+                0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x11, // pclmulqdq xmm0, xmm1, 0x11
+                0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x10, // movdqu [r15+16], xmm0
+                0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x01, // pclmulqdq xmm0, xmm1, 0x01
+                0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x08, // movdqu [r15+8], xmm0
+                0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x10, // pclmulqdq xmm0, xmm1, 0x10
+                0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x18, // movdqu [r15+24], xmm0
+            ],
+        },
+        {
+            // MOVDQU is the only F3 0F opcode the JIT compiles. Unaligned and
+            // page-crossing forms show up in real code (openssl, busybox), so
+            // they need their own coverage: the JIT may take a fast path that
+            // assumes alignment.
+            name: "SSE2: movdqu unaligned in-page",
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x47, 0x01, // movdqu xmm0, [r15+1]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x07, // movdqu xmm1, [r15+7]
+                0xF3, 0x41, 0x0F, 0x6F, 0x57, 0x0F, // movdqu xmm2, [r15+15]
+                0x66, 0x0F, 0xEF, 0xC1,// pxor xmm0, xmm1
+                0x66, 0x0F, 0xEF, 0xD1,             // pxor xmm1, xmm2
+                0xF3, 0x41, 0x0F, 0x7F, 0x47, 0x01, // movdqu [r15+1], xmm0
+                0xF3, 0x41, 0x0F, 0x7F, 0x4F, 0x07, // movdqu [r15+7], xmm1
+            ],
+        },
+        {
+            // A 16-byte access at offset 4088 straddles the page boundary at
+            // SCRATCH+4096. The comparison window below only covers 32 bytes
+            // from SCRATCH, so this checks the instruction completes without a
+            // fault rather than the bytes it wrote.
+            name: "SSE2: movdqu across a page boundary",
+            body: [
+                0xF3, 0x41, 0x0F, 0x6F, 0x87, 0xF8, 0x0F, 0x00, 0x00, // movdqu xmm0, [r15+0xff8]
+                0xF3, 0x41, 0x0F, 0x6F, 0x4F, 0x00, // movdqu xmm1, [r15]
+                0x66, 0x0F, 0xEF, 0xC1,             // pxor xmm0, xmm1
+                0xF3, 0x41, 0x0F, 0x7F, 0x87, 0xF8, 0x0F, 0x00, 0x00, // movdqu [r15+0xff8], xmm0
+            ],
+        },
+        {
             name: "cmpxchg ebx,eax + setcc + cmovne",
             body: [
                 0x0F, 0xB1, 0xC3, // cmpxchg ebx, eax
@@ -592,6 +874,14 @@ emulator.add_listener("emulator-loaded", () => {
         {
             regs[i] = BigInt(Math.floor(random() * 2 ** 32)) | BigInt(Math.floor(random() * 2 ** 32)) << 32n;
         }
+        // The pool contains idiv/div, which fault on a zero divisor and on
+        // the signed INT64_MIN / -1 overflow. A #DE would take a different
+        // path in each engine and make the comparison meaningless, so keep
+        // rcx a small positive value and the dividend inside a range where
+        // the signed quotient cannot overflow.
+        regs[1] = BigInt(1 + Math.floor(random() * 0xFFFF));
+        regs[0] = BigInt(Math.floor(random() * 2 ** 31)) & 0x7FFFFFFFn;
+        regs[2] = BigInt(Math.floor(random() * 2 ** 31)) & 0x7FFFFFFFn;
         return regs;
     };
 
@@ -776,10 +1066,23 @@ emulator.add_listener("emulator-loaded", () => {
     let fixed_failures = 0;
     for(const test of FIXED)
     {
-        const program = wrap_body(test.body, +process.env.JIT64_DIFF_FIXED_ITERS || ITERATIONS);
+        // Vector scenarios need iters:1 -- they overwrite their own input in the
+        // first 32-byte window, so a hot loop would change the input each pass.
+        const program = wrap_body(test.body,
+            test.iters ?? (+process.env.JIT64_DIFF_FIXED_ITERS || ITERATIONS));
         const random = rng(12345);
         const regs = seed_regs(random);
         const memory = Array.from({ length: 32 }, () => Math.floor(random() * 256));
+        // AES-NI / PCLMULQDQ are checked against published vectors, not just
+        // against each other: the differential can only prove the two engines
+        // agree, and OpenSSL picks these instructions from CPUID, so a shared
+        // implementation bug would still produce a wrong RSA signature.
+        if(test.expect)
+        {
+            memory.fill(0);
+            for(let i = 0; i < 16; i++) memory[i] = test.expect.in0[i];
+            for(let i = 0; i < 16; i++) memory[16 + i] = test.expect.in1[i];
+        }
         const interpreted = run(program, regs, memory, false);
         const compiled = run(program, regs, memory, true);
         if(test.name.startsWith("avx") && ex.jit64_compiled_count() === 0)
@@ -792,6 +1095,29 @@ emulator.add_listener("emulator-loaded", () => {
             interpreted.flags !== compiled.flags ||
             interpreted.regs.some((v, i) => v !== compiled.regs[i]) ||
             interpreted.memory.some((v, i) => v !== compiled.memory[i]);
+
+        if(test.expect)
+        {
+            // The scenario stores its result into the first 16 scratch bytes.
+            const got = Array.from(interpreted.memory.slice(0, 16));
+            const want = test.expect.out;
+            const gotHex = got.map(b => b.toString(16).padStart(2, "0")).join(" ");
+            const wantHex = want.map(b => b.toString(16).padStart(2, "0")).join(" ");
+            const refOk = got.every((b, i) => b === want[i]);
+            if(!refOk)
+            {
+                fixed_failures++;
+                console.log("FAIL vector: " + test.name);
+                console.log("    want    " + wantHex);
+                console.log("    interp  " + gotHex);
+                console.log("    jit     " +
+                    Array.from(compiled.memory.slice(0, 16)).map(b => b.toString(16).padStart(2, "0")).join(" "));
+            }
+            else
+            {
+                console.log("ok vector: " + test.name + "  " + gotHex);
+            }
+        }
         if(differ)
         {
             fixed_failures++;

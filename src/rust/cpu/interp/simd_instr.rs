@@ -91,6 +91,14 @@ pub unsafe fn int_apply(opcode: u8, mut dst: reg128, src: reg128) -> Option<reg1
         0xF2 => for i in 0..4 { dst.u32[i] = shift(dst.u32[i] as u64, src.u64[0], 32, 2) as u32; },
         0xF3 => for i in 0..2 { dst.u64[i] = shift(dst.u64[i], src.u64[0], 64, 2); },
 
+        // PMULUDQ: unsigned multiplication of the even dwords.
+        0xF4 => {
+            let mut r = reg128 { u64: [0, 0] };
+            r.u64[0] = (dst.u32[0] as u64) * (src.u32[0] as u64);
+            r.u64[1] = (dst.u32[2] as u64) * (src.u32[2] as u64);
+            dst = r;
+        },
+
         // sum of absolute differences
         0xF6 => {
             let mut total = 0u64;
@@ -109,15 +117,15 @@ pub unsafe fn int_apply(opcode: u8, mut dst: reg128, src: reg128) -> Option<reg1
 
 // kind: 0 logical right, 1 arithmetic right, 2 left; the count is per lane.
 pub unsafe fn shift(value: u64, count: u64, width: u32, kind: u8) -> u64 {
-    let count = count as u32;
     let mask = if width == 64 { u64::MAX } else { (1u64 << width) - 1 };
-    if count >= width {
+    if count >= width as u64 {
         return match kind {
             1 => if value >> (width - 1) & 1 != 0 { mask } else { 0 },
             2 => 0,
             _ => 0,
         };
     }
+    let count = count as u32;
     match kind {
         1 => {
             // Sign-extend the lane from bit `width - 1` first: a plain 64-bit
@@ -375,10 +383,11 @@ pub unsafe fn sse4_38_apply(opcode: u8, dst: reg128, src: reg128) -> Option<reg1
 }
 
 // PBLENDVB / BLENDVPS / BLENDVPD use XMM0 as the implicit mask.
-pub unsafe fn blendv_apply(dst: reg128, src: reg128, mask: reg128) -> reg128 {
+pub unsafe fn blendv_apply(dst: reg128, src: reg128, mask: reg128, element_bytes: usize) -> reg128 {
     let mut result = reg128 { u64: [0, 0] };
-    for i in 0..2 {
-        result.u64[i] = (mask.u64[i] & src.u64[i]) | (!mask.u64[i] & dst.u64[i]);
+    for i in 0..16 {
+        let sign_byte = i / element_bytes * element_bytes + element_bytes - 1;
+        result.u8[i] = if mask.u8[sign_byte] & 0x80 != 0 { src.u8[i] } else { dst.u8[i] };
     }
     result
 }
@@ -743,6 +752,7 @@ fn aes_sub_bytes(s: &[u8; 16]) -> [u8; 16] {
     for i in 0..16 { r[i] = aes_sbox(s[i]); }
     r
 }
+// AESENC/AESENCLAST; the final round omits MixColumns.
 pub unsafe fn aesenc(state: reg128, key: reg128, last: bool) -> reg128 {
     let mut s = aes_shift_rows(&state.u8);
     s = aes_sub_bytes(&s);
@@ -754,7 +764,6 @@ pub unsafe fn aesenc(state: reg128, key: reg128, last: bool) -> reg128 {
 }
 pub unsafe fn aesdec(state: reg128, key: reg128, last: bool) -> reg128 {
     // Inverse cipher: InvShiftRows, InvSubBytes, InvMixColumns (except last).
-    // inv_sbox(y) = inverse(L^-1(y ^ 0x63)), L^-1(z) = rotl(z,1)^rotl(z,3)^rotl(z,6).
     let inv_sbox = |y: u8| -> u8 {
         let z = y ^ 0x63;
         let t = z.rotate_left(1) ^ z.rotate_left(3) ^ z.rotate_left(6);
@@ -803,6 +812,7 @@ pub unsafe fn aesimc(state: reg128) -> reg128 {
     out.u64[1] = u64::from_le_bytes(r[8..16].try_into().unwrap());
     out
 }
+// RotWord rotates a little-endian dword right by eight bits.
 pub unsafe fn aeskeygenassist(src: reg128, imm: u8) -> reg128 {
     let subword = |w: u32| -> u32 {
         (aes_sbox(w as u8) as u32)
@@ -810,14 +820,15 @@ pub unsafe fn aeskeygenassist(src: reg128, imm: u8) -> reg128 {
             | ((aes_sbox((w >> 16) as u8) as u32) << 16)
             | ((aes_sbox((w >> 24) as u8) as u32) << 24)
     };
+    let rotword = |w: u32| -> u32 { w.rotate_right(8) };
     let x1 = src.u32[1];
     let x3 = src.u32[3];
     let rcon = imm as u32;
     let mut out = reg128 { u64: [0, 0] };
     out.u32[0] = subword(x1);
-    out.u32[1] = subword(x1).rotate_left(8) ^ rcon;
+    out.u32[1] = subword(rotword(x1)) ^ rcon;
     out.u32[2] = subword(x3);
-    out.u32[3] = subword(x3).rotate_left(8) ^ rcon;
+    out.u32[3] = subword(rotword(x3)) ^ rcon;
     out
 }
 pub unsafe fn pclmulqdq(a: reg128, b: reg128, imm: u8) -> reg128 {
@@ -834,11 +845,20 @@ pub unsafe fn pclmulqdq(a: reg128, b: reg128, imm: u8) -> reg128 {
     reg128 { u64: [result as u64, (result >> 64) as u64] }
 }
 
-// AVX2 variable per-lane 32-bit shift (VPSRLVD/VPSRAVD/VPSLLVD).
+// AVX2 variable shifts use the full unsigned count of each lane.
 pub unsafe fn variable_shift32(src: reg128, counts: reg128, kind: u8) -> reg128 {
     let mut r = src;
     for i in 0..4 {
         r.u32[i] = shift(src.u32[i] as u64, counts.u32[i] as u64, 32, kind) as u32;
+    }
+    r
+}
+
+// VEX.W1 selects 64-bit lanes.
+pub unsafe fn variable_shift64(src: reg128, counts: reg128, kind: u8) -> reg128 {
+    let mut r = src;
+    for i in 0..2 {
+        r.u64[i] = shift(src.u64[i], counts.u64[i], 64, kind);
     }
     r
 }
@@ -853,4 +873,3 @@ pub unsafe fn blend_d(dst: reg128, src: reg128, imm: u8) -> reg128 {
     }
     r
 }
-

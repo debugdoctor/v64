@@ -7,7 +7,7 @@
 //   SECONDS=300 WASM_PATH=build/v64.wasm node tests/e2e/alpine-perf.js
 //   INTERP=1 SECONDS=300 node tests/e2e/alpine-perf.js
 //
-// Prints a RESULT line; exits 0 if the marker appeared.
+// Prints a RESULT line; login requires a successful modloop mount and no boot errors.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -221,13 +221,19 @@ emulator.add_listener("emulator-loaded", async () =>
         console.error("interp 0f opcodes: " +
             fops.slice(0, 24).map(([o, c]) => "0x" + o.toString(16) + "=" + c).join(" "));
     }
+    const clean_serial = serial.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "");
+    const modloop_ok = /Mounting modloop[^\n]*\n?\s*\[ ok \]/.test(clean_serial);
+    const boot_error = /BAD signature|not found in new root|ERROR: modloop|failed: Invalid argument|nan MiB|Access to negative field/i.test(clean_serial);
+    const passed = reached && !boot_error && (MARKER !== "login:" || modloop_ok);
+    if(!passed) console.error(clean_serial.slice(-9000));
     console.log(
         "RESULT wasm=" + (process.env.WASM_PATH || "build/v64.wasm") +
         " jit=" + (process.env.INTERP ? "0" : "1") +
         " seconds=" + elapsed.toFixed(1) +
         " instructions=" + instructions +
         " mips=" + (instructions / elapsed / 1e6).toFixed(1) +
-        " reached=" + (reached ? MARKER : "timeout"),
+        " reached=" + (reached ? MARKER : "timeout") +
+        " modloop_ok=" + modloop_ok + " boot_error=" + boot_error,
     );
-    process.exit(reached ? 0 : 1);
+    process.exit(passed ? 0 : 1);
 });

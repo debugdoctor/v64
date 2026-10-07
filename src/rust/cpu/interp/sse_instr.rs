@@ -339,6 +339,38 @@ pub unsafe fn sse_convert_f64_to_i32(x: f64) -> i32 {
     };
 }
 
+// CVTTSD2SI / CVTSD2SI and their 32-bit forms, SDM Vol. 2. Out of range, NaN and
+// infinities give integer indefinite; in range, CVTT* truncates and CVT* rounds.
+// The range test must be against the destination width, or the 32-bit form wraps
+// instead of reporting the indefinite value.
+#[inline]
+pub unsafe fn cvt_float_to_i64(x: f64, truncate: bool) -> u64 {
+    if x.is_nan() || x.is_infinite() {
+        return 0x8000_0000_0000_0000;
+    }
+    let r = if truncate { x.trunc() } else { sse_integer_round(x) };
+    if r >= -9223372036854775808.0 && r < 9223372036854775808.0 {
+        r as i64 as u64
+    }
+    else {
+        0x8000_0000_0000_0000
+    }
+}
+
+#[inline]
+pub unsafe fn cvt_float_to_i32(x: f64, truncate: bool) -> u32 {
+    if x.is_nan() || x.is_infinite() {
+        return 0x8000_0000;
+    }
+    let r = if truncate { x.trunc() } else { sse_integer_round(x) };
+    if r >= -2147483648.0 && r < 2147483648.0 {
+        r as i32 as u32
+    }
+    else {
+        0x8000_0000
+    }
+}
+
 pub unsafe fn sse_integer_round(f: f64) -> f64 {
     // see fpu_integer_round
     let rc = *mxcsr >> MXCSR_RC_SHIFT & 3;

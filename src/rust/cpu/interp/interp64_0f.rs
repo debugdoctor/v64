@@ -10,6 +10,7 @@ use crate::cpu::core::{
 };
 use crate::cpu::global_pointers::*;
 use crate::cpu::interp::misc_instr::sign_extend;
+use crate::cpu::interp::instructions_0f::XSAVE_YMM_OFFSET;
 use crate::cpu::decode::op_size::OpSize;
 use crate::cpu::interp::fpu::{
     f32_to_f80, f64_to_f80, f80_to_f32, f80_to_f64, fpu_convert_to_i16, fpu_convert_to_i32,
@@ -202,29 +203,15 @@ pub(crate) unsafe fn sse_cvt_int(opcode: u8, pfx: &Prefixes) -> OrPageFault<()> 
     else {
         let src = sse_read(operand)?;
         let truncate = opcode == 0x2C;
-        let value = if pfx.f2 {
-            if truncate { src.f64[0].trunc() } else { src.f64[0].round() }
-        }
-        else if truncate {
-            src.f32[0].trunc() as f64
-        }
-        else {
-            src.f32[0].round() as f64
-        };
-        let mask = if pfx.has_rex_w() { u64::MAX } else { 0xFFFF_FFFF };
-        let bits = if value.is_nan() {
-            0x8000_0000_0000_0000
-        }
-        else if value <= i64::MIN as f64 {
-            0x8000_0000_0000_0000
-        }
-        else if value >= i64::MAX as f64 {
-            0x7FFF_FFFF_FFFF_FFFF
+        // Widening f32 to f64 is exact, so one helper covers both element sizes.
+        let x = if pfx.f2 { src.f64[0] } else { src.f32[0] as f64 };
+        let bits = if pfx.has_rex_w() {
+            crate::cpu::interp::sse_instr::cvt_float_to_i64(x, truncate)
         }
         else {
-            value as i64 as u64
+            crate::cpu::interp::sse_instr::cvt_float_to_i32(x, truncate) as u64
         };
-        write_reg64(modrm.reg as i32, bits & mask);
+        write_reg64(modrm.reg as i32, bits);
     }
     Ok(())
 }
@@ -357,7 +344,8 @@ pub(crate) unsafe fn run_0f38(pfx: &Prefixes) -> OrPageFault<()> {
                 let src = sse_read(operand)?;
                 let mask = xmm_get(0);
                 let dst = xmm_get(modrm.reg);
-                xmm_set(modrm.reg, crate::cpu::interp::simd_instr::blendv_apply(dst, src, mask));
+                let element_bytes = match opcode { 0x10 => 1, 0x14 => 4, _ => 8 };
+                xmm_set(modrm.reg, crate::cpu::interp::simd_instr::blendv_apply(dst, src, mask, element_bytes));
             },
             // PTEST: ZF when (dst & src) == 0, CF when (~dst & src) == 0.
             0x17 => {
@@ -435,7 +423,7 @@ pub(crate) unsafe fn run_0f3a(pfx: &Prefixes) -> OrPageFault<()> {
         crate::cpu::core::trigger_ud();
         return Ok(());
     }
-    let (modrm, operand) = decode_operand(pfx)?;
+    let (modrm, operand) = decode_operand_with_trailing(pfx, 1)?;
     let dst = xmm_get(modrm.reg);
     match opcode {
         // ROUNDPS/PD/SS/SD
@@ -1012,10 +1000,22 @@ pub(crate) unsafe fn run_sse(opcode: u8, pfx: &Prefixes) -> OrPageFault<bool> {
         },
 
         // CVTTSS2SI (F3 0F 2C)
+        //
+        // This used to be `src.f32[0] as i64 as u64`, and Rust's float-to-int
+        // cast saturates rather than following the architecture: out-of-range
+        // values came back as i64::MAX and NaN as 0, instead of the integer
+        // indefinite value the SDM specifies. It also went through the i64 path
+        // for the 32-bit form, so 3e9f wrapped to 0xB2D05E00.
         0x2C if pfx.f3 => {
             let (modrm, operand) = decode_operand(pfx)?;
             let src = sse_read(operand)?;
-            let value = src.f32[0] as i64 as u64;
+            let x = src.f32[0] as f64;
+            let value = if pfx.has_rex_w() {
+                crate::cpu::interp::sse_instr::cvt_float_to_i64(x, true)
+            }
+            else {
+                crate::cpu::interp::sse_instr::cvt_float_to_i32(x, true) as u64
+            };
             write_reg(modrm.reg, if pfx.has_rex() { OpSize::S64 } else { OpSize::S32 }, pfx.has_rex(), value);
         },
 
@@ -1704,9 +1704,13 @@ pub(crate) unsafe fn vex_pshuf(v: &Vex) -> OrPageFault<()> {
 pub(crate) unsafe fn vex_shift_imm(v: &Vex, opcode: u8) -> OrPageFault<()> {
     let pfx = v.pfx();
     let (modrm, operand) = decode_operand(&pfx)?;
-    let (slo, shi) = vex_rm(operand, v.l)?;
     let imm = fetch8()? as u64;
     let group = modrm.reg & 7;
+
+    // VEX shift-by-immediate (VPSLLQ and friends): result in VEX.vvvv, source
+    // ModRM.rm, ModRM.reg the group selector. Writing back to rm shifted the
+    // source and left the destination untouched.
+    let (slo, shi) = vex_rm(operand, v.l)?;
     let rlo = match crate::cpu::interp::simd_instr::shift_imm_apply(opcode, group, imm, slo) {
         Some(r) => r,
         None =>
@@ -1718,14 +1722,17 @@ pub(crate) unsafe fn vex_shift_imm(v: &Vex, opcode: u8) -> OrPageFault<()> {
     let rhi = if v.l {
         match crate::cpu::interp::simd_instr::shift_imm_apply(opcode, group, imm, shi) {
             Some(r) => r,
-            None => reg128 { u64: [0, 0] },
+            None =>
+            {
+                crate::cpu::core::trigger_ud();
+                return Ok(());
+            }
         }
     }
     else {
         reg128 { u64: [0, 0] }
     };
-    // The destination is the rm operand (ModRM.reg is the group selector).
-    vex_store(operand, rlo, rhi, v.l)?;
+    vex_set(v.vvvv, rlo, rhi, v.l);
     Ok(())
 }
 
@@ -1860,26 +1867,14 @@ pub(crate) unsafe fn vex_cvt_int(v: &Vex, opcode: u8) -> OrPageFault<()> {
         // CVTTSS2SI (2C) / CVTSS2SI (2D) and the SD forms: scalar -> GPR
         let (src, _) = vex_rm(operand, false)?;
         let truncate = opcode == 0x2C;
-        let value = if f64 {
-            if truncate { src.f64[0].trunc() } else { src.f64[0].round() }
-        }
-        else if truncate {
-            src.f32[0].trunc() as f64
+        let x = if f64 { src.f64[0] } else { src.f32[0] as f64 };
+        let bits = if v.w {
+            crate::cpu::interp::sse_instr::cvt_float_to_i64(x, truncate)
         }
         else {
-            src.f32[0].round() as f64
+            crate::cpu::interp::sse_instr::cvt_float_to_i32(x, truncate) as u64
         };
-        let mask = if v.w { u64::MAX } else { 0xFFFF_FFFF };
-        let bits = if value.is_nan() || value <= i64::MIN as f64 {
-            0x8000_0000_0000_0000
-        }
-        else if value >= i64::MAX as f64 {
-            0x7FFF_FFFF_FFFF_FFFF
-        }
-        else {
-            value as i64 as u64
-        };
-        write_reg64(dst as i32, bits & mask);
+        write_reg64(dst as i32, bits);
     }
     Ok(())
 }
@@ -2263,9 +2258,13 @@ pub(crate) unsafe fn vex_bmi_0f38(v: &Vex, opcode: u8) -> OrPageFault<bool> {
     if v.pp == 0 && opcode == 0xF3 {
         let (modrm, operand) = decode_operand(&pfx)?;
         let value = read_operand(operand, size, pfx.has_rex())? & bmi_mask(width);
+        // BLSI isolates the lowest set bit; BLSMSK fills through it; BLSR clears it.
+        let blsmsk = |x: u64| -> u64 {
+            if x == 0 { 0 } else { ((1u64 << (64 - x.leading_zeros())) - 1) & bmi_mask(width) }
+        };
         let r = match modrm.reg & 7 {
             1 => value & value.wrapping_sub(1), // BLSR
-            2 => value ^ value.wrapping_sub(1), // BLSMSK
+            2 => blsmsk(value),                 // BLSMSK
             3 => value & value.wrapping_neg(),  // BLSI
             _ =>
             {
@@ -2307,32 +2306,47 @@ pub(crate) unsafe fn vex_bmi_0f38(v: &Vex, opcode: u8) -> OrPageFault<bool> {
             };
             write_reg(modrm.reg, size, true, r);
         },
-        // SHLX (66) / SHRX (F2) / SARX (F3): dst = rm shifted by vvvv
+        // SHLX (66) / SHRX (F2) / SARX (F3): dst = rm shifted by the count in vvvv
         (0xF7, 1) | (0xF7, 2) | (0xF7, 3) =>
         {
             let (modrm, operand) = decode_operand(&pfx)?;
             let src = read_operand(operand, size, pfx.has_rex())? & bmi_mask(width);
-            let count = read_reg(v.vvvv, size, true) as u32 & (width - 1);
+            // countMASK is 3FH under VEX.W1 in 64-bit mode and 1FH otherwise;
+            // there is no rule keyed on bit 5 of SRC2, which an earlier version
+            // had.
+            let index = read_reg(v.vvvv, size, true) as u32;
+            // VEX.pp: 1 = 0x66 (SHLX), 3 = 0xF2 (SHRX), 2 = 0xF3 (SARX).
+            let op_width = width;
+            let count = index & (op_width - 1);
+            let src = src & bmi_mask(op_width);
             let r = match v.pp {
                 1 => src << count,  // SHLX (66)
                 3 => src >> count,  // SHRX (F2)
                 _ =>
                 {
-                    // SARX (F3)
-                    let align = 64 - width;
+                    // SARX (F3): sign-extend from the top of the operation width,
+                    // shift, then keep only the operation width.
+                    let align = 64 - op_width;
                     ((src << align) as i64 >> align >> count) as u64
                 },
             };
-            write_reg(modrm.reg, size, true, r & bmi_mask(width));
+            write_reg(modrm.reg, size, true, r & bmi_mask(op_width));
         },
-        // BZHI: dst = rm masked to the low vvvv bits
+        // BZHI keeps SRC2[7:0] low bits.
         (0xF5, 0) =>
         {
             let (modrm, operand) = decode_operand(&pfx)?;
             let src = read_operand(operand, size, pfx.has_rex())? & bmi_mask(width);
-            let index = read_reg(v.vvvv, size, true) as u32;
-            let r = if index >= width { src } else { src & bmi_mask(index) };
-            write_reg(modrm.reg, size, true, r);
+            let n = read_reg(v.vvvv, size, true) as u32 & 0xff;
+            let r = if n < width { src & ((1u64 << n) - 1) } else { src };
+            write_reg(modrm.reg, size, true, r & bmi_mask(width));
+            if n > width - 1 {
+                *flags |= FLAG_CF as i32;
+            }
+            else {
+                *flags &= !(FLAG_CF as i32);
+            }
+            *flags_changed = 0;
         },
         // PDEP (F2): deposit the low bits of vvvv into the rm mask
         (0xF5, 3) =>
@@ -2370,15 +2384,19 @@ pub(crate) unsafe fn vex_bmi_0f38(v: &Vex, opcode: u8) -> OrPageFault<bool> {
             }
             write_reg(modrm.reg, size, true, r);
         },
-        // MULX (F2): {hi:lo} = RDX * rm; lo goes to vvvv, hi to ModRM.reg
+        // MULX: implicit RDX times rm; reg receives the high half, vvvv the low.
         (0xF6, 3) =>
         {
             let (modrm, operand) = decode_operand(&pfx)?;
-            let src = read_operand(operand, size, pfx.has_rex())? & bmi_mask(width);
-            let a = read_reg(2, size, true) & bmi_mask(width);
-            let product = (a as u128) * (src as u128);
-            write_reg(v.vvvv, size, true, product as u64 & bmi_mask(width));
-            write_reg(modrm.reg, size, true, (product >> width) as u64 & bmi_mask(width));
+            let src2 = read_operand(operand, size, pfx.has_rex())? & bmi_mask(width);
+            let src1 = read_reg(RDX, size, true) & bmi_mask(width);
+            let product = (src1 as u128) * (src2 as u128);
+            // Low half first, so the high half lands last when both destinations
+            // are the same register -- which clang's division idiom relies on.
+            write_reg(v.vvvv, size, true,
+                      (product as u64) & bmi_mask(width));              // low half
+            write_reg(modrm.reg, size, true,
+                      ((product >> width) as u64) & bmi_mask(width));   // high half
         },
         _ => return Ok(false),
     }
@@ -2587,7 +2605,7 @@ pub(crate) unsafe fn run_vex_0f38(v: &Vex) -> OrPageFault<()> {
             }
             vex_set(dst, rlo, rhi, true);
         },
-        // VPSRLVD/VPSRAVD/VPSLLVD
+        // Variable shifts: VEX.W selects 32-bit or 64-bit lanes.
         0x45 | 0x46 | 0x47 if v.pp == 1 =>
         {
             let kind = match opcode {
@@ -2595,13 +2613,16 @@ pub(crate) unsafe fn run_vex_0f38(v: &Vex) -> OrPageFault<()> {
                 0x46 => 1,
                 _ => 2,
             };
-            let rlo = crate::cpu::interp::simd_instr::variable_shift32(s1lo, s2lo, kind);
-            let rhi = if v.l {
-                crate::cpu::interp::simd_instr::variable_shift32(s1hi, s2hi, kind)
-            }
-            else {
-                reg128 { u64: [0, 0] }
+            let shift_lanes = |value: reg128, counts: reg128| {
+                if v.w {
+                    crate::cpu::interp::simd_instr::variable_shift64(value, counts, kind)
+                }
+                else {
+                    crate::cpu::interp::simd_instr::variable_shift32(value, counts, kind)
+                }
             };
+            let rlo = shift_lanes(s1lo, s2lo);
+            let rhi = if v.l { shift_lanes(s1hi, s2hi) } else { reg128 { u64: [0, 0] } };
             vex_set(dst, rlo, rhi, v.l);
         },
         // VPBROADCASTD/Q/B/W and VBROADCASTI128
@@ -2886,10 +2907,11 @@ pub(crate) unsafe fn run_vex_0f3a(v: &Vex) -> OrPageFault<()> {
         {
             let mask_reg = imm >> 4;
             let mask = xmm_get(mask_reg);
-            let rlo = crate::cpu::interp::simd_instr::blendv_apply(s1lo, s2lo, mask);
+            let element_bytes = match opcode { 0x4A => 4, 0x4B => 8, _ => 1 };
+            let rlo = crate::cpu::interp::simd_instr::blendv_apply(s1lo, s2lo, mask, element_bytes);
             let rhi = if v.l {
                 let mhi = ymm_hi(mask_reg);
-                crate::cpu::interp::simd_instr::blendv_apply(s1hi, s2hi, mhi)
+                crate::cpu::interp::simd_instr::blendv_apply(s1hi, s2hi, mhi, element_bytes)
             }
             else {
                 reg128 { u64: [0, 0] }
@@ -2897,6 +2919,44 @@ pub(crate) unsafe fn run_vex_0f3a(v: &Vex) -> OrPageFault<()> {
             vex_set(dst, rlo, rhi, v.l);
         },
         // VPERMILPS/PD with an immediate
+        // VPERMQ (00) and VPERMPD (01), SDM Vol. 2. VPERMQ reads a 2-bit field
+        // per destination qword, VPERMPD one field for all of them, and the
+        // source is the whole vector -- so in the 256-bit form a lane can cross
+        // the 128-bit boundary and the halves cannot be permuted separately.
+        //
+        // Out-of-range selectors are masked rather than rejected. All eight
+        // immediate bits are live at 256 bits, so `vpermq $0x1b` -- reverse all
+        // lanes, and what clang emits -- is legal; rejecting the unused high bits
+        // once made it #UD. Masking cannot reject an encoding real hardware
+        // accepts, which is the safer direction to be wrong in.
+        0x00 | 0x01 if v.pp == 1 && v.w =>
+        {
+            let lanes = if v.l { 4 } else { 2 };
+            let pick = |lo: reg128, hi: reg128, i: usize| -> u64 {
+                match i {
+                    0 => lo.u64[0],
+                    1 => lo.u64[1],
+                    2 => hi.u64[0],
+                    _ => hi.u64[1],
+                }
+            };
+            let mut out = [0u64; 4];
+            if opcode == 0x01 {
+                let sel = (imm & 3) as usize % lanes;
+                for slot in out.iter_mut().take(lanes) {
+                    *slot = pick(s2lo, s2hi, sel);
+                }
+            }
+            else {
+                for i in 0..lanes {
+                    let sel = ((imm >> (i * 2)) & 3) as usize % lanes;
+                    out[i] = pick(s2lo, s2hi, sel);
+                }
+            }
+            let rlo = reg128 { u64: [out[0], out[1]] };
+            let rhi = if v.l { reg128 { u64: [out[2], out[3]] } } else { reg128 { u64: [0, 0] } };
+            vex_set(dst, rlo, rhi, v.l);
+        },
         0x04 | 0x05 if v.pp == 1 =>
         {
             let perm = |data: reg128, f64: bool| -> reg128 {
@@ -3327,13 +3387,15 @@ pub(crate) unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                     }
                 },
                 6 | 7 if modrm.mod_bits == 3 => {
-                    // RDRAND (0F C7 /6) / RDSEED (0F C7 /7): CF reports success;
-                    // OF/SF/ZF/AF/PF are cleared.
+                    // RDRAND (0F C7 /6) / RDSEED (0F C7 /7): CF reports the
+                    // result, OF/SF/ZF/AF/PF are all set to 0. Clearing only CF
+                    // and OF left the other four visible to the caller.
                     let low = crate::cpu::core::js::get_rand_int() as u32 as u64;
                     let high = crate::cpu::core::js::get_rand_int() as u32 as u64;
                     let random = if size == OpSize::S64 { low | high << 32 } else { low };
                     write_reg(modrm.rm, size, pfx.has_rex(), random);
-                    *flags &= !(FLAG_CF as i32 | FLAG_OF as i32);
+                    *flags &= !((FLAG_CF | FLAG_OF | FLAG_SF | FLAG_ZF | FLAG_AF
+                                 | FLAG_PF) as i32);
                     *flags |= FLAG_CF as i32;
                     *flags_changed = 0;
                 },
@@ -3684,18 +3746,19 @@ pub(crate) unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                             mem_write(address + 160 + i * 16 + 8, OpSize::S64, x.u64[1])?;
                         }
                         if modrm.reg & 7 == 4 {
-                            // XSTATE_BV records the components selected by
-                            // EDX:EAX that are enabled in XCR0.
+                            // XSTATE_BV records mask & XCR0; everything selected
+                            // is written in the standard format.
                             let mask = read_reg(RAX, OpSize::S32, false) as u32 as u64
                                 | (read_reg(RDX, OpSize::S32, false) as u32 as u64) << 32;
-                            let requested = mask & XCR0;
-                            mem_write(address + 512, OpSize::S64, requested)?;
+                            let selected = mask & XCR0;
+                            mem_write(address + 512, OpSize::S64, selected)?;
                             mem_write(address + 520, OpSize::S64, 0)?;
-                            if requested & 4 != 0 {
+                            if selected & 4 != 0 {
+                                // AVX upper halves start at offset 576.
                                 for i in 0..16u64 {
                                     let hi = ymm_hi(i as u8);
-                                    mem_write(address + 576 + i * 16, OpSize::S64, hi.u64[0])?;
-                                    mem_write(address + 576 + i * 16 + 8, OpSize::S64, hi.u64[1])?;
+                                    mem_write(address + XSAVE_YMM_OFFSET as u64 + i * 16, OpSize::S64, hi.u64[0])?;
+                                    mem_write(address + XSAVE_YMM_OFFSET as u64 + i * 16 + 8, OpSize::S64, hi.u64[1])?;
                                 }
                             }
                         }
@@ -3706,6 +3769,55 @@ pub(crate) unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                             crate::cpu::core::trigger_ud();
                             return Ok(());
                         };
+                        // XRSTOR honours the EDX:EAX mask; it is not FXRSTOR
+                        // with an AVX tail. Restoring the legacy region
+                        // unconditionally, as this used to, invents x87 and SSE
+                        // state for a caller that asked for neither.
+                        let mut restore_legacy = true;
+                        let mut initial_legacy = false;
+                        let mut present_ymm = false;
+                        let mut initial_ymm = false;
+                        if modrm.reg & 7 == 5 {
+                            let mask = read_reg(RAX, OpSize::S32, false) as u32 as u64
+                                | (read_reg(RDX, OpSize::S32, false) as u32 as u64) << 32;
+                            let xstate_bv = mem_read(address + 512, OpSize::S64)?;
+                            // A component in the area that XCR0 does not have
+                            // enabled is a #GP.
+                            if xstate_bv & !XCR0 != 0 {
+                                crate::cpu::core::trigger_gp(0);
+                                return Ok(());
+                            }
+                            let requested = mask & XCR0;
+                            restore_legacy = requested & 3 & xstate_bv != 0;
+                            initial_legacy = requested & 3 & !xstate_bv != 0;
+                            present_ymm = requested & 4 & xstate_bv != 0;
+                            initial_ymm = requested & 4 & !xstate_bv != 0;
+                        }
+                        if initial_legacy {
+                            // Initialize all eight x87 registers as empty.
+                            set_control_word(0x37F);
+                            fpu_set_status_word(0);
+                            *fpu_stack_empty = 0xFF;
+                            *mxcsr = 0x1F80;
+                            for i in 0..16u64 {
+                                xmm_set(i as u8, reg128 { u64: [0, 0] });
+                            }
+                        }
+                        if !restore_legacy {
+                            if present_ymm {
+                                for i in 0..16u64 {
+                                    let lo = mem_read(address + XSAVE_YMM_OFFSET as u64 + i * 16, OpSize::S64)?;
+                                    let hi = mem_read(address + XSAVE_YMM_OFFSET as u64 + i * 16 + 8, OpSize::S64)?;
+                                    ymm_set_hi(i as u8, reg128 { u64: [lo, hi] });
+                                }
+                            }
+                            if initial_ymm {
+                                for i in 0..16u64 {
+                                    ymm_set_hi(i as u8, reg128 { u64: [0, 0] });
+                                }
+                            }
+                            return Ok(());
+                        }
                         set_control_word(mem_read(address, OpSize::S16)? as u16);
                         fpu_set_status_word(mem_read(address + 2, OpSize::S16)? as u16);
                         *fpu_stack_empty = !mem_read(address + 4, OpSize::S8)? as u8;
@@ -3726,14 +3838,19 @@ pub(crate) unsafe fn run_0f(pfx: &Prefixes) -> OrPageFault<()> {
                             let high = mem_read(address + 160 + i * 16 + 8, OpSize::S64)?;
                             xmm_set(i as u8, reg128 { u64: [low, high] });
                         }
-                        if modrm.reg & 7 == 5 {
-                            let xstate_bv = mem_read(address + 512, OpSize::S64)?;
-                            if xstate_bv & 4 != 0 {
-                                for i in 0..16u64 {
-                                    let lo = mem_read(address + 576 + i * 16, OpSize::S64)?;
-                                    let hi = mem_read(address + 576 + i * 16 + 8, OpSize::S64)?;
-                                    ymm_set_hi(i as u8, reg128 { u64: [lo, hi] });
-                                }
+                        if !restore_legacy {
+                            return Ok(());
+                        }
+                        if present_ymm {
+                            for i in 0..16u64 {
+                                let lo = mem_read(address + XSAVE_YMM_OFFSET as u64 + i * 16, OpSize::S64)?;
+                                let hi = mem_read(address + XSAVE_YMM_OFFSET as u64 + i * 16 + 8, OpSize::S64)?;
+                                ymm_set_hi(i as u8, reg128 { u64: [lo, hi] });
+                            }
+                        }
+                        if initial_ymm {
+                            for i in 0..16u64 {
+                                ymm_set_hi(i as u8, reg128 { u64: [0, 0] });
                             }
                         }
                     },

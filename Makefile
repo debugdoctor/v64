@@ -391,7 +391,22 @@ jit64-tests: build/v64-debug.wasm
 	node tests/ide-interrupts.js
 	node tests/jit64/e2e.js
 	node tests/jit64/entry-cache.js
+	node tests/jit64/bmi1.js
+	node tests/jit64/sse-float.js
+	node tests/jit64/xsave.js
 	JIT64_DIFF_CASES=500 node tests/jit64/differential.js
+
+# Freestanding instruction reference tests.
+kat-tests: build/v64.wasm
+	$(MAKE) -C tests/kat check
+
+# Verify instruction encodings in the JS tests.
+vex-encoding-check:
+	python3 tests/vex-encoding-check.py
+
+# Check CPUID advertisements against test coverage.
+cpuid-coverage-tests: build/v64-debug.wasm
+	node tests/cpuid-coverage.js
 
 # CPU microbenchmarks (interpreter vs jit64); MICROBENCH_OUT saves the results.
 jit64-microbench: build/v64-debug.wasm
@@ -461,7 +476,7 @@ api-tests: build/v64-debug.wasm
 	#./tests/api/reboot-buildroot.js # https://github.com/copy/v86/issues/636
 	./tests/api/pic.js
 
-all-tests: eslint check-cpu-config kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests
+all-tests: eslint check-cpu-config vex-encoding-check cpuid-coverage-tests kat-tests kvm-unit-test qemutests qemutests-release jitpagingtests api-tests nasmtests nasmtests-force-jit rust-test tests expect-tests
 	# Skipping:
 	# - devices-test (hangs)
 
